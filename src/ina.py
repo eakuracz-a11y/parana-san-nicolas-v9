@@ -1,28 +1,19 @@
 import requests
 import pandas as pd
 
+
 # ============================================================
 # CONFIGURACIÓN
 # ============================================================
 
 INA_URL = "https://alerta.ina.gob.ar/pub/datos/datos"
 
-STATIONS = [
-    "Corrientes",
-    "Goya",
-    "La Paz",
-    "Paraná",
-    "Diamante",
-    "Rosario",
-    "Villa Constitución",
-    "San Nicolás",
-]
-
-SAN_NICOLAS_SERIES_ID = 36
+SAN_NICOLAS_SITE_CODE = 36
+NIVEL_VAR_ID = 2
 
 
 # ============================================================
-# CONSULTA SIMPLE AL INA
+# CONSULTA AL INA
 # ============================================================
 
 def get_series(start, end):
@@ -30,15 +21,23 @@ def get_series(start, end):
     params = {
         "timeStart": str(start),
         "timeEnd": str(end),
-        "seriesId": SAN_NICOLAS_SERIES_ID,
+        "siteCode": SAN_NICOLAS_SITE_CODE,
+        "varId": NIVEL_VAR_ID,
         "format": "json",
     }
 
-    response = requests.get(INA_URL, params=params, timeout=30)
+    response = requests.get(
+        INA_URL,
+        params=params,
+        timeout=30,
+    )
+
     response.raise_for_status()
 
     data = response.json()
 
+    # La API puede devolver lista directamente
+    # o un diccionario que contiene los datos.
     if isinstance(data, dict):
 
         if "data" in data:
@@ -47,57 +46,93 @@ def get_series(start, end):
         elif "results" in data:
             data = data["results"]
 
+        elif "observaciones" in data:
+            data = data["observaciones"]
+
         else:
-            data = []
+            # Intentar detectar alguna lista dentro del JSON
+            lista = None
+
+            for value in data.values():
+                if isinstance(value, list):
+                    lista = value
+                    break
+
+            data = lista if lista is not None else []
+
+    if not isinstance(data, list):
+        data = []
 
     df = pd.DataFrame(data)
 
     if df.empty:
         return df
 
-    # Normalizar columnas
+    # ========================================================
+    # NORMALIZAR NOMBRES DE COLUMNAS
+    # ========================================================
+
+    rename_map = {}
+
     for col in df.columns:
 
-        name = str(col).lower()
+        name = str(col).strip().lower()
 
-        if name in ["fecha", "datetime", "timestamp"]:
-            df = df.rename(columns={col: "datetime"})
+        if name in [
+            "fecha",
+            "datetime",
+            "timestamp",
+            "timestart",
+            "time_start",
+            "date",
+        ]:
+            rename_map[col] = "datetime"
 
-        if name in ["valor", "nivel", "altura", "value"]:
-            df = df.rename(columns={col: "value"})
+        elif name in [
+            "valor",
+            "value",
+            "nivel",
+            "altura",
+            "valor_num",
+        ]:
+            rename_map[col] = "value"
+
+    df = df.rename(columns=rename_map)
 
     if "datetime" in df.columns:
-        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+        df["datetime"] = pd.to_datetime(
+            df["datetime"],
+            errors="coerce"
+        )
 
     if "value" in df.columns:
-        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        df["value"] = pd.to_numeric(
+            df["value"],
+            errors="coerce"
+        )
 
     return df
 
 
 # ============================================================
-# FUNCIÓN QUE USA app.py
+# FUNCIÓN UTILIZADA POR app.py
 # ============================================================
 
 def observed(start, end):
 
-    from datetime import datetime, timedelta
-import pandas as pd
-
-def observed(start, end):
-
     try:
-        # Convertir fechas
+
         start_dt = pd.to_datetime(start)
         end_dt = pd.to_datetime(end)
 
-        # Evitar fechas futuras
+        # Fecha actual
         today = pd.Timestamp.today().normalize()
 
+        # No consultar el futuro
         if end_dt > today:
             end_dt = today
 
-        # Si el rango es inválido, usar últimos 30 días
+        # Corregir rango inválido
         if start_dt >= end_dt:
             start_dt = end_dt - pd.Timedelta(days=30)
 
@@ -109,27 +144,59 @@ def observed(start, end):
         if df.empty:
             return (
                 pd.DataFrame(),
-                "El INA no devolvió datos para el período seleccionado."
+                "El INA respondió, pero no devolvió observaciones para San Nicolás en el período seleccionado."
             )
 
         if "datetime" not in df.columns:
-            return pd.DataFrame(), "Falta columna de fecha."
+            return (
+                pd.DataFrame(),
+                f"El INA devolvió datos pero no se encontró la columna de fecha. Columnas recibidas: {list(df.columns)}"
+            )
 
         if "value" not in df.columns:
-            return pd.DataFrame(), "Falta columna de nivel."
+            return (
+                pd.DataFrame(),
+                f"El INA devolvió datos pero no se encontró la columna de nivel. Columnas recibidas: {list(df.columns)}"
+            )
 
-        df = df.dropna(subset=["datetime", "value"])
+        df = df.dropna(
+            subset=["datetime", "value"]
+        )
 
         if df.empty:
-            return pd.DataFrame(), "No hay valores válidos de nivel."
+            return (
+                pd.DataFrame(),
+                "El INA devolvió observaciones, pero no contienen valores válidos."
+            )
 
-        df = df.sort_values("datetime").reset_index(drop=True)
+        df = (
+            df
+            .sort_values("datetime")
+            .reset_index(drop=True)
+        )
 
         return df, None
 
+    except requests.exceptions.Timeout:
+
+        return (
+            pd.DataFrame(),
+            "La consulta al INA excedió el tiempo máximo de espera."
+        )
+
+    except requests.exceptions.RequestException as exc:
+
+        return (
+            pd.DataFrame(),
+            f"Error de conexión con el INA: {exc}"
+        )
+
     except Exception as exc:
 
-        return pd.DataFrame(), str(exc)
+        return (
+            pd.DataFrame(),
+            f"Error procesando datos del INA: {exc}"
+        )
 
 
 # ============================================================
@@ -141,7 +208,8 @@ def forecast_meta():
     return {
         "fuente": "Instituto Nacional del Agua (INA)",
         "estacion": "San Nicolás",
-        "serie": SAN_NICOLAS_SERIES_ID,
+        "siteCode": SAN_NICOLAS_SITE_CODE,
         "variable": "Nivel hidrométrico",
+        "varId": NIVEL_VAR_ID,
         "unidad": "m",
     }
