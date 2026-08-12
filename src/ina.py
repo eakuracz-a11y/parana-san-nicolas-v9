@@ -4,7 +4,7 @@ import pandas as pd
 
 INA_BASE_URL = "https://alerta.ina.gob.ar/pub/datos"
 
-
+# Estaciones utilizadas por la aplicación
 STATIONS = [
     "Corrientes",
     "Goya",
@@ -16,50 +16,29 @@ STATIONS = [
     "San Nicolás",
 ]
 
+# Serie observada del nivel del río Paraná
+# San Nicolás - INA
+SAN_NICOLAS_SERIES_ID = 36
 
-def get_series(
-    start,
-    end,
-    site_code=None,
-    var_id=None,
-    series_id=None
-):
+# Variable 2 = nivel / altura hidrométrica
+SAN_NICOLAS_VAR_ID = 2
+
+
+def observed(start: str, end: str):
     """
-    Consulta datos hidrométricos observados del INA.
+    Obtiene datos observados del nivel del río Paraná
+    para la estación San Nicolás.
 
-    La API pública actual del INA utiliza:
-
-    https://alerta.ina.gob.ar/pub/datos/datos
-
-    Parámetros:
-    - timeStart
-    - timeEnd
-    - seriesId
-    o:
-    - siteCode
-    - varId
+    Fuente:
+    Instituto Nacional del Agua (INA)
     """
 
     params = {
         "timeStart": start,
         "timeEnd": end,
+        "seriesId": SAN_NICOLAS_SERIES_ID,
         "format": "json",
     }
-
-    # La API permite utilizar seriesId
-    # o siteCode + varId.
-    if series_id is not None:
-        params["seriesId"] = series_id
-
-    else:
-        if site_code is None or var_id is None:
-            raise ValueError(
-                "Debe proporcionar series_id o "
-                "site_code + var_id."
-            )
-
-        params["siteCode"] = site_code
-        params["varId"] = var_id
 
     url = f"{INA_BASE_URL}/datos"
 
@@ -75,8 +54,8 @@ def get_series(
 
         data = response.json()
 
-        # Algunas respuestas del INA pueden venir
-        # encapsuladas dentro de "data" o "results".
+        # Algunas respuestas pueden venir dentro
+        # de "data" o "results".
         if isinstance(data, dict):
 
             if "data" in data:
@@ -98,20 +77,93 @@ def get_series(
     except requests.exceptions.RequestException as exc:
 
         raise RuntimeError(
-            f"Error al consultar la API del INA: {exc}"
+            f"No fue posible consultar los datos del INA: {exc}"
         ) from exc
 
     except ValueError as exc:
 
         raise RuntimeError(
-            f"El INA devolvió una respuesta que "
-            f"no pudo interpretarse: {exc}"
+            f"La respuesta del INA no pudo interpretarse: {exc}"
+        ) from exc
+
+
+def get_series(
+    start,
+    end,
+    site_code=None,
+    var_id=None,
+    series_id=None
+):
+    """
+    Función genérica para consultar series del INA.
+
+    Puede utilizar:
+    - seriesId
+    o
+    - siteCode + varId
+    """
+
+    params = {
+        "timeStart": start,
+        "timeEnd": end,
+        "format": "json",
+    }
+
+    if series_id is not None:
+
+        params["seriesId"] = series_id
+
+    else:
+
+        if site_code is None or var_id is None:
+
+            raise ValueError(
+                "Debe proporcionar series_id "
+                "o site_code + var_id."
+            )
+
+        params["siteCode"] = site_code
+        params["varId"] = var_id
+
+    url = f"{INA_BASE_URL}/datos"
+
+    try:
+
+        response = requests.get(
+            url,
+            params=params,
+            timeout=60
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if isinstance(data, dict):
+
+            if "data" in data:
+                data = data["data"]
+
+            elif "results" in data:
+                data = data["results"]
+
+            else:
+                data = [data]
+
+        df = pd.DataFrame(data)
+
+        return df
+
+    except requests.exceptions.RequestException as exc:
+
+        raise RuntimeError(
+            f"Error al consultar la API del INA: {exc}"
         ) from exc
 
 
 def forecast_meta():
     """
-    Información sobre el pronóstico publicado por INA.
+    Información sobre el pronóstico.
     """
 
     return {
@@ -120,8 +172,8 @@ def forecast_meta():
         "estado": "Consulta disponible",
         "observacion": (
             "La aplicación utiliza datos hidrométricos "
-            "observados del INA. El pronóstico estadístico "
-            "de Paraná San Nicolás es generado por el "
-            "modelo experimental propio."
+            "observados del INA. El pronóstico de Paraná "
+            "San Nicolás es generado por el modelo "
+            "experimental propio."
         ),
     }
