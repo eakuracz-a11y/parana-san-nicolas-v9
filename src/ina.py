@@ -11,10 +11,7 @@ INA_BASE_URL = "https://alerta.ina.gob.ar/pub/datos"
 INA_SERIES_URL = f"{INA_BASE_URL}/series"
 INA_DATOS_URL = f"{INA_BASE_URL}/datos"
 
-# San Nicolás
 SAN_NICOLAS_SITE_CODE = 36
-
-# Altura hidrométrica
 NIVEL_VAR_ID = 2
 
 
@@ -35,15 +32,11 @@ STATIONS = [
 # ============================================================
 
 def crear_sesion():
-
     session = requests.Session()
 
     session.headers.update(
         {
-            "User-Agent": (
-                "Mozilla/5.0 "
-                "(compatible; Parana-San-Nicolas-V9/1.0)"
-            ),
+            "User-Agent": "Parana-San-Nicolas-V9/1.0",
             "Accept": "application/json,text/plain,*/*",
         }
     )
@@ -52,75 +45,67 @@ def crear_sesion():
 
 
 # ============================================================
-# NORMALIZAR JSON
+# AUXILIAR PARA RESPUESTAS JSON
 # ============================================================
 
 def extraer_lista(data):
     """
-    Intenta obtener una lista desde distintas estructuras JSON
-    posibles devueltas por la API del INA.
+    Busca una lista dentro de distintas estructuras JSON
+    posibles devueltas por INA.
     """
 
-    if data is None:
-        return []
-
-    # Respuesta directa como lista
     if isinstance(data, list):
         return data
 
-    # Respuesta como diccionario
-    if isinstance(data, dict):
+    if not isinstance(data, dict):
+        return []
 
-        claves_posibles = [
-            "data",
-            "datos",
-            "results",
-            "result",
-            "series",
-            "observaciones",
-            "items",
-        ]
+    claves_posibles = [
+        "data",
+        "datos",
+        "results",
+        "result",
+        "series",
+        "observaciones",
+        "items",
+    ]
 
-        for clave in claves_posibles:
+    for clave in claves_posibles:
 
-            if clave in data:
+        if clave in data:
 
-                valor = data[clave]
-
-                if isinstance(valor, list):
-                    return valor
-
-                if isinstance(valor, dict):
-                    resultado = extraer_lista(valor)
-
-                    if resultado:
-                        return resultado
-
-        # Buscar cualquier lista dentro del diccionario
-        for valor in data.values():
+            valor = data[clave]
 
             if isinstance(valor, list):
                 return valor
 
             if isinstance(valor, dict):
 
-                resultado = extraer_lista(valor)
+                lista = extraer_lista(valor)
 
-                if resultado:
-                    return resultado
+                if lista:
+                    return lista
+
+    for valor in data.values():
+
+        if isinstance(valor, list):
+            return valor
+
+        if isinstance(valor, dict):
+
+            lista = extraer_lista(valor)
+
+            if lista:
+                return lista
 
     return []
 
 
 # ============================================================
-# BUSCAR ID DE SERIE
+# CONSULTA DE SERIES
 # ============================================================
 
-def obtener_series():
-    """
-    Consulta las series observadas disponibles para
-    San Nicolás y la variable altura hidrométrica.
-    """
+def consultar_series_diagnostico():
 
     params = {
         "siteCode": SAN_NICOLAS_SITE_CODE,
@@ -135,102 +120,258 @@ def obtener_series():
         timeout=30,
     )
 
+    diagnostico = {
+        "url_series": response.url,
+        "status_series": response.status_code,
+        "content_type_series": response.headers.get(
+            "Content-Type",
+            "",
+        ),
+        "texto_series": response.text[:5000],
+    }
+
     response.raise_for_status()
 
     try:
-        data = response.json()
+
+        json_data = response.json()
+
+        diagnostico["json_series"] = json_data
 
     except ValueError:
-        raise RuntimeError(
-            "El INA respondió a la consulta de series, "
-            "pero la respuesta no es JSON."
-        )
 
-    registros = extraer_lista(data)
+        diagnostico["json_series"] = None
 
-    return registros
+        return [], diagnostico
+
+    registros = extraer_lista(
+        json_data
+    )
+
+    diagnostico[
+        "cantidad_series"
+    ] = len(registros)
+
+    return registros, diagnostico
 
 
-def encontrar_series_id():
-    """
-    Obtiene automáticamente un seriesId observado
-    correspondiente a San Nicolás.
-    """
+# ============================================================
+# IDENTIFICAR SERIES ID
+# ============================================================
 
-    series = obtener_series()
+def extraer_series_ids(series):
 
-    if not series:
-        return None
-
-    ids_encontrados = []
+    encontrados = []
 
     for registro in series:
 
-        if not isinstance(registro, dict):
+        if not isinstance(
+            registro,
+            dict,
+        ):
             continue
 
-        # ----------------------------------------------------
-        # Posibles nombres del ID
-        # ----------------------------------------------------
+        # Guardamos información completa
+        info = {
+            "registro": registro,
+            "seriesId": None,
+        }
 
-        posibles_claves = [
+        for clave in [
             "id",
             "seriesId",
             "series_id",
             "serieId",
             "serie_id",
-        ]
-
-        for clave in posibles_claves:
+        ]:
 
             if clave in registro:
 
-                valor = registro.get(clave)
+                valor = registro.get(
+                    clave
+                )
 
                 if valor is not None:
 
                     try:
-                        ids_encontrados.append(int(valor))
 
-                    except (TypeError, ValueError):
-                        pass
+                        info[
+                            "seriesId"
+                        ] = int(valor)
 
-                    break
+                    except Exception:
 
-    if not ids_encontrados:
-        return None
+                        info[
+                            "seriesId"
+                        ] = valor
 
-    # Usar primera serie observada disponible
-    return ids_encontrados[0]
+                break
+
+        encontrados.append(
+            info
+        )
+
+    return encontrados
 
 
 # ============================================================
-# NORMALIZAR DATOS OBSERVADOS
+# CONSULTAR DATOS POR SERIES ID
 # ============================================================
 
-def normalizar_dataframe(registros):
+def consultar_datos_series(
+    series_id,
+    start,
+    end,
+):
+
+    params = {
+        "timeStart": str(start),
+        "timeEnd": str(end),
+        "seriesId": series_id,
+    }
+
+    session = crear_sesion()
+
+    response = session.get(
+        INA_DATOS_URL,
+        params=params,
+        timeout=30,
+    )
+
+    diagnostico = {
+        "metodo": "seriesId",
+        "seriesId": series_id,
+        "url_datos": response.url,
+        "status_datos": response.status_code,
+        "content_type_datos": response.headers.get(
+            "Content-Type",
+            "",
+        ),
+        "texto_datos": response.text[:5000],
+    }
+
+    response.raise_for_status()
+
+    try:
+
+        json_data = response.json()
+
+        diagnostico[
+            "json_datos"
+        ] = json_data
+
+    except ValueError:
+
+        diagnostico[
+            "json_datos"
+        ] = None
+
+        return [], diagnostico
+
+    registros = extraer_lista(
+        json_data
+    )
+
+    diagnostico[
+        "cantidad_registros"
+    ] = len(registros)
+
+    return registros, diagnostico
+
+
+# ============================================================
+# CONSULTA DIRECTA SITE + VARIABLE
+# ============================================================
+
+def consultar_datos_directo(
+    start,
+    end,
+):
+
+    params = {
+        "timeStart": str(start),
+        "timeEnd": str(end),
+        "siteCode": SAN_NICOLAS_SITE_CODE,
+        "varId": NIVEL_VAR_ID,
+    }
+
+    session = crear_sesion()
+
+    response = session.get(
+        INA_DATOS_URL,
+        params=params,
+        timeout=30,
+    )
+
+    diagnostico = {
+        "metodo": "siteCode+varId",
+        "siteCode": SAN_NICOLAS_SITE_CODE,
+        "varId": NIVEL_VAR_ID,
+        "url_datos": response.url,
+        "status_datos": response.status_code,
+        "content_type_datos": response.headers.get(
+            "Content-Type",
+            "",
+        ),
+        "texto_datos": response.text[:5000],
+    }
+
+    response.raise_for_status()
+
+    try:
+
+        json_data = response.json()
+
+        diagnostico[
+            "json_datos"
+        ] = json_data
+
+    except ValueError:
+
+        diagnostico[
+            "json_datos"
+        ] = None
+
+        return [], diagnostico
+
+    registros = extraer_lista(
+        json_data
+    )
+
+    diagnostico[
+        "cantidad_registros"
+    ] = len(registros)
+
+    return registros, diagnostico
+
+
+# ============================================================
+# NORMALIZAR DATAFRAME
+# ============================================================
+
+def normalizar_dataframe(
+    registros
+):
 
     if not registros:
         return pd.DataFrame()
 
-    df = pd.DataFrame(registros)
+    df = pd.DataFrame(
+        registros
+    )
 
     if df.empty:
         return df
 
     rename_map = {}
 
-    # ========================================================
-    # DETECTAR COLUMNAS
-    # ========================================================
-
     for col in df.columns:
 
-        nombre = str(col).strip().lower()
-
-        # ----------------------------------------------------
-        # FECHA
-        # ----------------------------------------------------
+        nombre = (
+            str(col)
+            .strip()
+            .lower()
+        )
 
         if nombre in [
             "fecha",
@@ -244,11 +385,9 @@ def normalizar_dataframe(registros):
             "observed_at",
         ]:
 
-            rename_map[col] = "datetime"
-
-        # ----------------------------------------------------
-        # VALOR
-        # ----------------------------------------------------
+            rename_map[
+                col
+            ] = "datetime"
 
         elif nombre in [
             "valor",
@@ -261,21 +400,25 @@ def normalizar_dataframe(registros):
             "measurement",
         ]:
 
-            rename_map[col] = "value"
+            rename_map[
+                col
+            ] = "value"
 
     df = df.rename(
         columns=rename_map
     )
 
-    # ========================================================
-    # BÚSQUEDA SECUNDARIA DE FECHA
-    # ========================================================
+    # --------------------------------------------------------
+    # Buscar fecha si no quedó normalizada
+    # --------------------------------------------------------
 
     if "datetime" not in df.columns:
 
         for col in df.columns:
 
-            nombre = str(col).lower()
+            nombre = str(
+                col
+            ).lower()
 
             if (
                 "fecha" in nombre
@@ -291,15 +434,17 @@ def normalizar_dataframe(registros):
 
                 break
 
-    # ========================================================
-    # BÚSQUEDA SECUNDARIA DE NIVEL
-    # ========================================================
+    # --------------------------------------------------------
+    # Buscar nivel si no quedó normalizado
+    # --------------------------------------------------------
 
     if "value" not in df.columns:
 
         for col in df.columns:
 
-            nombre = str(col).lower()
+            nombre = str(
+                col
+            ).lower()
 
             if (
                 "valor" in nombre
@@ -318,20 +463,20 @@ def normalizar_dataframe(registros):
 
                 break
 
-    # ========================================================
-    # CONVERTIR TIPOS
-    # ========================================================
-
     if "datetime" in df.columns:
 
-        df["datetime"] = pd.to_datetime(
+        df[
+            "datetime"
+        ] = pd.to_datetime(
             df["datetime"],
             errors="coerce",
         )
 
     if "value" in df.columns:
 
-        df["value"] = pd.to_numeric(
+        df[
+            "value"
+        ] = pd.to_numeric(
             df["value"],
             errors="coerce",
         )
@@ -340,97 +485,7 @@ def normalizar_dataframe(registros):
 
 
 # ============================================================
-# CONSULTAR DATOS POR SERIES ID
-# ============================================================
-
-def consultar_por_series_id(
-    series_id,
-    start,
-    end,
-):
-
-    params = {
-        "timeStart": str(start),
-        "timeEnd": str(end),
-        "seriesId": int(series_id),
-    }
-
-    session = crear_sesion()
-
-    response = session.get(
-        INA_DATOS_URL,
-        params=params,
-        timeout=30,
-    )
-
-    response.raise_for_status()
-
-    try:
-
-        data = response.json()
-
-    except ValueError:
-
-        raise RuntimeError(
-            "El INA respondió a la consulta de datos, "
-            "pero la respuesta no es JSON."
-        )
-
-    registros = extraer_lista(data)
-
-    return normalizar_dataframe(
-        registros
-    )
-
-
-# ============================================================
-# CONSULTA DIRECTA siteCode + varId
-# ============================================================
-
-def consultar_por_estacion(
-    start,
-    end,
-):
-
-    params = {
-        "timeStart": str(start),
-        "timeEnd": str(end),
-        "siteCode": SAN_NICOLAS_SITE_CODE,
-        "varId": NIVEL_VAR_ID,
-    }
-
-    session = crear_sesion()
-
-    response = session.get(
-        INA_DATOS_URL,
-        params=params,
-        timeout=30,
-    )
-
-    response.raise_for_status()
-
-    try:
-
-        data = response.json()
-
-    except ValueError:
-
-        raise RuntimeError(
-            "El INA respondió a la consulta directa, "
-            "pero la respuesta no es JSON."
-        )
-
-    registros = extraer_lista(
-        data
-    )
-
-    return normalizar_dataframe(
-        registros
-    )
-
-
-# ============================================================
-# FUNCIÓN PRINCIPAL DE CONSULTA
+# CONSULTA PRINCIPAL
 # ============================================================
 
 def get_series(
@@ -438,60 +493,158 @@ def get_series(
     end,
 ):
 
-    # --------------------------------------------------------
-    # MÉTODO 1
-    # Buscar automáticamente el seriesId observado
-    # --------------------------------------------------------
+    diagnostico_general = {
+        "configuracion": {
+            "siteCode": SAN_NICOLAS_SITE_CODE,
+            "varId": NIVEL_VAR_ID,
+            "timeStart": str(start),
+            "timeEnd": str(end),
+        }
+    }
 
-    series_id = None
+    # ========================================================
+    # PASO 1: BUSCAR SERIES
+    # ========================================================
 
     try:
 
-        series_id = encontrar_series_id()
+        series, diag_series = (
+            consultar_series_diagnostico()
+        )
 
-    except Exception:
-        # Si falla la búsqueda de series,
-        # todavía intentamos consulta directa.
-        series_id = None
+        diagnostico_general[
+            "consulta_series"
+        ] = diag_series
 
-    # --------------------------------------------------------
-    # CONSULTAR POR SERIES ID
-    # --------------------------------------------------------
+    except Exception as exc:
 
-    if series_id is not None:
+        series = []
+
+        diagnostico_general[
+            "error_series"
+        ] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    # ========================================================
+    # MOSTRAR IDS DETECTADOS
+    # ========================================================
+
+    series_info = extraer_series_ids(
+        series
+    )
+
+    diagnostico_general[
+        "series_detectadas"
+    ] = series_info
+
+    # ========================================================
+    # PASO 2: PROBAR TODAS LAS SERIES ENCONTRADAS
+    # ========================================================
+
+    intentos = []
+
+    for info in series_info:
+
+        series_id = info.get(
+            "seriesId"
+        )
+
+        if series_id is None:
+            continue
 
         try:
 
-            df = consultar_por_series_id(
-                series_id=series_id,
+            registros, diag = (
+                consultar_datos_series(
+                    series_id=series_id,
+                    start=start,
+                    end=end,
+                )
+            )
+
+            intentos.append(
+                diag
+            )
+
+            if registros:
+
+                diagnostico_general[
+                    "intentos_datos"
+                ] = intentos
+
+                diagnostico_general[
+                    "serie_utilizada"
+                ] = series_id
+
+                df = normalizar_dataframe(
+                    registros
+                )
+
+                return (
+                    df,
+                    diagnostico_general,
+                )
+
+        except Exception as exc:
+
+            intentos.append(
+                {
+                    "seriesId": series_id,
+                    "error": (
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                }
+            )
+
+    diagnostico_general[
+        "intentos_datos"
+    ] = intentos
+
+    # ========================================================
+    # PASO 3: CONSULTA DIRECTA
+    # ========================================================
+
+    try:
+
+        registros, diag_directo = (
+            consultar_datos_directo(
                 start=start,
                 end=end,
             )
+        )
 
-            if not df.empty:
+        diagnostico_general[
+            "consulta_directa"
+        ] = diag_directo
 
-                df["series_id"] = series_id
+        if registros:
 
-                return df
+            df = normalizar_dataframe(
+                registros
+            )
 
-        except Exception:
-            pass
+            return (
+                df,
+                diagnostico_general,
+            )
 
-    # --------------------------------------------------------
-    # MÉTODO 2
-    # Consulta directa por estación y variable
-    # --------------------------------------------------------
+    except Exception as exc:
 
-    df = consultar_por_estacion(
-        start=start,
-        end=end,
+        diagnostico_general[
+            "error_consulta_directa"
+        ] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    return (
+        pd.DataFrame(),
+        diagnostico_general,
     )
-
-    return df
 
 
 # ============================================================
-# FUNCIÓN UTILIZADA POR app.py
+# FUNCIÓN UTILIZADA POR APP.PY
 # ============================================================
 
 def observed(
@@ -500,10 +653,6 @@ def observed(
 ):
 
     try:
-
-        # ====================================================
-        # FECHAS
-        # ====================================================
 
         start_dt = pd.to_datetime(
             start,
@@ -519,43 +668,40 @@ def observed(
 
             return (
                 pd.DataFrame(),
-                "La fecha inicial no es válida.",
+                "Fecha inicial inválida.",
             )
 
         if pd.isna(end_dt):
 
             return (
                 pd.DataFrame(),
-                "La fecha final no es válida.",
+                "Fecha final inválida.",
             )
 
-        # ----------------------------------------------------
-        # Fecha actual
-        # ----------------------------------------------------
+        today = (
+            pd.Timestamp
+            .today()
+            .normalize()
+        )
 
-        today = pd.Timestamp.today().normalize()
-
         # ----------------------------------------------------
-        # No consultar fechas futuras
+        # No consultar futuro
         # ----------------------------------------------------
 
         if end_dt > today:
 
             end_dt = today
 
-        # ----------------------------------------------------
-        # Rango inválido
-        # ----------------------------------------------------
-
         if start_dt > end_dt:
 
             return (
                 pd.DataFrame(),
-                "La fecha Desde no puede ser posterior "
-                "a la fecha disponible más reciente.",
+                (
+                    "La fecha Desde no puede ser "
+                    "posterior a la fecha disponible."
+                ),
             )
 
-        # Si son iguales, ampliamos 1 día hacia atrás.
         if start_dt == end_dt:
 
             start_dt = (
@@ -564,10 +710,10 @@ def observed(
             )
 
         # ====================================================
-        # CONSULTAR API
+        # CONSULTA
         # ====================================================
 
-        df = get_series(
+        df, diagnostico = get_series(
             start=start_dt.strftime(
                 "%Y-%m-%d"
             ),
@@ -576,27 +722,15 @@ def observed(
             ),
         )
 
+        # Guardamos diagnóstico en atributo
+        # para que app.py pueda mostrarlo.
+        observed.last_diagnostic = (
+            diagnostico
+        )
+
         # ====================================================
-        # VALIDAR RESPUESTA
+        # SIN DATOS
         # ====================================================
-
-        if df is None:
-
-            return (
-                pd.DataFrame(),
-                "El INA no devolvió una respuesta válida.",
-            )
-
-        if not isinstance(
-            df,
-            pd.DataFrame,
-        ):
-
-            return (
-                pd.DataFrame(),
-                "La respuesta del INA no tiene "
-                "el formato esperado.",
-            )
 
         if df.empty:
 
@@ -604,13 +738,13 @@ def observed(
                 pd.DataFrame(),
                 (
                     "El INA respondió, pero no devolvió "
-                    "observaciones para San Nicolás "
-                    "en el período seleccionado."
+                    "observaciones para San Nicolás en "
+                    "el período seleccionado."
                 ),
             )
 
         # ====================================================
-        # VALIDAR FECHA
+        # VALIDAR COLUMNAS
         # ====================================================
 
         if "datetime" not in df.columns:
@@ -618,24 +752,20 @@ def observed(
             return (
                 pd.DataFrame(),
                 (
-                    "El INA devolvió registros, pero no fue "
-                    "posible identificar la fecha. "
-                    f"Columnas recibidas: {list(df.columns)}"
+                    "INA devolvió registros, pero no se "
+                    "identificó la columna de fecha. "
+                    f"Columnas: {list(df.columns)}"
                 ),
             )
-
-        # ====================================================
-        # VALIDAR NIVEL
-        # ====================================================
 
         if "value" not in df.columns:
 
             return (
                 pd.DataFrame(),
                 (
-                    "El INA devolvió registros, pero no fue "
-                    "posible identificar el nivel. "
-                    f"Columnas recibidas: {list(df.columns)}"
+                    "INA devolvió registros, pero no se "
+                    "identificó la columna de nivel. "
+                    f"Columnas: {list(df.columns)}"
                 ),
             )
 
@@ -660,88 +790,62 @@ def observed(
             ]
         )
 
-        if df.empty:
-
-            return (
-                pd.DataFrame(),
-                (
-                    "El INA devolvió registros, pero "
-                    "ninguno contiene fecha y nivel válidos."
-                ),
-            )
-
-        # ----------------------------------------------------
-        # Orden cronológico
-        # ----------------------------------------------------
-
         df = (
             df
             .sort_values("datetime")
             .reset_index(drop=True)
         )
 
+        if df.empty:
+
+            return (
+                pd.DataFrame(),
+                (
+                    "INA devolvió registros, pero "
+                    "ninguno contiene fecha y nivel válidos."
+                ),
+            )
+
         return (
             df,
             None,
         )
 
-    # ========================================================
-    # ERRORES HTTP
-    # ========================================================
-
-    except requests.exceptions.Timeout:
-
-        return (
-            pd.DataFrame(),
-            (
-                "La consulta al INA excedió "
-                "el tiempo máximo de espera."
-            ),
-        )
-
-    except requests.exceptions.HTTPError as exc:
-
-        return (
-            pd.DataFrame(),
-            (
-                "El servidor del INA devolvió "
-                f"un error HTTP: {exc}"
-            ),
-        )
-
-    except requests.exceptions.ConnectionError:
-
-        return (
-            pd.DataFrame(),
-            (
-                "No fue posible establecer conexión "
-                "con el servidor del INA."
-            ),
-        )
-
-    except requests.exceptions.RequestException as exc:
-
-        return (
-            pd.DataFrame(),
-            (
-                "Error de comunicación con el INA: "
-                f"{exc}"
-            ),
-        )
-
-    # ========================================================
-    # OTROS ERRORES
-    # ========================================================
-
     except Exception as exc:
 
+        observed.last_diagnostic = {
+            "error_general": (
+                f"{type(exc).__name__}: {exc}"
+            )
+        }
+
         return (
             pd.DataFrame(),
             (
-                "Error procesando los datos del INA: "
+                "Error procesando INA: "
                 f"{type(exc).__name__}: {exc}"
             ),
         )
+
+
+# ============================================================
+# ATRIBUTO DE DIAGNÓSTICO
+# ============================================================
+
+observed.last_diagnostic = {}
+
+
+# ============================================================
+# OBTENER DIAGNÓSTICO DESDE APP.PY
+# ============================================================
+
+def get_last_diagnostic():
+
+    return getattr(
+        observed,
+        "last_diagnostic",
+        {},
+    )
 
 
 # ============================================================
@@ -750,22 +854,14 @@ def observed(
 
 def forecast_meta():
 
-    series_id = None
-
-    try:
-
-        series_id = encontrar_series_id()
-
-    except Exception:
-        pass
-
     return {
-        "fuente": "Instituto Nacional del Agua (INA)",
+        "fuente": (
+            "Instituto Nacional del Agua (INA)"
+        ),
         "estacion": "San Nicolás",
         "siteCode": SAN_NICOLAS_SITE_CODE,
         "variable": "Altura hidrométrica",
         "varId": NIVEL_VAR_ID,
-        "seriesId": series_id,
         "unidad": "m",
         "observacion": (
             "Pronóstico experimental generado "
