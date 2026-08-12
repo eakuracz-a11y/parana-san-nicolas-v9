@@ -8,8 +8,24 @@ import pandas as pd
 
 INA_URL = "https://alerta.ina.gob.ar/pub/datos/datos"
 
+# San Nicolás
 SAN_NICOLAS_SITE_CODE = 36
+
+# Variable INA: nivel hidrométrico
 NIVEL_VAR_ID = 2
+
+# Estaciones consideradas por la aplicación
+# Esta constante es importada desde app.py
+STATIONS = [
+    "Corrientes",
+    "Goya",
+    "La Paz",
+    "Paraná",
+    "Diamante",
+    "Rosario",
+    "Villa Constitución",
+    "San Nicolás",
+]
 
 
 # ============================================================
@@ -17,6 +33,13 @@ NIVEL_VAR_ID = 2
 # ============================================================
 
 def get_series(start, end):
+    """
+    Consulta datos observados del INA para San Nicolás.
+
+    Se utiliza:
+        siteCode = 36  -> San Nicolás
+        varId = 2      -> Nivel hidrométrico
+    """
 
     params = {
         "timeStart": str(start),
@@ -36,8 +59,12 @@ def get_series(start, end):
 
     data = response.json()
 
-    # La API puede devolver lista directamente
-    # o un diccionario que contiene los datos.
+    # ========================================================
+    # NORMALIZAR RESPUESTA JSON
+    # ========================================================
+
+    # Algunas respuestas pueden venir directamente como lista.
+    # Otras pueden venir dentro de un diccionario.
     if isinstance(data, dict):
 
         if "data" in data:
@@ -50,7 +77,8 @@ def get_series(start, end):
             data = data["observaciones"]
 
         else:
-            # Intentar detectar alguna lista dentro del JSON
+            # Buscar automáticamente alguna lista dentro
+            # del diccionario recibido.
             lista = None
 
             for value in data.values():
@@ -69,7 +97,7 @@ def get_series(start, end):
         return df
 
     # ========================================================
-    # NORMALIZAR NOMBRES DE COLUMNAS
+    # NORMALIZAR COLUMNAS
     # ========================================================
 
     rename_map = {}
@@ -78,6 +106,7 @@ def get_series(start, end):
 
         name = str(col).strip().lower()
 
+        # Posibles nombres de la fecha
         if name in [
             "fecha",
             "datetime",
@@ -88,6 +117,7 @@ def get_series(start, end):
         ]:
             rename_map[col] = "datetime"
 
+        # Posibles nombres del nivel
         elif name in [
             "valor",
             "value",
@@ -99,16 +129,22 @@ def get_series(start, end):
 
     df = df.rename(columns=rename_map)
 
+    # ========================================================
+    # CONVERSIÓN DE DATOS
+    # ========================================================
+
     if "datetime" in df.columns:
+
         df["datetime"] = pd.to_datetime(
             df["datetime"],
-            errors="coerce"
+            errors="coerce",
         )
 
     if "value" in df.columns:
+
         df["value"] = pd.to_numeric(
             df["value"],
-            errors="coerce"
+            errors="coerce",
         )
 
     return df
@@ -119,8 +155,15 @@ def get_series(start, end):
 # ============================================================
 
 def observed(start, end):
+    """
+    Obtiene y prepara las observaciones del INA.
+    """
 
     try:
+
+        # ----------------------------------------------------
+        # Convertir fechas
+        # ----------------------------------------------------
 
         start_dt = pd.to_datetime(start)
         end_dt = pd.to_datetime(end)
@@ -128,46 +171,89 @@ def observed(start, end):
         # Fecha actual
         today = pd.Timestamp.today().normalize()
 
-        # No consultar el futuro
+        # ----------------------------------------------------
+        # EVITAR CONSULTAR FECHAS FUTURAS
+        # ----------------------------------------------------
+
         if end_dt > today:
             end_dt = today
 
-        # Corregir rango inválido
+        # ----------------------------------------------------
+        # CORREGIR RANGO INVÁLIDO
+        # ----------------------------------------------------
+
         if start_dt >= end_dt:
             start_dt = end_dt - pd.Timedelta(days=30)
+
+        # ----------------------------------------------------
+        # CONSULTAR INA
+        # ----------------------------------------------------
 
         df = get_series(
             start=start_dt.strftime("%Y-%m-%d"),
             end=end_dt.strftime("%Y-%m-%d"),
         )
 
+        # ----------------------------------------------------
+        # VALIDAR RESPUESTA
+        # ----------------------------------------------------
+
         if df.empty:
+
             return (
                 pd.DataFrame(),
-                "El INA respondió, pero no devolvió observaciones para San Nicolás en el período seleccionado."
+                "El INA respondió, pero no devolvió observaciones "
+                "para San Nicolás en el período seleccionado.",
             )
+
+        # ----------------------------------------------------
+        # VALIDAR COLUMNA DE FECHA
+        # ----------------------------------------------------
 
         if "datetime" not in df.columns:
+
             return (
                 pd.DataFrame(),
-                f"El INA devolvió datos pero no se encontró la columna de fecha. Columnas recibidas: {list(df.columns)}"
+                "El INA devolvió datos pero no se encontró la "
+                "columna de fecha. "
+                f"Columnas recibidas: {list(df.columns)}",
             )
+
+        # ----------------------------------------------------
+        # VALIDAR COLUMNA DE NIVEL
+        # ----------------------------------------------------
 
         if "value" not in df.columns:
+
             return (
                 pd.DataFrame(),
-                f"El INA devolvió datos pero no se encontró la columna de nivel. Columnas recibidas: {list(df.columns)}"
+                "El INA devolvió datos pero no se encontró la "
+                "columna de nivel. "
+                f"Columnas recibidas: {list(df.columns)}",
             )
 
+        # ----------------------------------------------------
+        # ELIMINAR VALORES INVÁLIDOS
+        # ----------------------------------------------------
+
         df = df.dropna(
-            subset=["datetime", "value"]
+            subset=[
+                "datetime",
+                "value",
+            ]
         )
 
         if df.empty:
+
             return (
                 pd.DataFrame(),
-                "El INA devolvió observaciones, pero no contienen valores válidos."
+                "El INA devolvió observaciones, pero no contienen "
+                "valores válidos de fecha y nivel.",
             )
+
+        # ----------------------------------------------------
+        # ORDENAR CRONOLÓGICAMENTE
+        # ----------------------------------------------------
 
         df = (
             df
@@ -177,25 +263,33 @@ def observed(start, end):
 
         return df, None
 
+    # ========================================================
+    # ERRORES DE CONEXIÓN
+    # ========================================================
+
     except requests.exceptions.Timeout:
 
         return (
             pd.DataFrame(),
-            "La consulta al INA excedió el tiempo máximo de espera."
+            "La consulta al INA excedió el tiempo máximo de espera.",
         )
 
     except requests.exceptions.RequestException as exc:
 
         return (
             pd.DataFrame(),
-            f"Error de conexión con el INA: {exc}"
+            f"Error de conexión con el INA: {exc}",
         )
+
+    # ========================================================
+    # OTROS ERRORES
+    # ========================================================
 
     except Exception as exc:
 
         return (
             pd.DataFrame(),
-            f"Error procesando datos del INA: {exc}"
+            f"Error procesando datos del INA: {exc}",
         )
 
 
@@ -204,6 +298,9 @@ def observed(start, end):
 # ============================================================
 
 def forecast_meta():
+    """
+    Información descriptiva de la fuente de datos.
+    """
 
     return {
         "fuente": "Instituto Nacional del Agua (INA)",
