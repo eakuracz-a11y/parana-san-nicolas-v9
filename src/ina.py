@@ -1,96 +1,236 @@
 import requests
 import pandas as pd
 
-# Stations used by the V9 interface. The INA service/API can change over time.
+# Estaciones principales utilizadas por Paraná San Nicolás V9.
+# siteCode y varId corresponden al catálogo actual del INA.
 STATIONS = [
-    "Corrientes", "Goya", "La Paz", "Paraná",
-    "Diamante", "Rosario", "Villa Constitución", "San Nicolás"
+    "Corrientes",
+    "Goya",
+    "La Paz",
+    "Paraná",
+    "Diamante",
+    "Rosario",
+    "Villa Constitución",
+    "San Nicolás",
 ]
 
-# Public INA endpoint configuration is isolated here so it can be updated
-# without changing the Streamlit interface.
-INA_URL = "https://alerta.ina.gob.ar/"
+STATION_CODES = {
+    "Corrientes": 19,
+    "Goya": 23,
+    "La Paz": 26,
+    "Paraná": 29,
+    "Diamante": 31,
+    "Rosario": 34,
+    "Villa Constitución": 35,
+    "San Nicolás": 36,
+}
+
+VAR_ID = 2
+
+INA_URL = "https://alerta.ina.gob.ar"
+
 
 def observed(start: str, end: str):
     """
-    Retrieve observed hydrometric data.
+    Obtiene datos hidrométricos observados del INA.
 
-    The public INA endpoint may change its API contract. This implementation
-    first attempts the known public service and, if the service cannot be
-    parsed, returns a clear error rather than inventing measurements.
+    Consulta la API pública actual:
+    /pub/datos/datos
+
+    Se consulta cada estación mediante:
+    siteCode + varId
     """
+
     errors = []
-    # Candidate endpoints kept intentionally conservative.
-    candidates = [
-        f"{INA_URL.rstrip('/')}/api/series?start={start}&end={end}",
-        f"{INA_URL.rstrip('/')}/api/observed?start={start}&end={end}",
-    ]
+    frames = []
 
-    for url in candidates:
+    # Normalizar fechas recibidas por Streamlit
+    start = str(start).replace("/", "-")
+    end = str(end).replace("/", "-")
+
+    for station, site_code in STATION_CODES.items():
+
+        url = f"{INA_URL}/pub/datos/datos"
+
+        params = {
+            "timeStart": start,
+            "timeEnd": end,
+            "siteCode": site_code,
+            "varId": VAR_ID,
+            "format": "json",
+        }
+
         try:
-            r = requests.get(url, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            df = _normalize(data)
+            response = requests.get(
+                url,
+                params=params,
+                timeout=30,
+            )
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            df = _normalize_ina_data(
+                data,
+                station,
+            )
+
             if df is not None and not df.empty:
-                return df, errors
-        except Exception as e:
-            errors.append(f"{url}: {e}")
+                frames.append(df)
 
-    raise RuntimeError(
-        "No fue posible obtener datos observados del INA. "
-        "El servicio/API público puede haber cambiado. "
-        + (" | ".join(errors) if errors else "")
-    )
+        except Exception as exc:
+            errors.append(
+                f"{station}: {exc}"
+            )
 
-def _normalize(data):
+    if not frames:
+        raise RuntimeError(
+            "No fue posible obtener datos observados del INA. "
+            + (
+                " | ".join(errors)
+                if errors
+                else "La API no devolvió datos."
+            )
+        )
+
+    result = frames[0]
+
+    for frame in frames[1:]:
+        result = pd.merge(
+            result,
+            frame,
+            on="datetime",
+            how="outer",
+        )
+
+    result = result.sort_values("datetime")
+
+    return result, errors
+
+
+def _normalize_ina_data(data, station):
+    """
+    Convierte la respuesta del INA a:
+
+    datetime | station/value
+
+    El INA puede devolver los datos dentro
+    de diferentes estructuras JSON.
+    """
+
     if isinstance(data, dict):
-        for key in ("data", "results", "series", "observations"):
+
+        # Estructuras habituales de la API
+        for key in (
+            "data",
+            "datos",
+            "results",
+            "result",
+            "observations",
+        ):
             if key in data:
                 data = data[key]
                 break
+
+    if isinstance(data, dict):
+        data = [data]
 
     if not isinstance(data, list):
         return None
 
     rows = []
+
     for item in data:
+
         if not isinstance(item, dict):
             continue
-        dt = item.get("datetime") or item.get("date") or item.get("timestamp") or item.get("fecha")
-        station = item.get("station") or item.get("station_name") or item.get("estacion")
-        value = item.get("value") or item.get("level") or item.get("nivel")
-        if dt is not None and station is not None and value is not None:
-            rows.append({"datetime": dt, "station": station, "value": value})
+
+        # Fecha/hora
+        dt = (
+            item.get("fecha")
+            or item.get("datetime")
+            or item.get("date")
+            or item.get("timestamp")
+            or item.get("time")
+        )
+
+        # Valor hidrométrico
+        value = (
+            item.get("valor")
+            if item.get("valor") is not None
+            else item.get("value")
+        )
+
+        if value is None:
+            value = item.get("nivel")
+
+        if dt is None or value is None:
+            continue
+
+        rows.append(
+            {
+                "datetime": dt,
+                "station": station,
+                "value": value,
+            }
+        )
 
     if not rows:
-        # Also support already-tabular dictionaries.
-        try:
-            df = pd.DataFrame(data)
-            if "datetime" in df.columns:
-                return _pivot(df)
-        except Exception:
-            return None
         return None
 
-    return _pivot(pd.DataFrame(rows))
+    df = pd.DataFrame(rows)
+
+    return _pivot(df)
+
 
 def _pivot(df):
-    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    df = df.dropna(subset=["datetime", "station"])
-    out = df.pivot_table(index="datetime", columns="station", values="value", aggfunc="last").reset_index()
+    """
+    Convierte los registros del INA
+    en una tabla con una columna por estación.
+    """
+
+    df["datetime"] = pd.to_datetime(
+        df["datetime"],
+        errors="coerce",
+        utc=True,
+    )
+
+    df["value"] = pd.to_numeric(
+        df["value"],
+        errors="coerce",
+    )
+
+    df = df.dropna(
+        subset=["datetime", "value"]
+    )
+
+    if df.empty:
+        return None
+
+    out = df.pivot_table(
+        index="datetime",
+        columns="station",
+        values="value",
+        aggfunc="last",
+    ).reset_index()
+
     out.columns.name = None
+
     return out
 
+
 def forecast_meta():
-    try:
-        r = requests.get(f"{INA_URL.rstrip('/')}/", timeout=20)
-        return {
-            "fuente": "INA",
-            "url": INA_URL,
-            "http_status": r.status_code,
-            "mensaje": "Consulta realizada al portal público del INA."
-        }
-    except Exception as e:
-        return {"fuente": "INA", "url": INA_URL, "error": str(e)}
+    """
+    Información básica de la fuente de datos.
+    """
+
+    return {
+        "fuente": "INA",
+        "url": f"{INA_URL}/pub/datos/datos",
+        "mensaje": (
+            "Datos hidrométricos observados "
+            "obtenidos desde la API pública actual "
+            "del INA."
+        ),
+    }
