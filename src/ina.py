@@ -1,1 +1,118 @@
-import requests import pandas as pd # ============================================================ # PARANÁ - SAN NICOLÁS V9 # ============================================================ # Endpoint base correcto del INA INA_BASE_URL = "https://alerta.ina.gob.ar/pub" # ============================================================ # ESTACIONES DISPONIBLES # ============================================================ STATIONS = [ "Corrientes", "Goya", "La Paz", "Paraná", "Diamante", "Rosario", "Villa Constitución", "San Nicolás", ] # ============================================================ # CONFIGURACIÓN # ============================================================ STATION_CODES = { "Corrientes": 19, "Goya": 23, "La Paz": 26, "Paraná": 29, "Diamante": 31, "Rosario": 34, "Villa Constitución": 35, "San Nicolás": 36, } LEVEL_VARIABLE_ID = 2 SAN_NICOLAS_SERIES_ID = 36 # ============================================================ # CONSULTA AL INA # ============================================================ def get_series(start, end, series_id=None): params = { "timeStart": str(start), "timeEnd": str(end), "format": "json", } if series_id: params["seriesId"] = series_id # Endpoint oficial url = f"{INA_BASE_URL}/datos/datos" try: response = requests.get(url, params=params, timeout=30) response.raise_for_status() data = response.json() except requests.RequestException as exc: raise RuntimeError(f"Error de conexión con INA: {exc}") except ValueError: raise RuntimeError("El INA devolvió una respuesta inválida.") # Algunas respuestas vienen dentro de un diccionario if isinstance(data, dict): if "data" in data: data = data["data"] elif "results" in data: data = data["results"] elif "observaciones" in data: data = data["observaciones"] else: data = [] if not data: return pd.DataFrame() df = pd.DataFrame(data) # Normalización automática rename_map = {} for col in df.columns: name = str(col).lower() if name in ["fecha", "datetime", "timestamp", "time"]: rename_map[col] = "datetime" elif name in ["valor", "nivel", "altura", "value"]: rename_map[col] = "value" df = df.rename(columns=rename_map) if "datetime" in df.columns: df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce") if "value" in df.columns: df["value"] = pd.to_numeric(df["value"], errors="coerce") return df # ============================================================ # FUNCIÓN USADA POR app.py # ============================================================ def observed(start, end): try: df = get_series( start=start, end=end, series_id=SAN_NICOLAS_SERIES_ID, ) if df.empty: return pd.DataFrame(), "No hay datos disponibles del INA para el período seleccionado." # Verificaciones defensivas if "datetime" not in df.columns: return pd.DataFrame(), "El INA no devolvió una columna de fecha reconocible." if "value" not in df.columns: return pd.DataFrame(), "El INA no devolvió una columna de nivel reconocible." # Limpiar registros inválidos df = df.dropna(subset=["datetime", "value"]).copy() if df.empty: return pd.DataFrame(), "Los datos recibidos no contienen valores válidos." df = df.sort_values("datetime").reset_index(drop=True) df["station"] = "San Nicolás" df["station_code"] = STATION_CODES["San Nicolás"] df["variable"] = "Nivel hidrométrico" df["unit"] = "m" return df, None except Exception as exc: return pd.DataFrame(), str(exc) # ============================================================ # METADATOS # ============================================================ def forecast_meta(): return { "fuente": "Instituto Nacional del Agua (INA)", "servicio": "Sistema de Información Hidrológica", "estacion": "San Nicolás", "serie": SAN_NICOLAS_SERIES_ID, "variable": "Nivel hidrométrico", "unidad": "metros", "estado": "Consulta disponible", "observacion": ( "Los datos observados se obtienen del servicio público del INA." ), }
+import requests
+import pandas as pd
+
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
+
+INA_URL = "https://alerta.ina.gob.ar/pub/datos/datos"
+
+STATIONS = [
+    "Corrientes",
+    "Goya",
+    "La Paz",
+    "Paraná",
+    "Diamante",
+    "Rosario",
+    "Villa Constitución",
+    "San Nicolás",
+]
+
+SAN_NICOLAS_SERIES_ID = 36
+
+
+# ============================================================
+# CONSULTA SIMPLE AL INA
+# ============================================================
+
+def get_series(start, end):
+
+    params = {
+        "timeStart": str(start),
+        "timeEnd": str(end),
+        "seriesId": SAN_NICOLAS_SERIES_ID,
+        "format": "json",
+    }
+
+    response = requests.get(INA_URL, params=params, timeout=30)
+    response.raise_for_status()
+
+    data = response.json()
+
+    if isinstance(data, dict):
+
+        if "data" in data:
+            data = data["data"]
+
+        elif "results" in data:
+            data = data["results"]
+
+        else:
+            data = []
+
+    df = pd.DataFrame(data)
+
+    if df.empty:
+        return df
+
+    # Normalizar columnas
+    for col in df.columns:
+
+        name = str(col).lower()
+
+        if name in ["fecha", "datetime", "timestamp"]:
+            df = df.rename(columns={col: "datetime"})
+
+        if name in ["valor", "nivel", "altura", "value"]:
+            df = df.rename(columns={col: "value"})
+
+    if "datetime" in df.columns:
+        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+
+    if "value" in df.columns:
+        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+
+    return df
+
+
+# ============================================================
+# FUNCIÓN QUE USA app.py
+# ============================================================
+
+def observed(start, end):
+
+    try:
+
+        df = get_series(start, end)
+
+        if df.empty:
+            return pd.DataFrame(), "No se encontraron datos del INA."
+
+        if "datetime" not in df.columns:
+            return pd.DataFrame(), "Falta columna de fecha."
+
+        if "value" not in df.columns:
+            return pd.DataFrame(), "Falta columna de nivel."
+
+        df = df.dropna(subset=["datetime", "value"])
+
+        return df, None
+
+    except Exception as exc:
+
+        return pd.DataFrame(), str(exc)
+
+
+# ============================================================
+# METADATOS
+# ============================================================
+
+def forecast_meta():
+
+    return {
+        "fuente": "Instituto Nacional del Agua (INA)",
+        "estacion": "San Nicolás",
+        "serie": SAN_NICOLAS_SERIES_ID,
+        "variable": "Nivel hidrométrico",
+        "unidad": "m",
+    }
