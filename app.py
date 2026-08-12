@@ -55,14 +55,16 @@ fecha_desde = fecha_hasta - timedelta(days=30)
 
 
 desde = st.sidebar.date_input(
-    "Desde",
+   "Desde",
     value=fecha_desde,
+    format="DD/MM/YYYY",
 )
 
 
 hasta = st.sidebar.date_input(
     "Hasta",
     value=fecha_hasta,
+    format="DD/MM/YYYY",
 )
 
 
