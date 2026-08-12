@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 
 from datetime import date, timedelta
+import json
 
 from src.ina import (
     observed,
@@ -58,13 +58,11 @@ st.sidebar.header("Consulta online")
 fecha_hasta = date.today()
 fecha_desde = fecha_hasta - timedelta(days=30)
 
-
 desde = st.sidebar.date_input(
     "Desde",
     value=fecha_desde,
     format="DD/MM/YYYY",
 )
-
 
 hasta = st.sidebar.date_input(
     "Hasta",
@@ -72,12 +70,10 @@ hasta = st.sidebar.date_input(
     format="DD/MM/YYYY",
 )
 
-
 actualizar = st.sidebar.button(
     "🔄 Actualizar INA",
     use_container_width=True,
 )
-
 
 st.sidebar.divider()
 
@@ -93,9 +89,6 @@ st.sidebar.write("Instituto Nacional del Agua (INA)")
 # ============================================================
 
 def encontrar_columna_fecha(df):
-    """
-    Busca automáticamente la columna temporal entregada por INA.
-    """
 
     candidatos = [
         "datetime",
@@ -115,7 +108,6 @@ def encontrar_columna_fecha(df):
 
     columnas = list(df.columns)
 
-    # Coincidencias exactas
     for candidato in candidatos:
 
         for columna in columnas:
@@ -123,7 +115,6 @@ def encontrar_columna_fecha(df):
             if str(columna).lower() == candidato.lower():
                 return columna
 
-    # Coincidencias parciales
     for columna in columnas:
 
         nombre = str(columna).lower()
@@ -140,10 +131,6 @@ def encontrar_columna_fecha(df):
 
 
 def encontrar_columna_nivel(df):
-    """
-    Busca automáticamente la columna que contiene
-    el nivel hidrométrico.
-    """
 
     candidatos = [
         "value",
@@ -161,7 +148,6 @@ def encontrar_columna_nivel(df):
 
     columnas = list(df.columns)
 
-    # Coincidencias exactas
     for candidato in candidatos:
 
         for columna in columnas:
@@ -169,7 +155,6 @@ def encontrar_columna_nivel(df):
             if str(columna).lower() == candidato.lower():
                 return columna
 
-    # Coincidencias parciales
     for columna in columnas:
 
         nombre = str(columna).lower()
@@ -183,8 +168,6 @@ def encontrar_columna_nivel(df):
         ):
             return columna
 
-    # Último recurso:
-    # buscar una columna numérica
     for columna in columnas:
 
         try:
@@ -204,9 +187,6 @@ def encontrar_columna_nivel(df):
 
 
 def preparar_datos(df):
-    """
-    Normaliza los datos recibidos desde INA.
-    """
 
     if df is None:
         return pd.DataFrame()
@@ -223,10 +203,6 @@ def preparar_datos(df):
         return pd.DataFrame()
 
     df = df.copy()
-
-    # ========================================================
-    # FECHA
-    # ========================================================
 
     columna_fecha = encontrar_columna_fecha(df)
 
@@ -255,10 +231,6 @@ def preparar_datos(df):
             errors="coerce",
         )
 
-    # ========================================================
-    # NIVEL
-    # ========================================================
-
     columna_nivel = encontrar_columna_nivel(df)
 
     if columna_nivel is not None:
@@ -267,10 +239,6 @@ def preparar_datos(df):
             df[columna_nivel],
             errors="coerce",
         )
-
-    # ========================================================
-    # ORDENAR
-    # ========================================================
 
     if "datetime" in df.columns:
 
@@ -285,6 +253,348 @@ def preparar_datos(df):
         )
 
     return df
+
+
+# ============================================================
+# FUNCIÓN PARA BUSCAR SAN NICOLÁS EN SERIES
+# ============================================================
+
+def buscar_series_san_nicolas(series_detectadas):
+
+    coincidencias = []
+
+    for item in series_detectadas:
+
+        registro = item.get(
+            "registro",
+            {}
+        )
+
+        texto = json.dumps(
+            registro,
+            ensure_ascii=False,
+        ).lower()
+
+        coincide_nombre = (
+            "san nicolás" in texto
+            or "san nicolas" in texto
+        )
+
+        coincide_site = False
+
+        for clave in [
+            "siteCode",
+            "site_code",
+            "sitecode",
+            "codigoSitio",
+            "codigo_sitio",
+        ]:
+
+            if clave in registro:
+
+                valor = registro.get(
+                    clave
+                )
+
+                try:
+
+                    if int(valor) == 36:
+                        coincide_site = True
+
+                except Exception:
+                    pass
+
+        if coincide_nombre or coincide_site:
+
+            coincidencias.append(
+                item
+            )
+
+    return coincidencias
+
+
+# ============================================================
+# GENERAR TEXTO COMPACTO DE DIAGNÓSTICO
+# ============================================================
+
+def generar_texto_diagnostico(
+    diagnostico
+):
+
+    lineas = []
+
+    lineas.append(
+        "=== DIAGNOSTICO INA ==="
+    )
+
+    lineas.append("")
+
+    # --------------------------------------------------------
+    # CONFIGURACIÓN
+    # --------------------------------------------------------
+
+    configuracion = diagnostico.get(
+        "configuracion",
+        {},
+    )
+
+    lineas.append(
+        "CONFIGURACION:"
+    )
+
+    lineas.append(
+        json.dumps(
+            configuracion,
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    )
+
+    lineas.append("")
+
+    # --------------------------------------------------------
+    # CONSULTA DE SERIES
+    # --------------------------------------------------------
+
+    consulta_series = diagnostico.get(
+        "consulta_series",
+        {},
+    )
+
+    lineas.append(
+        "CONSULTA DE SERIES:"
+    )
+
+    lineas.append(
+        f"HTTP: {consulta_series.get('status_series')}"
+    )
+
+    lineas.append(
+        f"CANTIDAD TOTAL: "
+        f"{consulta_series.get('cantidad_series', 0)}"
+    )
+
+    lineas.append(
+        f"URL: "
+        f"{consulta_series.get('url_series', '')}"
+    )
+
+    lineas.append("")
+
+    # --------------------------------------------------------
+    # SERIES DETECTADAS
+    # --------------------------------------------------------
+
+    series_detectadas = diagnostico.get(
+        "series_detectadas",
+        [],
+    )
+
+    lineas.append(
+        "PRIMERAS 5 SERIES DETECTADAS:"
+    )
+
+    for i, serie in enumerate(
+        series_detectadas[:5],
+        start=1,
+    ):
+
+        lineas.append(
+            f"\n--- SERIE {i} ---"
+        )
+
+        lineas.append(
+            json.dumps(
+                serie,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+
+    lineas.append("")
+
+    # --------------------------------------------------------
+    # SAN NICOLÁS
+    # --------------------------------------------------------
+
+    coincidencias = buscar_series_san_nicolas(
+        series_detectadas
+    )
+
+    lineas.append(
+        "SERIES QUE COINCIDEN CON SAN NICOLAS / SITECODE 36:"
+    )
+
+    lineas.append(
+        f"CANTIDAD: {len(coincidencias)}"
+    )
+
+    for i, serie in enumerate(
+        coincidencias[:20],
+        start=1,
+    ):
+
+        lineas.append(
+            f"\n--- COINCIDENCIA {i} ---"
+        )
+
+        lineas.append(
+            json.dumps(
+                serie,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+
+    lineas.append("")
+
+    # --------------------------------------------------------
+    # INTENTOS POR SERIES ID
+    # --------------------------------------------------------
+
+    intentos = diagnostico.get(
+        "intentos_datos",
+        [],
+    )
+
+    lineas.append(
+        "INTENTOS POR SERIES ID:"
+    )
+
+    lineas.append(
+        f"CANTIDAD DE INTENTOS: {len(intentos)}"
+    )
+
+    for i, intento in enumerate(
+        intentos[:10],
+        start=1,
+    ):
+
+        lineas.append(
+            f"\n--- INTENTO {i} ---"
+        )
+
+        lineas.append(
+            json.dumps(
+                intento,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )[:3000]
+        )
+
+    lineas.append("")
+
+    # --------------------------------------------------------
+    # CONSULTA DIRECTA
+    # --------------------------------------------------------
+
+    directo = diagnostico.get(
+        "consulta_directa",
+        {},
+    )
+
+    lineas.append(
+        "CONSULTA DIRECTA SITECODE + VARID:"
+    )
+
+    if directo:
+
+        lineas.append(
+            f"HTTP: "
+            f"{directo.get('status_datos')}"
+        )
+
+        lineas.append(
+            f"REGISTROS: "
+            f"{directo.get('cantidad_registros', 0)}"
+        )
+
+        lineas.append(
+            f"URL: "
+            f"{directo.get('url_datos', '')}"
+        )
+
+        lineas.append(
+            "RESPUESTA ORIGINAL:"
+        )
+
+        lineas.append(
+            str(
+                directo.get(
+                    "texto_datos",
+                    "",
+                )
+            )[:5000]
+        )
+
+    else:
+
+        lineas.append(
+            "Sin información."
+        )
+
+    # --------------------------------------------------------
+    # ERRORES
+    # --------------------------------------------------------
+
+    if "error_series" in diagnostico:
+
+        lineas.append("")
+
+        lineas.append(
+            "ERROR SERIES:"
+        )
+
+        lineas.append(
+            str(
+                diagnostico[
+                    "error_series"
+                ]
+            )
+        )
+
+    if (
+        "error_consulta_directa"
+        in diagnostico
+    ):
+
+        lineas.append("")
+
+        lineas.append(
+            "ERROR CONSULTA DIRECTA:"
+        )
+
+        lineas.append(
+            str(
+                diagnostico[
+                    "error_consulta_directa"
+                ]
+            )
+        )
+
+    if "error_general" in diagnostico:
+
+        lineas.append("")
+
+        lineas.append(
+            "ERROR GENERAL:"
+        )
+
+        lineas.append(
+            str(
+                diagnostico[
+                    "error_general"
+                ]
+            )
+        )
+
+    return "\n".join(
+        lineas
+    )
 
 
 # ============================================================
@@ -307,46 +617,50 @@ if actualizar:
     if desde > hasta:
 
         st.error(
-            "El período seleccionado no es válido. "
-            "La fecha Desde debe ser anterior o igual a Hasta."
+            "El período seleccionado no es válido."
         )
 
     else:
 
-        with st.spinner("Consultando datos del INA..."):
+        with st.spinner(
+            "Consultando datos del INA..."
+        ):
 
             try:
 
-                inicio = desde.strftime("%Y-%m-%d")
-                fin = hasta.strftime("%Y-%m-%d")
+                inicio = desde.strftime(
+                    "%Y-%m-%d"
+                )
 
-                # ====================================================
-                # CONSULTA AL MÓDULO INA
-                # ====================================================
+                fin = hasta.strftime(
+                    "%Y-%m-%d"
+                )
+
+                # ------------------------------------------------
+                # CONSULTAR INA
+                # ------------------------------------------------
 
                 df_ina, error_ina = observed(
                     inicio,
                     fin,
                 )
 
-                # ====================================================
-                # OBTENER DIAGNÓSTICO
-                # ====================================================
+                diagnostico_ina = (
+                    get_last_diagnostic()
+                )
 
-                diagnostico_ina = get_last_diagnostic()
-
-                # ----------------------------------------------------
-                # Borrar datos anteriores
-                # ----------------------------------------------------
+                # ------------------------------------------------
+                # Borrar consulta anterior
+                # ------------------------------------------------
 
                 st.session_state.pop(
                     "datos_ina",
                     None,
                 )
 
-                # ====================================================
-                # MOSTRAR RESULTADO DE LA CONSULTA
-                # ====================================================
+                # ------------------------------------------------
+                # RESULTADO
+                # ------------------------------------------------
 
                 if error_ina:
 
@@ -366,20 +680,15 @@ if actualizar:
                 ):
 
                     st.error(
-                        "La respuesta del INA no tiene "
-                        "el formato esperado."
-                    )
-
-                    st.write(
-                        "Tipo recibido:",
-                        type(df_ina).__name__,
+                        "La respuesta del INA no "
+                        "tiene el formato esperado."
                     )
 
                 elif df_ina.empty:
 
                     st.warning(
-                        "El INA respondió, pero no se encontraron "
-                        "datos para el período seleccionado."
+                        "El INA respondió, pero no "
+                        "se encontraron datos."
                     )
 
                 else:
@@ -388,66 +697,11 @@ if actualizar:
                         df_ina
                     )
 
-                    if df.empty:
-
-                        st.warning(
-                            "El INA devolvió registros, pero "
-                            "no fue posible procesarlos."
-                        )
-
-                    elif "datetime" not in df.columns:
-
-                        st.warning(
-                            "El INA devolvió datos, pero no "
-                            "se pudo identificar la columna de fecha."
-                        )
-
-                        st.write(
-                            "Columnas recibidas desde INA:"
-                        )
-
-                        st.code(
-                            ", ".join(
-                                str(c)
-                                for c in df.columns
-                            )
-                        )
-
-                        st.dataframe(
-                            df.head(20),
-                            use_container_width=True,
-                        )
-
-                    elif "nivel" not in df.columns:
-
-                        st.warning(
-                            "El INA devolvió datos, pero no "
-                            "se pudo identificar la columna "
-                            "de nivel hidrométrico."
-                        )
-
-                        st.write(
-                            "Columnas recibidas desde INA:"
-                        )
-
-                        st.code(
-                            ", ".join(
-                                str(c)
-                                for c in df.columns
-                            )
-                        )
-
-                        st.dataframe(
-                            df.head(20),
-                            use_container_width=True,
-                        )
-
-                    else:
-
-                        df["datetime"] = pd.to_datetime(
-                            df["datetime"],
-                            errors="coerce",
-                        )
+                    if (
+                        not df.empty
+                        and "datetime" in df.columns
+                        and "nivel" in df.columns
+                    ):
 
                         df["nivel"] = pd.to_numeric(
                             df["nivel"],
@@ -467,34 +721,20 @@ if actualizar:
                             .reset_index(drop=True)
                         )
 
-                        if df.empty:
-
-                            st.warning(
-                                "El INA devolvió observaciones, "
-                                "pero no quedaron valores válidos."
-                            )
-
-                        else:
+                        if not df.empty:
 
                             st.session_state[
                                 "datos_ina"
                             ] = df
 
                             st.success(
-                                "✅ Datos del INA actualizados "
-                                "correctamente."
+                                "✅ Datos del INA "
+                                "actualizados correctamente."
                             )
 
-                            st.caption(
-                                f"Período consultado: "
-                                f"{desde.strftime('%d/%m/%Y')} → "
-                                f"{hasta.strftime('%d/%m/%Y')} | "
-                                f"Registros: {len(df)}"
-                            )
-
-                # ====================================================
-                # DIAGNÓSTICO TÉCNICO
-                # ====================================================
+                # =================================================
+                # DIAGNÓSTICO COMPACTO
+                # =================================================
 
                 with st.expander(
                     "🔧 Diagnóstico técnico INA",
@@ -503,242 +743,27 @@ if actualizar:
 
                     if diagnostico_ina:
 
-                        # --------------------------------------------
-                        # CONFIGURACIÓN
-                        # --------------------------------------------
+                        texto_diagnostico = (
+                            generar_texto_diagnostico(
+                                diagnostico_ina
+                            )
+                        )
 
                         st.write(
-                            "### Configuración"
+                            "### Diagnóstico para copiar"
                         )
 
-                        configuracion = diagnostico_ina.get(
-                            "configuracion",
-                            {},
+                        st.caption(
+                            "Haz clic dentro del cuadro, "
+                            "Ctrl+A, Ctrl+C y pégalo en ChatGPT."
                         )
 
-                        if configuracion:
-
-                            st.json(
-                                configuracion
-                            )
-
-                        else:
-
-                            st.info(
-                                "No se registró configuración."
-                            )
-
-                        # --------------------------------------------
-                        # CONSULTA DE SERIES
-                        # --------------------------------------------
-
-                        st.write(
-                            "### Consulta de series"
+                        st.text_area(
+                            "Contenido",
+                            value=texto_diagnostico,
+                            height=650,
+                            key="diagnostico_copiable",
                         )
-
-                        consulta_series = diagnostico_ina.get(
-                            "consulta_series",
-                            {},
-                        )
-
-                        if consulta_series:
-
-                            st.write(
-                                "HTTP:",
-                                consulta_series.get(
-                                    "status_series",
-                                    "Sin información",
-                                ),
-                            )
-
-                            st.write(
-                                "Cantidad de series:",
-                                consulta_series.get(
-                                    "cantidad_series",
-                                    0,
-                                ),
-                            )
-
-                            st.write(
-                                "URL consultada:"
-                            )
-
-                            st.code(
-                                consulta_series.get(
-                                    "url_series",
-                                    "",
-                                )
-                            )
-
-                            st.write(
-                                "Respuesta del INA:"
-                            )
-
-                            texto_series = consulta_series.get(
-                                "texto_series",
-                                "",
-                            )
-
-                            st.code(
-                                texto_series[:3000]
-                            )
-
-                        else:
-
-                            st.warning(
-                                "No se obtuvo información "
-                                "de la consulta de series."
-                            )
-
-                        # --------------------------------------------
-                        # SERIES DETECTADAS
-                        # --------------------------------------------
-
-                        st.write(
-                            "### Series detectadas"
-                        )
-
-                        series_detectadas = diagnostico_ina.get(
-                            "series_detectadas",
-                            [],
-                        )
-
-                        if series_detectadas:
-
-                            for serie in series_detectadas:
-
-                                st.json(
-                                    serie
-                                )
-
-                        else:
-
-                            st.warning(
-                                "No se detectaron series."
-                            )
-
-                        # --------------------------------------------
-                        # INTENTOS POR SERIES ID
-                        # --------------------------------------------
-
-                        intentos = diagnostico_ina.get(
-                            "intentos_datos",
-                            [],
-                        )
-
-                        if intentos:
-
-                            st.write(
-                                "### Consultas por seriesId"
-                            )
-
-                            for intento in intentos:
-
-                                st.json(
-                                    intento
-                                )
-
-                        # --------------------------------------------
-                        # CONSULTA DIRECTA
-                        # --------------------------------------------
-
-                        st.write(
-                            "### Consulta directa siteCode + varId"
-                        )
-
-                        directo = diagnostico_ina.get(
-                            "consulta_directa",
-                            {},
-                        )
-
-                        if directo:
-
-                            st.write(
-                                "HTTP:",
-                                directo.get(
-                                    "status_datos",
-                                    "Sin información",
-                                ),
-                            )
-
-                            st.write(
-                                "Cantidad de registros:",
-                                directo.get(
-                                    "cantidad_registros",
-                                    0,
-                                ),
-                            )
-
-                            st.write(
-                                "URL consultada:"
-                            )
-
-                            st.code(
-                                directo.get(
-                                    "url_datos",
-                                    "",
-                                )
-                            )
-
-                            st.write(
-                                "Respuesta original:"
-                            )
-
-                            texto_datos = directo.get(
-                                "texto_datos",
-                                "",
-                            )
-
-                            st.code(
-                                texto_datos[:3000]
-                            )
-
-                        else:
-
-                            st.warning(
-                                "No se obtuvo diagnóstico "
-                                "de la consulta directa."
-                            )
-
-                        # --------------------------------------------
-                        # ERRORES
-                        # --------------------------------------------
-
-                        if "error_series" in diagnostico_ina:
-
-                            st.error(
-                                "Error buscando series: "
-                                + str(
-                                    diagnostico_ina[
-                                        "error_series"
-                                    ]
-                                )
-                            )
-
-                        if (
-                            "error_consulta_directa"
-                            in diagnostico_ina
-                        ):
-
-                            st.error(
-                                "Error en consulta directa: "
-                                + str(
-                                    diagnostico_ina[
-                                        "error_consulta_directa"
-                                    ]
-                                )
-                            )
-
-                        if "error_general" in diagnostico_ina:
-
-                            st.error(
-                                "Error general: "
-                                + str(
-                                    diagnostico_ina[
-                                        "error_general"
-                                    ]
-                                )
-                            )
 
                     else:
 
@@ -771,10 +796,6 @@ else:
         "datos_ina"
     ]
 
-    # ========================================================
-    # INFORMACIÓN GENERAL
-    # ========================================================
-
     st.subheader(
         "📊 Datos hidrométricos"
     )
@@ -788,26 +809,21 @@ else:
 
     if "nivel" in df.columns:
 
-        nivel_actual = (
-            df["nivel"]
-            .dropna()
-        )
+        valores = df[
+            "nivel"
+        ].dropna()
 
-        if len(nivel_actual) > 0:
+        if len(valores) > 0:
 
             col2.metric(
                 "Último nivel",
-                f"{nivel_actual.iloc[-1]:.2f} m",
+                f"{valores.iloc[-1]:.2f} m",
             )
 
             col3.metric(
                 "Máximo período",
-                f"{nivel_actual.max():.2f} m",
+                f"{valores.max():.2f} m",
             )
-
-    # ========================================================
-    # GRÁFICO
-    # ========================================================
 
     if (
         "datetime" in df.columns
@@ -842,69 +858,39 @@ else:
             use_container_width=True,
         )
 
-        # ====================================================
-        # ESTADÍSTICAS
-        # ====================================================
-
         st.subheader(
             "📋 Estadísticas"
         )
 
-        valores = (
-            df["nivel"]
-            .dropna()
+        valores = df[
+            "nivel"
+        ].dropna()
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric(
+            "Mínimo",
+            f"{valores.min():.2f} m",
         )
 
-        if len(valores) > 0:
-
-            c1, c2, c3, c4 = st.columns(4)
-
-            c1.metric(
-                "Mínimo",
-                f"{valores.min():.2f} m",
-            )
-
-            c2.metric(
-                "Máximo",
-                f"{valores.max():.2f} m",
-            )
-
-            c3.metric(
-                "Promedio",
-                f"{valores.mean():.2f} m",
-            )
-
-            c4.metric(
-                "Último",
-                f"{valores.iloc[-1]:.2f} m",
-            )
-
-    else:
-
-        st.warning(
-            "Los datos recibidos del INA no contienen "
-            "una columna temporal o de nivel reconocible."
+        c2.metric(
+            "Máximo",
+            f"{valores.max():.2f} m",
         )
 
-        st.write(
-            "Columnas recibidas desde INA:"
+        c3.metric(
+            "Promedio",
+            f"{valores.mean():.2f} m",
         )
 
-        st.code(
-            ", ".join(
-                str(c)
-                for c in df.columns
-            )
-        )
-
-        st.dataframe(
-            df,
-            use_container_width=True,
+        c4.metric(
+            "Último",
+            f"{valores.iloc[-1]:.2f} m",
         )
 
 
 # ============================================================
-# INFORMACIÓN DEL PRONÓSTICO
+# PRONÓSTICO
 # ============================================================
 
 st.divider()
