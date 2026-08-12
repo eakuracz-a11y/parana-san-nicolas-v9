@@ -1,12 +1,10 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
-
 from datetime import date, timedelta
 
 from src.ina import observed, forecast_meta, STATIONS
-from src.model import train, predict, prob
-from src.scenario import run
 
 
 # ============================================================
@@ -14,22 +12,18 @@ from src.scenario import run
 # ============================================================
 
 st.set_page_config(
-    page_title="Paraná San Nicolás | Pronóstico del río",
+    page_title="Paraná · San Nicolás",
     page_icon="🌊",
-    layout="wide",
+    layout="wide"
 )
-
-
-# ============================================================
-# ESTILO / ENCABEZADO
-# ============================================================
 
 st.title("🌊 PARANÁ · SAN NICOLÁS")
+st.caption("V9 · Plataforma pública de monitoreo y predicción experimental")
 
-st.caption(
-    "V9 · Plataforma pública de monitoreo y predicción experimental"
-)
 
+# ============================================================
+# DESCRIPCIÓN
+# ============================================================
 
 st.markdown(
     """
@@ -42,945 +36,443 @@ st.markdown(
 
 
 # ============================================================
-# VARIABLES DE SESIÓN
+# BARRA LATERAL
 # ============================================================
 
-if "df" not in st.session_state:
-    st.session_state.df = None
+st.sidebar.header("Consulta online")
 
-if "errors" not in st.session_state:
-    st.session_state.errors = []
+fecha_hasta = date.today()
+fecha_desde = fecha_hasta - timedelta(days=30)
 
-if "pred" not in st.session_state:
-    st.session_state.pred = {}
+desde = st.sidebar.date_input(
+    "Desde",
+    value=fecha_desde
+)
 
-if "met" not in st.session_state:
-    st.session_state.met = {}
+hasta = st.sidebar.date_input(
+    "Hasta",
+    value=fecha_hasta
+)
+
+actualizar = st.sidebar.button(
+    "🔄 Actualizar INA",
+    use_container_width=True
+)
+
+
+st.sidebar.divider()
+
+st.sidebar.subheader("Objetivo")
+st.sidebar.write("San Nicolás de los Arroyos")
+
+st.sidebar.subheader("Fuente")
+st.sidebar.write("Instituto Nacional del Agua (INA)")
 
 
 # ============================================================
-# SIDEBAR
+# FUNCIONES AUXILIARES
 # ============================================================
 
-with st.sidebar:
+def encontrar_columna_fecha(df):
+    """
+    Busca automáticamente la columna temporal entregada por INA.
+    """
 
-    st.header("Consulta online")
+    candidatos = [
+        "datetime",
+        "dateTime",
+        "timestamp",
+        "timeStamp",
+        "fecha_hora",
+        "fechaHora",
+        "fecha",
+        "date",
+        "time",
+        "observedAt",
+        "observed_at",
+        "timeStart",
+        "time_start",
+    ]
 
-    start = st.date_input(
-        "Desde",
-        date.today() - timedelta(days=365 * 3)
-    )
+    columnas = list(df.columns)
 
-    end = st.date_input(
-        "Hasta",
-        date.today()
-    )
+    # Primero buscamos coincidencias exactas
+    for candidato in candidatos:
+        for columna in columnas:
+            if str(columna).lower() == candidato.lower():
+                return columna
+
+    # Después buscamos coincidencias parciales
+    for columna in columnas:
+        nombre = str(columna).lower()
+
+        if (
+            "date" in nombre
+            or "time" in nombre
+            or "fecha" in nombre
+            or "hora" in nombre
+        ):
+            return columna
+
+    return None
+
+
+def encontrar_columna_nivel(df):
+    """
+    Busca automáticamente la columna que contiene el nivel
+    hidrométrico.
+    """
+
+    candidatos = [
+        "value",
+        "valor",
+        "nivel",
+        "level",
+        "height",
+        "altura",
+        "dato",
+        "observed",
+        "observacion",
+        "measurement",
+        "measure",
+    ]
+
+    columnas = list(df.columns)
+
+    for candidato in candidatos:
+        for columna in columnas:
+            if str(columna).lower() == candidato.lower():
+                return columna
+
+    # Búsqueda parcial
+    for columna in columnas:
+        nombre = str(columna).lower()
+
+        if (
+            "nivel" in nombre
+            or "level" in nombre
+            or "height" in nombre
+            or "valor" in nombre
+            or "value" in nombre
+        ):
+            return columna
+
+    # Último recurso:
+    # buscar una columna numérica
+    for columna in columnas:
+        try:
+            valores = pd.to_numeric(df[columna], errors="coerce")
+
+            if valores.notna().sum() > 3:
+                return columna
+        except Exception:
+            pass
+
+    return None
+
+
+def preparar_datos(df):
+    """
+    Normaliza los datos recibidos desde INA.
+    """
+
+    if df is None:
+        return pd.DataFrame()
+
+    if not isinstance(df, pd.DataFrame):
+        try:
+            df = pd.DataFrame(df)
+        except Exception:
+            return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
 
     # --------------------------------------------------------
-    # VALIDACIÓN DE FECHAS
+    # Buscar fecha
     # --------------------------------------------------------
 
-    if start > end:
+    columna_fecha = encontrar_columna_fecha(df)
 
-        st.error(
-            "La fecha inicial no puede ser posterior "
-            "a la fecha final."
+    if columna_fecha is None:
+
+        # Algunos servicios pueden devolver la fecha como índice
+        if isinstance(df.index, pd.DatetimeIndex):
+            df["datetime"] = df.index
+            columna_fecha = "datetime"
+
+        else:
+            return df
+
+    else:
+        df["datetime"] = pd.to_datetime(
+            df[columna_fecha],
+            errors="coerce"
         )
 
     # --------------------------------------------------------
-    # BOTÓN INA
+    # Buscar nivel
     # --------------------------------------------------------
 
-    if st.button(
-        "🔄 Actualizar INA",
-        type="primary",
-        use_container_width=True
-    ):
+    columna_nivel = encontrar_columna_nivel(df)
 
-        if start > end:
+    if columna_nivel is not None:
 
-            st.error(
-                "Corrija el rango de fechas antes de consultar."
+        if columna_nivel != "nivel":
+            df["nivel"] = pd.to_numeric(
+                df[columna_nivel],
+                errors="coerce"
             )
 
-        else:
+    # Ordenar
+    if "datetime" in df.columns:
 
-            with st.spinner(
-                "Consultando datos hidrométricos del INA..."
-            ):
+        df = df.sort_values("datetime")
 
-                try:
+        df = df.dropna(
+            subset=["datetime"]
+        )
 
-                    result = observed(
-                        start.isoformat(),
-                        end.isoformat()
+    return df
+
+
+# ============================================================
+# CONSULTA INA
+# ============================================================
+
+if actualizar:
+
+    with st.spinner("Consultando datos del INA..."):
+
+        try:
+
+            inicio = desde.strftime("%Y-%m-%d")
+            fin = hasta.strftime("%Y-%m-%d")
+
+            resultado = observed(
+                inicio,
+                fin
+            )
+
+            if resultado is None:
+                st.error(
+                    "El INA no devolvió información."
+                )
+
+            else:
+
+                df = preparar_datos(resultado)
+
+                if df.empty:
+
+                    st.warning(
+                        "El INA respondió, pero no se encontraron "
+                        "datos para el período seleccionado."
                     )
 
-                    # ------------------------------------------------
-                    # observed() normalmente devuelve:
-                    #
-                    # dataframe, errors
-                    #
-                    # Pero mantenemos compatibilidad por seguridad.
-                    # ------------------------------------------------
-
-                    if (
-                        isinstance(result, tuple)
-                        and len(result) == 2
-                    ):
-
-                        df_result, errors_result = result
-
-                    else:
-
-                        df_result = result
-                        errors_result = []
-
-                    # ------------------------------------------------
-                    # Validación del DataFrame
-                    # ------------------------------------------------
-
-                    if df_result is None:
-
-                        raise RuntimeError(
-                            "El INA no devolvió un DataFrame."
-                        )
-
-                    if not isinstance(
-                        df_result,
-                        pd.DataFrame
-                    ):
-
-                        df_result = pd.DataFrame(
-                            df_result
-                        )
-
-                    if df_result.empty:
-
-                        raise RuntimeError(
-                            "La API del INA no devolvió "
-                            "datos para el período seleccionado."
-                        )
-
-                    # ------------------------------------------------
-                    # Guardar resultado
-                    # ------------------------------------------------
-
-                    st.session_state.df = df_result
-                    st.session_state.errors = (
-                        errors_result or []
-                    )
-
-                    # Limpiar resultados anteriores
-                    st.session_state.pred = {}
-                    st.session_state.met = {}
+                else:
 
                     st.success(
                         "✅ Datos del INA actualizados correctamente."
                     )
 
-                except Exception as exc:
+                    # Guardamos los datos
+                    st.session_state["datos_ina"] = df
 
-                    st.session_state.df = None
+        except Exception as e:
 
-                    st.error(
-                        f"❌ No fue posible actualizar los datos: {exc}"
-                    )
-
-
-    # --------------------------------------------------------
-    # INFORMACIÓN DE FUENTE
-    # --------------------------------------------------------
-
-    st.divider()
-
-    st.write(
-        "**Objetivo:** San Nicolás de los Arroyos"
-    )
-
-    st.caption(
-        "Fuente hidrométrica: Instituto Nacional del Agua (INA)"
-    )
+            st.error(
+                f"Error durante la consulta al INA: {e}"
+            )
 
 
 # ============================================================
-# SI TODAVÍA NO HAY DATOS
+# MOSTRAR DATOS
 # ============================================================
 
-if st.session_state.df is None:
+if "datos_ina" not in st.session_state:
 
     st.info(
-        "Presione **🔄 Actualizar INA** para iniciar "
-        "la consulta online."
+        "Presione **Actualizar INA** para iniciar la consulta online."
     )
-
-    st.stop()
-
-
-# ============================================================
-# PREPARACIÓN DE DATOS
-# ============================================================
-
-df = st.session_state.df.copy()
-
-
-# ------------------------------------------------------------
-# Verificar datetime
-# ------------------------------------------------------------
-
-if "datetime" not in df.columns:
-
-    st.error(
-        "Los datos recibidos del INA no contienen "
-        "la columna 'datetime'."
-    )
-
-    st.stop()
-
-
-df["datetime"] = pd.to_datetime(
-    df["datetime"],
-    errors="coerce",
-    utc=True
-)
-
-
-df = df.dropna(
-    subset=["datetime"]
-)
-
-
-df = df.sort_values(
-    "datetime"
-)
-
-
-# ============================================================
-# VERIFICAR SAN NICOLÁS
-# ============================================================
-
-if "San Nicolás" not in df.columns:
-
-    st.error(
-        "Los datos recibidos no contienen la estación "
-        "'San Nicolás'."
-    )
-
-    st.write(
-        "Columnas recibidas:"
-    )
-
-    st.write(
-        list(df.columns)
-    )
-
-    st.stop()
-
-
-# ------------------------------------------------------------
-# Convertir estaciones a valores numéricos
-# ------------------------------------------------------------
-
-for station in STATIONS:
-
-    if station in df.columns:
-
-        df[station] = pd.to_numeric(
-            df[station],
-            errors="coerce"
-        )
-
-
-# ============================================================
-# DATOS DE SAN NICOLÁS
-# ============================================================
-
-san_nicolas = df[
-    "San Nicolás"
-].dropna()
-
-
-if san_nicolas.empty:
-
-    st.error(
-        "La estación San Nicolás no contiene "
-        "observaciones válidas."
-    )
-
-    st.stop()
-
-
-last = san_nicolas.iloc[-1]
-
-
-# Cambio aproximado de las últimas 7 observaciones
-
-if len(san_nicolas) >= 7:
-
-    previous = san_nicolas.iloc[-7]
 
 else:
 
-    previous = san_nicolas.iloc[0]
-
-
-change_7 = float(
-    last - previous
-)
-
-
-# ============================================================
-# PESTAÑAS
-# ============================================================
-
-tabs = st.tabs(
-    [
-        "📍 Estado",
-        "🔮 Pronóstico",
-        "🌧️ Lluvia",
-        "🚦 Riesgo",
-        "ℹ️ Metodología",
-    ]
-)
-
-
-# ============================================================
-# TAB 1 — ESTADO
-# ============================================================
-
-with tabs[0]:
-
-    st.subheader(
-        "Estado hidrométrico"
-    )
-
+    df = st.session_state["datos_ina"]
 
     # --------------------------------------------------------
-    # MÉTRICAS
+    # INFORMACIÓN GENERAL
     # --------------------------------------------------------
 
-    col1, col2, col3, col4 = st.columns(4)
+    st.subheader("📊 Datos hidrométricos")
 
+    col1, col2, col3 = st.columns(3)
 
     col1.metric(
-        "Nivel San Nicolás",
-        f"{float(last):.2f} m"
+        "Registros",
+        len(df)
     )
 
+    if "nivel" in df.columns:
 
-    col2.metric(
-        "Cambio últimas 7 obs.",
-        f"{change_7:+.2f} m"
-    )
+        nivel_actual = df["nivel"].dropna()
 
+        if len(nivel_actual) > 0:
 
-    # Villa Constitución
-
-    if "Villa Constitución" in df.columns:
-
-        vc = df[
-            "Villa Constitución"
-        ].dropna()
-
-        if not vc.empty:
+            col2.metric(
+                "Último nivel",
+                f"{nivel_actual.iloc[-1]:.2f}"
+            )
 
             col3.metric(
-                "Villa Constitución",
-                f"{float(vc.iloc[-1]):.2f} m"
+                "Máximo período",
+                f"{nivel_actual.max():.2f}"
             )
 
-        else:
-
-            col3.metric(
-                "Villa Constitución",
-                "—"
-            )
-
-    else:
-
-        col3.metric(
-            "Villa Constitución",
-            "—"
-        )
-
-
-    # Rosario
-
-    if "Rosario" in df.columns:
-
-        rosario = df[
-            "Rosario"
-        ].dropna()
-
-        if not rosario.empty:
-
-            col4.metric(
-                "Rosario",
-                f"{float(rosario.iloc[-1]):.2f} m"
-            )
-
-        else:
-
-            col4.metric(
-                "Rosario",
-                "—"
-            )
-
-    else:
-
-        col4.metric(
-            "Rosario",
-            "—"
-        )
-
-
-    # ========================================================
+    # --------------------------------------------------------
     # GRÁFICO
-    # ========================================================
+    # --------------------------------------------------------
 
-    st.subheader(
-        "Evolución del nivel del río Paraná"
-    )
+    if (
+        "datetime" in df.columns
+        and "nivel" in df.columns
+        and df["nivel"].notna().any()
+    ):
 
+        st.subheader("📈 Evolución del nivel del río")
 
-    fig = go.Figure()
-
-
-    for station in STATIONS:
-
-        if station not in df.columns:
-            continue
-
-        station_data = df[
-            ["datetime", station]
-        ].dropna()
-
-
-        if station_data.empty:
-            continue
-
+        fig = go.Figure()
 
         fig.add_trace(
             go.Scatter(
-                x=station_data["datetime"],
-                y=station_data[station],
-                name=station,
-                mode="lines"
+                x=df["datetime"],
+                y=df["nivel"],
+                mode="lines",
+                name="Nivel observado"
             )
         )
 
-
-    fig.update_layout(
-        height=520,
-        hovermode="x unified",
-        xaxis_title="Fecha",
-        yaxis_title="Nivel del río (m)",
-        legend_title="Estación",
-    )
-
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
-
-
-    # ========================================================
-    # TABLA DE ESTACIONES
-    # ========================================================
-
-    st.subheader(
-        "Último nivel disponible por estación"
-    )
-
-
-    latest_rows = []
-
-
-    for station in STATIONS:
-
-        if station not in df.columns:
-            continue
-
-        values = df[
-            station
-        ].dropna()
-
-
-        if values.empty:
-            continue
-
-
-        latest_rows.append(
-            {
-                "Estación": station,
-                "Nivel (m)": round(
-                    float(values.iloc[-1]),
-                    2
-                )
-            }
+        fig.update_layout(
+            xaxis_title="Fecha",
+            yaxis_title="Nivel",
+            hovermode="x unified",
+            height=500
         )
 
-
-    if latest_rows:
-
-        st.dataframe(
-            pd.DataFrame(latest_rows),
-            hide_index=True,
+        st.plotly_chart(
+            fig,
             use_container_width=True
         )
 
+        # ----------------------------------------------------
+        # ESTADÍSTICAS
+        # ----------------------------------------------------
 
-    # ========================================================
-    # ERRORES PARCIALES DEL INA
-    # ========================================================
+        st.subheader("📋 Estadísticas")
 
-    if st.session_state.errors:
+        valores = df["nivel"].dropna()
 
-        with st.expander(
-            "⚠️ Estaciones con problemas de consulta"
-        ):
+        if len(valores) > 0:
 
-            for error in st.session_state.errors:
-
-                st.warning(error)
-
-
-# ============================================================
-# TAB 2 — PRONÓSTICO
-# ============================================================
-
-with tabs[1]:
-
-    st.subheader(
-        "Pronóstico experimental"
-    )
-
-
-    st.info(
-        "La predicción es experimental y se basa en "
-        "niveles observados y tendencias de las estaciones "
-        "del sistema. No reemplaza un pronóstico oficial."
-    )
-
-
-    if st.button(
-        "🧠 Ejecutar modelo +24/+48/+72",
-        type="primary"
-    ):
-
-        with st.spinner(
-            "Entrenando modelo estadístico..."
-        ):
-
-            try:
-
-                models, metrics = train(df)
-
-                predictions = predict(
-                    df,
-                    models
-                )
-
-                st.session_state.pred = predictions
-                st.session_state.met = metrics
-
-                st.success(
-                    "✅ Modelo ejecutado correctamente."
-                )
-
-            except Exception as exc:
-
-                st.error(
-                    f"❌ No fue posible ejecutar el modelo: {exc}"
-                )
-
-
-    # --------------------------------------------------------
-    # RESULTADOS
-    # --------------------------------------------------------
-
-    predictions = st.session_state.pred
-    metrics = st.session_state.met
-
-
-    c1, c2, c3 = st.columns(3)
-
-
-    for col, horizon in zip(
-        [c1, c2, c3],
-        [24, 48, 72]
-    ):
-
-        if horizon in predictions:
-
-            col.metric(
-                f"+{horizon} h",
-                f"{float(predictions[horizon]):.2f} m"
-            )
-
-        else:
-
-            col.metric(
-                f"+{horizon} h",
-                "—"
-            )
-
-
-    # --------------------------------------------------------
-    # MÉTRICAS DEL MODELO
-    # --------------------------------------------------------
-
-    if metrics:
-
-        st.subheader(
-            "Desempeño del modelo"
-        )
-
-
-        metrics_rows = []
-
-
-        for horizon, values in metrics.items():
-
-            row = {
-                "Horizonte": f"+{horizon} h"
-            }
-
-            if isinstance(values, dict):
-
-                row.update(values)
-
-            metrics_rows.append(row)
-
-
-        if metrics_rows:
-
-            st.dataframe(
-                pd.DataFrame(metrics_rows),
-                hide_index=True,
-                use_container_width=True
-            )
-
-
-    # --------------------------------------------------------
-    # PRONÓSTICO INA
-    # --------------------------------------------------------
-
-    st.divider()
-
-
-    if st.button(
-        "Consultar información del INA"
-    ):
-
-        try:
-
-            st.json(
-                forecast_meta()
-            )
-
-        except Exception as exc:
-
-            st.error(
-                f"No fue posible consultar la información: {exc}"
-            )
-
-
-# ============================================================
-# TAB 3 — LLUVIA
-# ============================================================
-
-with tabs[2]:
-
-    st.subheader(
-        "Escenario experimental de lluvia"
-    )
-
-
-    st.warning(
-        "Este módulo representa sensibilidad experimental. "
-        "Todavía no constituye un modelo físico calibrado "
-        "lluvia → escorrentía."
-    )
-
-
-    rain = {}
-
-
-    c1, c2, c3 = st.columns(3)
-
-
-    rain["Corrientes"] = c1.number_input(
-        "Corrientes · 72 h (mm)",
-        min_value=0.0,
-        max_value=1000.0,
-        value=100.0
-    )
-
-
-    rain["Goya"] = c2.number_input(
-        "Goya · 72 h (mm)",
-        min_value=0.0,
-        max_value=1000.0,
-        value=150.0
-    )
-
-
-    rain["Reconquista"] = c3.number_input(
-        "Reconquista · 72 h (mm)",
-        min_value=0.0,
-        max_value=1000.0,
-        value=100.0
-    )
-
-
-    c4, c5, c6 = st.columns(3)
-
-
-    rain["Esquina"] = c4.number_input(
-        "Esquina · 72 h (mm)",
-        min_value=0.0,
-        max_value=1000.0,
-        value=80.0
-    )
-
-
-    rain["La Paz"] = c5.number_input(
-        "La Paz · 72 h (mm)",
-        min_value=0.0,
-        max_value=1000.0,
-        value=80.0
-    )
-
-
-    rain["Paraná"] = c6.number_input(
-        "Paraná · 72 h (mm)",
-        min_value=0.0,
-        max_value=1000.0,
-        value=50.0
-    )
-
-
-    if st.button(
-        "🌧️ Calcular impacto"
-    ):
-
-        try:
-
-            scenario_result = run(
-                float(last),
-                rain
-            )
-
-
-            c1, c2, c3 = st.columns(3)
-
+            c1, c2, c3, c4 = st.columns(4)
 
             c1.metric(
-                "Escenario bajo",
-                f"{scenario_result['Bajo']:.2f} m"
+                "Mínimo",
+                f"{valores.min():.2f}"
             )
-
 
             c2.metric(
-                "Escenario central",
-                f"{scenario_result['Central']:.2f} m"
+                "Máximo",
+                f"{valores.max():.2f}"
             )
-
 
             c3.metric(
-                "Escenario alto",
-                f"{scenario_result['Alto']:.2f} m"
+                "Promedio",
+                f"{valores.mean():.2f}"
             )
 
-
-        except Exception as exc:
-
-            st.error(
-                f"No fue posible calcular el escenario: {exc}"
+            c4.metric(
+                "Último",
+                f"{valores.iloc[-1]:.2f}"
             )
-
-
-# ============================================================
-# TAB 4 — RIESGO
-# ============================================================
-
-with tabs[3]:
-
-    st.subheader(
-        "🚦 Semáforo experimental de riesgo"
-    )
-
-
-    st.caption(
-        "Los umbrales deben configurarse con referencias "
-        "oficiales/locales antes de utilizarse como alerta."
-    )
-
-
-    threshold = st.number_input(
-        "Umbral de referencia (m)",
-        min_value=0.0,
-        max_value=20.0,
-        value=float(last + 0.5),
-        step=0.10
-    )
-
-
-    if predictions:
-
-        risk_rows = []
-
-
-        for horizon, prediction in predictions.items():
-
-            model_info = metrics.get(
-                horizon,
-                {}
-            )
-
-
-            rmse = model_info.get(
-                "RMSE",
-                0.20
-            )
-
-
-            probability = prob(
-                prediction,
-                threshold,
-                rmse
-            )
-
-
-            if probability >= 0.75:
-
-                state = "ALTO"
-
-            elif probability >= 0.40:
-
-                state = "MEDIO"
-
-            else:
-
-                state = "BAJO"
-
-
-            risk_rows.append(
-                {
-                    "Horizonte": f"+{horizon} h",
-                    "Predicción (m)": round(
-                        float(prediction),
-                        2
-                    ),
-                    "Probabilidad": (
-                        f"{probability * 100:.0f}%"
-                    ),
-                    "Estado": state,
-                }
-            )
-
-
-        st.dataframe(
-            pd.DataFrame(risk_rows),
-            hide_index=True,
-            use_container_width=True
-        )
-
 
     else:
 
-        st.info(
-            "Ejecute primero el modelo en la pestaña "
-            "**Pronóstico**."
+        st.warning(
+            "Los datos recibidos del INA no contienen "
+            "una columna temporal o de nivel reconocible."
+        )
+
+        st.write(
+            "Columnas recibidas desde INA:"
+        )
+
+        st.code(
+            ", ".join(str(c) for c in df.columns)
+        )
+
+        st.dataframe(
+            df,
+            use_container_width=True
         )
 
 
 # ============================================================
-# TAB 5 — METODOLOGÍA
-# ============================================================
-
-with tabs[4]:
-
-    st.subheader(
-        "Metodología V9"
-    )
-
-
-    st.markdown(
-        """
-        ### Fuente de datos
-
-        Los niveles observados utilizados por la aplicación
-        provienen de la API pública del Instituto Nacional
-        del Agua (INA).
-
-        ### Modelo
-
-        El modelo estadístico utiliza información temporal
-        de las estaciones disponibles y variables derivadas
-        de niveles, rezagos y cambios.
-
-        ### Pronóstico
-
-        Se generan estimaciones experimentales para:
-
-        - +24 horas
-        - +48 horas
-        - +72 horas
-
-        ### Riesgo
-
-        El semáforo transforma la predicción y el error
-        estimado del modelo en una probabilidad experimental
-        respecto del umbral seleccionado.
-
-        ### Lluvia
-
-        El módulo de lluvia representa actualmente un
-        escenario de sensibilidad. No debe interpretarse
-        como un modelo hidrológico físico calibrado.
-
-        ### Importante
-
-        Esta aplicación NO constituye una alerta oficial.
-
-        Para una versión operacional deberán incorporarse,
-        entre otros elementos:
-
-        - precipitación espacial;
-        - pronóstico meteorológico;
-        - caudales;
-        - erogaciones;
-        - tiempos de propagación;
-        - características de la cuenca;
-        - calibración con eventos históricos;
-        - validación independiente.
-        """
-    )
-
-
-# ============================================================
-# DESCARGA DE DATOS
+# INFORMACIÓN DEL PRONÓSTICO
 # ============================================================
 
 st.divider()
 
+st.subheader("🔮 Pronóstico experimental")
 
-csv_data = df.to_csv(
-    index=False
-).encode("utf-8")
+try:
+
+    meta = forecast_meta()
+
+    if isinstance(meta, dict):
+
+        st.info(
+            meta.get(
+                "observacion",
+                "Pronóstico experimental generado por el modelo propio."
+            )
+        )
+
+except Exception:
+
+    st.info(
+        "El módulo de pronóstico experimental está disponible "
+        "para futuras versiones."
+    )
 
 
-st.download_button(
-    "⬇️ Descargar datos CSV",
-    csv_data,
-    "parana_san_nicolas_v9.csv",
-    "text/csv"
-)
+# ============================================================
+# ESTACIONES
+# ============================================================
 
+with st.expander("📍 Estaciones consideradas"):
+
+    try:
+
+        for estacion in STATIONS:
+            st.write(f"• {estacion}")
+
+    except Exception:
+
+        st.write(
+            "San Nicolás de los Arroyos"
+        )
+
+
+# ============================================================
+# PIE
+# ============================================================
+
+st.divider()
 
 st.caption(
-    "PARANÁ · SAN NICOLÁS V9 · Consulta online"
+    "Paraná · San Nicolás V9 | Datos observados: INA | "
+    "Predicción: modelo experimental propio"
 )
