@@ -5,7 +5,12 @@ import plotly.graph_objects as go
 
 from datetime import date, timedelta
 
-from src.ina import observed, forecast_meta, STATIONS
+from src.ina import (
+    observed,
+    forecast_meta,
+    STATIONS,
+    get_last_diagnostic,
+)
 
 
 # ============================================================
@@ -55,7 +60,7 @@ fecha_desde = fecha_hasta - timedelta(days=30)
 
 
 desde = st.sidebar.date_input(
-   "Desde",
+    "Desde",
     value=fecha_desde,
     format="DD/MM/YYYY",
 )
@@ -110,10 +115,7 @@ def encontrar_columna_fecha(df):
 
     columnas = list(df.columns)
 
-    # --------------------------------------------------------
     # Coincidencias exactas
-    # --------------------------------------------------------
-
     for candidato in candidatos:
 
         for columna in columnas:
@@ -121,10 +123,7 @@ def encontrar_columna_fecha(df):
             if str(columna).lower() == candidato.lower():
                 return columna
 
-    # --------------------------------------------------------
     # Coincidencias parciales
-    # --------------------------------------------------------
-
     for columna in columnas:
 
         nombre = str(columna).lower()
@@ -162,10 +161,7 @@ def encontrar_columna_nivel(df):
 
     columnas = list(df.columns)
 
-    # --------------------------------------------------------
     # Coincidencias exactas
-    # --------------------------------------------------------
-
     for candidato in candidatos:
 
         for columna in columnas:
@@ -173,10 +169,7 @@ def encontrar_columna_nivel(df):
             if str(columna).lower() == candidato.lower():
                 return columna
 
-    # --------------------------------------------------------
     # Coincidencias parciales
-    # --------------------------------------------------------
-
     for columna in columnas:
 
         nombre = str(columna).lower()
@@ -190,11 +183,8 @@ def encontrar_columna_nivel(df):
         ):
             return columna
 
-    # --------------------------------------------------------
     # Último recurso:
     # buscar una columna numérica
-    # --------------------------------------------------------
-
     for columna in columnas:
 
         try:
@@ -242,8 +232,6 @@ def preparar_datos(df):
 
     if columna_fecha is None:
 
-        # Algunos servicios pueden devolver
-        # la fecha como índice.
         if isinstance(df.index, pd.DatetimeIndex):
 
             df["datetime"] = df.index
@@ -316,10 +304,6 @@ if desde > hasta:
 
 if actualizar:
 
-    # --------------------------------------------------------
-    # Validación inicial
-    # --------------------------------------------------------
-
     if desde > hasta:
 
         st.error(
@@ -337,12 +321,7 @@ if actualizar:
                 fin = hasta.strftime("%Y-%m-%d")
 
                 # ====================================================
-                # IMPORTANTE
-                #
-                # observed() devuelve dos valores:
-                #
-                #   DataFrame, mensaje_error
-                #
+                # CONSULTA AL MÓDULO INA
                 # ====================================================
 
                 df_ina, error_ina = observed(
@@ -350,8 +329,14 @@ if actualizar:
                     fin,
                 )
 
+                # ====================================================
+                # OBTENER DIAGNÓSTICO
+                # ====================================================
+
+                diagnostico_ina = get_last_diagnostic()
+
                 # ----------------------------------------------------
-                # Borrar consulta anterior
+                # Borrar datos anteriores
                 # ----------------------------------------------------
 
                 st.session_state.pop(
@@ -359,9 +344,9 @@ if actualizar:
                     None,
                 )
 
-                # ----------------------------------------------------
-                # ERROR DEVUELTO POR ina.py
-                # ----------------------------------------------------
+                # ====================================================
+                # MOSTRAR RESULTADO DE LA CONSULTA
+                # ====================================================
 
                 if error_ina:
 
@@ -369,19 +354,11 @@ if actualizar:
                         error_ina
                     )
 
-                # ----------------------------------------------------
-                # RESPUESTA NULA
-                # ----------------------------------------------------
-
                 elif df_ina is None:
 
                     st.warning(
                         "El INA no devolvió información."
                     )
-
-                # ----------------------------------------------------
-                # VALIDAR TIPO
-                # ----------------------------------------------------
 
                 elif not isinstance(
                     df_ina,
@@ -389,18 +366,14 @@ if actualizar:
                 ):
 
                     st.error(
-                        "La respuesta recibida desde el INA "
-                        "no tiene el formato esperado."
+                        "La respuesta del INA no tiene "
+                        "el formato esperado."
                     )
 
                     st.write(
                         "Tipo recibido:",
                         type(df_ina).__name__,
                     )
-
-                # ----------------------------------------------------
-                # DATAFRAME VACÍO
-                # ----------------------------------------------------
 
                 elif df_ina.empty:
 
@@ -409,19 +382,11 @@ if actualizar:
                         "datos para el período seleccionado."
                     )
 
-                # ----------------------------------------------------
-                # PROCESAR DATOS
-                # ----------------------------------------------------
-
                 else:
 
                     df = preparar_datos(
                         df_ina
                     )
-
-                    # ------------------------------------------------
-                    # VALIDAR RESULTADO
-                    # ------------------------------------------------
 
                     if df.empty:
 
@@ -479,10 +444,6 @@ if actualizar:
 
                     else:
 
-                        # ============================================
-                        # LIMPIEZA FINAL
-                        # ============================================
-
                         df["datetime"] = pd.to_datetime(
                             df["datetime"],
                             errors="coerce",
@@ -506,23 +467,14 @@ if actualizar:
                             .reset_index(drop=True)
                         )
 
-                        # --------------------------------------------
-                        # COMPROBAR SI QUEDARON DATOS
-                        # --------------------------------------------
-
                         if df.empty:
 
                             st.warning(
                                 "El INA devolvió observaciones, "
-                                "pero no quedaron valores válidos "
-                                "después del procesamiento."
+                                "pero no quedaron valores válidos."
                             )
 
                         else:
-
-                            # ========================================
-                            # GUARDAR
-                            # ========================================
 
                             st.session_state[
                                 "datos_ina"
@@ -535,13 +487,265 @@ if actualizar:
 
                             st.caption(
                                 f"Período consultado: "
-                                f"{inicio} → {fin} | "
+                                f"{desde.strftime('%d/%m/%Y')} → "
+                                f"{hasta.strftime('%d/%m/%Y')} | "
                                 f"Registros: {len(df)}"
                             )
 
-            # ========================================================
-            # MANEJO DE ERRORES
-            # ========================================================
+                # ====================================================
+                # DIAGNÓSTICO TÉCNICO
+                # ====================================================
+
+                with st.expander(
+                    "🔧 Diagnóstico técnico INA",
+                    expanded=True,
+                ):
+
+                    if diagnostico_ina:
+
+                        # --------------------------------------------
+                        # CONFIGURACIÓN
+                        # --------------------------------------------
+
+                        st.write(
+                            "### Configuración"
+                        )
+
+                        configuracion = diagnostico_ina.get(
+                            "configuracion",
+                            {},
+                        )
+
+                        if configuracion:
+
+                            st.json(
+                                configuracion
+                            )
+
+                        else:
+
+                            st.info(
+                                "No se registró configuración."
+                            )
+
+                        # --------------------------------------------
+                        # CONSULTA DE SERIES
+                        # --------------------------------------------
+
+                        st.write(
+                            "### Consulta de series"
+                        )
+
+                        consulta_series = diagnostico_ina.get(
+                            "consulta_series",
+                            {},
+                        )
+
+                        if consulta_series:
+
+                            st.write(
+                                "HTTP:",
+                                consulta_series.get(
+                                    "status_series",
+                                    "Sin información",
+                                ),
+                            )
+
+                            st.write(
+                                "Cantidad de series:",
+                                consulta_series.get(
+                                    "cantidad_series",
+                                    0,
+                                ),
+                            )
+
+                            st.write(
+                                "URL consultada:"
+                            )
+
+                            st.code(
+                                consulta_series.get(
+                                    "url_series",
+                                    "",
+                                )
+                            )
+
+                            st.write(
+                                "Respuesta del INA:"
+                            )
+
+                            texto_series = consulta_series.get(
+                                "texto_series",
+                                "",
+                            )
+
+                            st.code(
+                                texto_series[:3000]
+                            )
+
+                        else:
+
+                            st.warning(
+                                "No se obtuvo información "
+                                "de la consulta de series."
+                            )
+
+                        # --------------------------------------------
+                        # SERIES DETECTADAS
+                        # --------------------------------------------
+
+                        st.write(
+                            "### Series detectadas"
+                        )
+
+                        series_detectadas = diagnostico_ina.get(
+                            "series_detectadas",
+                            [],
+                        )
+
+                        if series_detectadas:
+
+                            for serie in series_detectadas:
+
+                                st.json(
+                                    serie
+                                )
+
+                        else:
+
+                            st.warning(
+                                "No se detectaron series."
+                            )
+
+                        # --------------------------------------------
+                        # INTENTOS POR SERIES ID
+                        # --------------------------------------------
+
+                        intentos = diagnostico_ina.get(
+                            "intentos_datos",
+                            [],
+                        )
+
+                        if intentos:
+
+                            st.write(
+                                "### Consultas por seriesId"
+                            )
+
+                            for intento in intentos:
+
+                                st.json(
+                                    intento
+                                )
+
+                        # --------------------------------------------
+                        # CONSULTA DIRECTA
+                        # --------------------------------------------
+
+                        st.write(
+                            "### Consulta directa siteCode + varId"
+                        )
+
+                        directo = diagnostico_ina.get(
+                            "consulta_directa",
+                            {},
+                        )
+
+                        if directo:
+
+                            st.write(
+                                "HTTP:",
+                                directo.get(
+                                    "status_datos",
+                                    "Sin información",
+                                ),
+                            )
+
+                            st.write(
+                                "Cantidad de registros:",
+                                directo.get(
+                                    "cantidad_registros",
+                                    0,
+                                ),
+                            )
+
+                            st.write(
+                                "URL consultada:"
+                            )
+
+                            st.code(
+                                directo.get(
+                                    "url_datos",
+                                    "",
+                                )
+                            )
+
+                            st.write(
+                                "Respuesta original:"
+                            )
+
+                            texto_datos = directo.get(
+                                "texto_datos",
+                                "",
+                            )
+
+                            st.code(
+                                texto_datos[:3000]
+                            )
+
+                        else:
+
+                            st.warning(
+                                "No se obtuvo diagnóstico "
+                                "de la consulta directa."
+                            )
+
+                        # --------------------------------------------
+                        # ERRORES
+                        # --------------------------------------------
+
+                        if "error_series" in diagnostico_ina:
+
+                            st.error(
+                                "Error buscando series: "
+                                + str(
+                                    diagnostico_ina[
+                                        "error_series"
+                                    ]
+                                )
+                            )
+
+                        if (
+                            "error_consulta_directa"
+                            in diagnostico_ina
+                        ):
+
+                            st.error(
+                                "Error en consulta directa: "
+                                + str(
+                                    diagnostico_ina[
+                                        "error_consulta_directa"
+                                    ]
+                                )
+                            )
+
+                        if "error_general" in diagnostico_ina:
+
+                            st.error(
+                                "Error general: "
+                                + str(
+                                    diagnostico_ina[
+                                        "error_general"
+                                    ]
+                                )
+                            )
+
+                    else:
+
+                        st.warning(
+                            "No se generó información "
+                            "de diagnóstico."
+                        )
 
             except Exception as e:
 
@@ -577,18 +781,10 @@ else:
 
     col1, col2, col3 = st.columns(3)
 
-    # --------------------------------------------------------
-    # Cantidad de registros
-    # --------------------------------------------------------
-
     col1.metric(
         "Registros",
         len(df),
     )
-
-    # --------------------------------------------------------
-    # Último nivel y máximo
-    # --------------------------------------------------------
 
     if "nivel" in df.columns:
 
