@@ -81,12 +81,36 @@ def get_series(start, end):
 
 def observed(start, end):
 
-    try:
+    from datetime import datetime, timedelta
+import pandas as pd
 
-        df = get_series(start, end)
+def observed(start, end):
+
+    try:
+        # Convertir fechas
+        start_dt = pd.to_datetime(start)
+        end_dt = pd.to_datetime(end)
+
+        # Evitar fechas futuras
+        today = pd.Timestamp.today().normalize()
+
+        if end_dt > today:
+            end_dt = today
+
+        # Si el rango es inválido, usar últimos 30 días
+        if start_dt >= end_dt:
+            start_dt = end_dt - pd.Timedelta(days=30)
+
+        df = get_series(
+            start=start_dt.strftime("%Y-%m-%d"),
+            end=end_dt.strftime("%Y-%m-%d"),
+        )
 
         if df.empty:
-            return pd.DataFrame(), "No se encontraron datos del INA."
+            return (
+                pd.DataFrame(),
+                "El INA no devolvió datos para el período seleccionado."
+            )
 
         if "datetime" not in df.columns:
             return pd.DataFrame(), "Falta columna de fecha."
@@ -95,6 +119,11 @@ def observed(start, end):
             return pd.DataFrame(), "Falta columna de nivel."
 
         df = df.dropna(subset=["datetime", "value"])
+
+        if df.empty:
+            return pd.DataFrame(), "No hay valores válidos de nivel."
+
+        df = df.sort_values("datetime").reset_index(drop=True)
 
         return df, None
 
