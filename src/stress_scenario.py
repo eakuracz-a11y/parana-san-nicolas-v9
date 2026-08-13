@@ -44,7 +44,7 @@ SCENARIOS = {
 
 
 # ============================================================
-# PRECIPITACIÓN HISTÓRICA
+# ESTADÍSTICAS DE PRECIPITACIÓN HISTÓRICA
 # ============================================================
 
 def rainfall_statistics(
@@ -71,7 +71,6 @@ def rainfall_statistics(
         or "precip_mm"
         not in exog_history.columns
     ):
-
         return result
 
     work = exog_history.copy()
@@ -99,7 +98,6 @@ def rainfall_statistics(
     )
 
     if work.empty:
-
         return result
 
     rain = (
@@ -160,7 +158,7 @@ def rainfall_statistics(
 
 
 # ============================================================
-# CAUDAL HISTÓRICO
+# ESTADÍSTICAS DE CAUDAL HISTÓRICO
 # ============================================================
 
 def flow_statistics(
@@ -185,7 +183,6 @@ def flow_statistics(
         or "caudal_m3s"
         not in exog_history.columns
     ):
-
         return result
 
     work = exog_history.copy()
@@ -213,7 +210,6 @@ def flow_statistics(
     )
 
     if work.empty:
-
         return result
 
     q = work["caudal_m3s"]
@@ -247,7 +243,7 @@ def flow_statistics(
 
 
 # ============================================================
-# NIVELES AGUAS ARRIBA
+# MÁXIMOS / PERCENTILES DE ESTACIONES AGUAS ARRIBA
 # ============================================================
 
 def upstream_targets(
@@ -265,7 +261,6 @@ def upstream_targets(
         )
         or upstream_history.empty
     ):
-
         return result
 
     quantile = SCENARIOS[
@@ -289,7 +284,6 @@ def upstream_targets(
         )
 
         if values.empty:
-
             continue
 
         if quantile >= 1.0:
@@ -312,7 +306,7 @@ def upstream_targets(
 
 
 # ============================================================
-# VALOR DE LLUVIA PARA CADA DÍA DEL ESCENARIO
+# LLUVIA DIARIA DEL ESCENARIO
 # ============================================================
 
 def select_daily_rain(
@@ -334,8 +328,6 @@ def select_daily_rain(
 
     else:
 
-        # EXTREMO:
-        # máximo histórico diario
         value = rain_stats[
             "max_day"
         ]
@@ -354,7 +346,7 @@ def select_daily_rain(
 
 
 # ============================================================
-# VALOR DE CAUDAL PARA CADA DÍA
+# CAUDAL DIARIO DEL ESCENARIO
 # ============================================================
 
 def select_daily_flow(
@@ -376,8 +368,6 @@ def select_daily_flow(
 
     else:
 
-        # EXTREMO:
-        # máximo histórico de caudal
         value = flow_stats[
             "maximum"
         ]
@@ -392,11 +382,18 @@ def select_daily_flow(
             np.nan,
         )
 
+    if (
+        value is None
+        or not np.isfinite(value)
+    ):
+
+        return np.nan
+
     return float(value)
 
 
 # ============================================================
-# PERFIL DE LLUVIA 60 DÍAS
+# PERFIL DE PRECIPITACIÓN
 # ============================================================
 
 def build_rain_profile(
@@ -405,11 +402,8 @@ def build_rain_profile(
 ):
 
     """
-    El mismo valor extremo se aplica TODOS los días.
-
-    No existen días con precipitación 0 dentro
-    del escenario, salvo que el histórico completo
-    no contenga lluvia.
+    Mantiene el valor de lluvia seleccionado
+    durante todos los días del escenario.
     """
 
     return np.full(
@@ -420,7 +414,7 @@ def build_rain_profile(
 
 
 # ============================================================
-# PERFIL DE CAUDAL 60 DÍAS
+# PERFIL DE CAUDAL
 # ============================================================
 
 def build_flow_profile(
@@ -429,9 +423,22 @@ def build_flow_profile(
 ):
 
     """
-    El caudal seleccionado se mantiene constante
+    Mantiene el caudal seleccionado
     durante todos los días del escenario.
     """
+
+    if (
+        daily_flow is None
+        or not np.isfinite(
+            daily_flow
+        )
+    ):
+
+        return np.full(
+            days,
+            np.nan,
+            dtype=float,
+        )
 
     return np.full(
         days,
@@ -441,7 +448,7 @@ def build_flow_profile(
 
 
 # ============================================================
-# HIDROGRAMA DEL NIVEL
+# PERFIL FUTURO DEL NIVEL
 # ============================================================
 
 def build_level_profile(
@@ -452,11 +459,13 @@ def build_level_profile(
 ):
 
     """
-    Construye una respuesta gradual.
+    Construye un crecimiento progresivo
+    desde el nivel actual hasta el máximo
+    estimado por el modelo de crecientes.
 
-    Como las condiciones extremas permanecen aplicadas
-    todos los días, el nivel crece hacia el máximo
-    calculado y luego se mantiene en una meseta.
+    Como las condiciones extremas siguen
+    presentes los 60 días, después del pico
+    se mantiene una meseta.
     """
 
     response_lag = int(
@@ -472,7 +481,6 @@ def build_level_profile(
         0.0,
     )
 
-    # El máximo no debe aparecer el primer día.
     peak_day = int(
         np.clip(
             response_lag
@@ -496,7 +504,7 @@ def build_level_profile(
                 / peak_day
             )
 
-            # Curva suave
+            # Curva sigmoidal suave
             smooth = (
                 3
                 * fraction ** 2
@@ -512,9 +520,7 @@ def build_level_profile(
 
         else:
 
-            # Las condiciones extremas continúan,
-            # por lo tanto mantenemos el nivel de
-            # respuesta en lugar de forzar una bajante.
+            # Condición extrema sostenida
             level = peak_level
 
         values.append(
@@ -548,11 +554,19 @@ def build_stress_scenario(
     scenario="extremo",
 ):
 
+    # ========================================================
+    # VALIDAR ESCENARIO
+    # ========================================================
+
     if scenario not in SCENARIOS:
 
         raise ValueError(
             f"Escenario desconocido: {scenario}"
         )
+
+    # ========================================================
+    # VALIDAR MODELO
+    # ========================================================
 
     if (
         models is None
@@ -568,6 +582,10 @@ def build_stress_scenario(
             "No existe dataset histórico del modelo."
         )
 
+    # ========================================================
+    # VALIDAR HORIZONTE
+    # ========================================================
+
     days = int(
         np.clip(
             int(days),
@@ -575,6 +593,10 @@ def build_stress_scenario(
             60,
         )
     )
+
+    # ========================================================
+    # DATASET HISTÓRICO
+    # ========================================================
 
     dataset = models[
         "dataset"
@@ -608,6 +630,10 @@ def build_stress_scenario(
             "El histórico de niveles está vacío."
         )
 
+    # ========================================================
+    # NIVEL ACTUAL
+    # ========================================================
+
     current_level = float(
         dataset[
             "nivel"
@@ -623,7 +649,7 @@ def build_stress_scenario(
     )
 
     # ========================================================
-    # MÁXIMOS HISTÓRICOS
+    # ESTADÍSTICAS HISTÓRICAS
     # ========================================================
 
     rain_stats = rainfall_statistics(
@@ -633,6 +659,10 @@ def build_stress_scenario(
     flow_stats = flow_statistics(
         exog_history
     )
+
+    # ========================================================
+    # ELEGIR CONDICIÓN SEGÚN ESCENARIO
+    # ========================================================
 
     daily_rain = select_daily_rain(
         rain_stats,
@@ -650,7 +680,11 @@ def build_stress_scenario(
     )
 
     # ========================================================
-    # ACUMULADOS IMPUESTOS AL MODELO DE CRECIENTE
+    # ACUMULADOS DE LLUVIA
+    #
+    # Si usamos máximo diario todos los días:
+    # 3 días = max diario × 3
+    # 7 días = max diario × 7
     # ========================================================
 
     rain_3d = (
@@ -664,7 +698,7 @@ def build_stress_scenario(
     )
 
     # ========================================================
-    # MODELO ESPECÍFICO DE CRECIENTE
+    # ENTRENAR MODELO DE RESPUESTA A CRECIENTES
     # ========================================================
 
     response_model = (
@@ -672,6 +706,10 @@ def build_stress_scenario(
             dataset
         )
     )
+
+    # ========================================================
+    # CALCULAR CRECIMIENTO POTENCIAL
+    # ========================================================
 
     response = (
         predict_stress_growth(
@@ -716,7 +754,7 @@ def build_stress_scenario(
     )
 
     # ========================================================
-    # PERFIL 60 DÍAS
+    # PERFILES PARA LOS 60 DÍAS
     # ========================================================
 
     rain_profile = (
@@ -748,6 +786,10 @@ def build_stress_scenario(
         ),
         days=days,
     )
+
+    # ========================================================
+    # FECHAS FUTURAS
+    # ========================================================
 
     dates = pd.date_range(
         start=(
@@ -817,11 +859,12 @@ def build_stress_scenario(
         )
 
     # ========================================================
-    # DATAFRAME DEL ESCENARIO
+    # DATAFRAME FINAL
     # ========================================================
 
     scenario_df = pd.DataFrame(
         {
+
             "datetime":
                 dates,
 
@@ -864,12 +907,25 @@ def build_stress_scenario(
         )
     )
 
+    # ========================================================
+    # CRECIMIENTO %
+    # ========================================================
+
     growth_pct = (
         predicted_growth
         / current_level
         * 100
         if current_level != 0
         else np.nan
+    )
+
+    # ========================================================
+    # ACUMULADO DEL ESCENARIO COMPLETO
+    # ========================================================
+
+    total_rain_60d = float(
+        daily_rain
+        * days
     )
 
     # ========================================================
@@ -895,13 +951,11 @@ def build_stress_scenario(
         "growth_pct":
             growth_pct,
 
-        # Ya no existe una única fecha de
-        # máximos conjuntos:
-        # se aplican TODOS los días.
+        # Primer día del escenario.
+        # Las condiciones máximas se aplican
+        # desde aquí y durante los 60 días.
         "peak_future_date":
-            dates[
-                0
-            ],
+            dates[0],
 
         "max_level_date":
             peak_level_date,
@@ -919,10 +973,7 @@ def build_stress_scenario(
             rain_7d,
 
         "rain_event_total":
-            float(
-                daily_rain
-                * days
-            ),
+            total_rain_60d,
 
         "flow_scenario_max":
             daily_flow,
@@ -952,9 +1003,7 @@ def build_stress_scenario(
             float(
                 scenario_df[
                     "prediction"
-                ].iloc[
-                    -1
-                ]
+                ].iloc[-1]
             ),
 
         "flood_model_rmse":
@@ -982,7 +1031,6 @@ def build_stress_scenario(
                 "historical_p95_growth"
             ],
 
-        # NUEVO
         "constant_max_conditions":
             True,
 
