@@ -20,12 +20,16 @@ from src.upstream import (
     get_upstream_history,
 )
 
+from src.stress_ui import (
+    render_stress_scenario,
+)
+
 
 # ============================================================
 # VERSIÓN
 # ============================================================
 
-APP_VERSION = "V10.1"
+APP_VERSION = "V10.2"
 
 FORECAST_DAYS = 15
 TREND_DAYS = 30
@@ -55,12 +59,50 @@ st.markdown(
     <style>
 
     .block-container {
-        padding-top: 2.2rem;
+        padding-top: 2rem;
         padding-bottom: 3rem;
     }
 
     [data-testid="stMetricValue"] {
-        font-size: 2rem;
+        font-size: 1.85rem;
+    }
+
+    /* -------------------------------------------------------
+       ESTADO DEL SISTEMA COMPACTO
+       ------------------------------------------------------- */
+
+    .system-status {
+        border: 1px solid rgba(128, 128, 128, 0.28);
+        border-radius: 10px;
+        padding: 10px 14px;
+        margin-top: 8px;
+        margin-bottom: 20px;
+    }
+
+    .system-status-title {
+        font-size: 0.90rem;
+        font-weight: 600;
+        margin-bottom: 7px;
+        opacity: 0.90;
+    }
+
+    .system-status-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px 22px;
+        font-size: 0.86rem;
+    }
+
+    .system-status-item {
+        white-space: nowrap;
+    }
+
+    .system-ok {
+        font-weight: 600;
+    }
+
+    .system-warning {
+        font-weight: 600;
     }
 
     </style>
@@ -79,7 +121,7 @@ st.title(
 
 st.caption(
     f"{APP_VERSION} · Plataforma pública experimental "
-    "de monitoreo y tendencia hidrométrica"
+    "de monitoreo y análisis hidrométrico"
 )
 
 st.markdown(
@@ -157,6 +199,10 @@ st.sidebar.write(
 
 st.sidebar.write(
     "Tendencia extendida: **30 días**"
+)
+
+st.sidebar.write(
+    "Escenario hipotético: **60 días**"
 )
 
 
@@ -319,9 +365,9 @@ def calcular_tendencia_caudal(
         "actual"
     ] = actual
 
-    # --------------------------------------------------------
+    # ========================================================
     # 3 DÍAS
-    # --------------------------------------------------------
+    # ========================================================
 
     if len(
         valores
@@ -336,9 +382,9 @@ def calcular_tendencia_caudal(
             )
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # 7 DÍAS
-    # --------------------------------------------------------
+    # ========================================================
 
     if len(
         valores
@@ -367,9 +413,9 @@ def calcular_tendencia_caudal(
                 * 100
             )
 
-    # --------------------------------------------------------
+    # ========================================================
     # PENDIENTE RECIENTE
-    # --------------------------------------------------------
+    # ========================================================
 
     ultimos = valores[
         -min(
@@ -404,9 +450,9 @@ def calcular_tendencia_caudal(
         "pendiente"
     ] = pendiente
 
-    # --------------------------------------------------------
+    # ========================================================
     # CLASIFICACIÓN
-    # --------------------------------------------------------
+    # ========================================================
 
     umbral = max(
         abs(
@@ -488,6 +534,10 @@ def calcular_tendencia_30_dias(
         "nivel_actual"
     ] = nivel_actual
 
+    # ========================================================
+    # PRONÓSTICO 15 DÍAS
+    # ========================================================
+
     if (
         forecast is None
         or not isinstance(
@@ -523,13 +573,15 @@ def calcular_tendencia_30_dias(
         "nivel_dia_15"
     ] = nivel15
 
-    # --------------------------------------------------------
+    # ========================================================
     # TENDENCIA OBSERVADA
-    # --------------------------------------------------------
+    # ========================================================
 
     obs = (
         niveles
-        .tail(30)
+        .tail(
+            30
+        )
         .to_numpy(
             dtype=float
         )
@@ -555,9 +607,9 @@ def calcular_tendencia_30_dias(
 
         pendiente_obs = 0.0
 
-    # --------------------------------------------------------
-    # TENDENCIA DEL FORECAST
-    # --------------------------------------------------------
+    # ========================================================
+    # TENDENCIA PRONÓSTICO
+    # ========================================================
 
     pred_values = pred.to_numpy(
         dtype=float
@@ -583,9 +635,9 @@ def calcular_tendencia_30_dias(
 
         pendiente_pred = 0.0
 
-    # --------------------------------------------------------
+    # ========================================================
     # COMBINACIÓN
-    # --------------------------------------------------------
+    # ========================================================
 
     pendiente = (
         0.35
@@ -606,9 +658,9 @@ def calcular_tendencia_30_dias(
         "pendiente"
     ] = pendiente
 
-    # --------------------------------------------------------
-    # EXTENSIÓN 16–30
-    # --------------------------------------------------------
+    # ========================================================
+    # EXTENSIÓN DÍAS 16 A 30
+    # ========================================================
 
     forecast_dates = pd.to_datetime(
         forecast[
@@ -688,9 +740,9 @@ def calcular_tendencia_30_dias(
             * 100
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # ESTADO
-    # --------------------------------------------------------
+    # ========================================================
 
     if cambio30 >= 0.30:
 
@@ -823,7 +875,7 @@ def resumen_estaciones_upstream(
 
 
 # ============================================================
-# VALIDACIÓN
+# VALIDACIÓN DE FECHAS
 # ============================================================
 
 if desde > hasta:
@@ -834,7 +886,7 @@ if desde > hasta:
 
 
 # ============================================================
-# ACTUALIZAR
+# ACTUALIZACIÓN
 # ============================================================
 
 if actualizar:
@@ -922,8 +974,8 @@ if actualizar:
                         exog_meta = {}
 
                         st.warning(
-                            "No fue posible obtener todas "
-                            "las variables externas."
+                            "No fue posible obtener "
+                            "todas las variables externas."
                         )
 
                 # ============================================
@@ -953,7 +1005,7 @@ if actualizar:
                         upstream_meta = {}
 
                 # ============================================
-                # MODELO
+                # ENTRENAMIENTO DEL MODELO
                 # ============================================
 
                 with st.spinner(
@@ -979,6 +1031,7 @@ if actualizar:
 
                         models = {}
                         metrics = {}
+
                         forecast = (
                             pd.DataFrame()
                         )
@@ -989,7 +1042,7 @@ if actualizar:
                         )
 
                 # ============================================
-                # GUARDAR
+                # GUARDAR ESTADO
                 # ============================================
 
                 st.session_state[
@@ -1191,57 +1244,40 @@ else:
 
 
     # ========================================================
-    # ESTADO DEL SISTEMA
+    # ESTADO DEL SISTEMA - COMPACTO
     # ========================================================
 
-    st.subheader(
-        "🟢 Estado del sistema"
+    estado_ina_ok = (
+        isinstance(
+            df,
+            pd.DataFrame,
+        )
+        and not df.empty
     )
 
 
-    estado_ina = (
-        "✓ Operativo"
-        if (
-            isinstance(
-                df,
-                pd.DataFrame,
-            )
-            and not df.empty
+    estado_lluvia_ok = (
+        isinstance(
+            exog_future,
+            pd.DataFrame,
         )
-        else "✗ Sin datos"
+        and not exog_future.empty
+        and "precip_mm"
+        in exog_future.columns
     )
 
 
-    estado_lluvia = (
-        "✓ Disponible"
-        if (
-            isinstance(
-                exog_future,
-                pd.DataFrame,
-            )
-            and not exog_future.empty
-            and "precip_mm"
-            in exog_future.columns
+    estado_caudal_ok = (
+        isinstance(
+            exog_history,
+            pd.DataFrame,
         )
-        else "✗ No disponible"
-    )
-
-
-    estado_caudal = (
-        "✓ Disponible"
-        if (
-            isinstance(
-                exog_history,
-                pd.DataFrame,
-            )
-            and not exog_history.empty
-            and "caudal_m3s"
-            in exog_history.columns
-            and exog_history[
-                "caudal_m3s"
-            ].notna().any()
-        )
-        else "✗ No disponible"
+        and not exog_history.empty
+        and "caudal_m3s"
+        in exog_history.columns
+        and exog_history[
+            "caudal_m3s"
+        ].notna().any()
     )
 
 
@@ -1270,32 +1306,57 @@ else:
         )
 
 
-    s1, s2, s3, s4 = st.columns(
-        4
+    texto_ina = (
+        "✅ Operativo"
+        if estado_ina_ok
+        else "⚠️ Sin datos"
+    )
+
+    texto_lluvia = (
+        "✅ Disponible"
+        if estado_lluvia_ok
+        else "⚠️ No disponible"
+    )
+
+    texto_caudal = (
+        "✅ Disponible"
+        if estado_caudal_ok
+        else "⚠️ No disponible"
     )
 
 
-    s1.metric(
-        "INA",
-        estado_ina,
-    )
+    st.markdown(
+        f"""
+        <div class="system-status">
 
+            <div class="system-status-title">
+                🟢 Estado del sistema
+            </div>
 
-    s2.metric(
-        "Precipitación",
-        estado_lluvia,
-    )
+            <div class="system-status-row">
 
+                <div class="system-status-item">
+                    <b>INA:</b> {texto_ina}
+                </div>
 
-    s3.metric(
-        "Caudal",
-        estado_caudal,
-    )
+                <div class="system-status-item">
+                    <b>Precipitación:</b> {texto_lluvia}
+                </div>
 
+                <div class="system-status-item">
+                    <b>Caudal:</b> {texto_caudal}
+                </div>
 
-    s4.metric(
-        "Estaciones aguas arriba",
-        f"{estaciones_disponibles}/6",
+                <div class="system-status-item">
+                    <b>Aguas arriba:</b>
+                    {estaciones_disponibles}/6 estaciones
+                </div>
+
+            </div>
+
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 
@@ -1457,7 +1518,7 @@ else:
 
 
     # ========================================================
-    # TENDENCIA EXTENDIDA 30 DÍAS
+    # TENDENCIA 30 DÍAS
     # ========================================================
 
     st.subheader(
@@ -1663,6 +1724,18 @@ else:
         "una extrapolación amortiguada de tendencia. "
         "No constituye un pronóstico diario equivalente "
         "al horizonte de 15 días."
+    )
+
+
+    # ========================================================
+    # ESCENARIO HIPOTÉTICO DE ESTRÉS 60 DÍAS
+    # ========================================================
+
+    render_stress_scenario(
+        df=df,
+        models=models,
+        exog_history=exog_history,
+        upstream_history=upstream_history,
     )
 
 
@@ -2104,6 +2177,10 @@ else:
         )
 
         st.write(
+            "**Escenario hipotético:** 60 días"
+        )
+
+        st.write(
             "**Modelo:** Random Forest Regressor"
         )
 
@@ -2126,14 +2203,15 @@ else:
             El horizonte de **15 días** utiliza información
             hidrométrica y meteorológica disponible.
 
-            El valor de RMSE corresponde a una validación histórica
-            del modelo y no representa una garantía de error máximo
-            para cada pronóstico futuro.
+            La sección de **30 días** es un indicador de tendencia
+            de mediano plazo y no un pronóstico meteorológico completo.
 
-            La sección de **30 días** funciona como un indicador
-            de tendencia de mediano plazo. Los días 16–30
-            se obtienen mediante extrapolación amortiguada
-            y poseen mayor incertidumbre.
+            El escenario de **60 días** es una simulación de tipo
+            *qué pasa si*, construida con condiciones históricamente
+            elevadas de precipitación, caudal y niveles aguas arriba.
+
+            El RMSE corresponde a validación histórica y no representa
+            una garantía de error máximo para un pronóstico futuro.
             """
         )
 
@@ -2170,7 +2248,7 @@ st.markdown(
 
     Datos hidrométricos y caudal: **Instituto Nacional del Agua (INA)**  
     Precipitación: **Open-Meteo**  
-    Predicción: **modelo experimental propio**
+    Predicción y escenarios: **modelo experimental propio**
     """
 )
 
@@ -2186,5 +2264,6 @@ st.warning(
 st.caption(
     f"Paraná · San Nicolás {APP_VERSION} | "
     "Pronóstico experimental: 15 días | "
-    "Tendencia extendida: 30 días"
+    "Tendencia extendida: 30 días | "
+    "Escenarios hipotéticos: 60 días"
 )
