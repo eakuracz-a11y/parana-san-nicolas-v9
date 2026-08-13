@@ -7,7 +7,11 @@ from datetime import date, timedelta
 from src.ina import (
     observed,
     forecast_meta,
-    STATIONS,
+)
+
+from src.model import (
+    train,
+    predict,
 )
 
 
@@ -20,6 +24,13 @@ st.set_page_config(
     page_icon="🌊",
     layout="wide",
 )
+
+
+# ============================================================
+# CONSTANTES
+# ============================================================
+
+FORECAST_DAYS = 15
 
 
 # ============================================================
@@ -49,7 +60,10 @@ st.markdown(
 st.sidebar.header("Consulta online")
 
 fecha_hasta = date.today()
-fecha_desde = fecha_hasta - timedelta(days=30)
+
+# Se utilizan 90 días por defecto para disponer
+# de más información para entrenar el modelo.
+fecha_desde = fecha_hasta - timedelta(days=90)
 
 
 desde = st.sidebar.date_input(
@@ -80,6 +94,9 @@ st.sidebar.write("San Nicolás de los Arroyos")
 st.sidebar.subheader("Fuente")
 st.sidebar.write("Instituto Nacional del Agua (INA)")
 
+st.sidebar.subheader("Pronóstico")
+st.sidebar.write("Horizonte experimental: 15 días")
+
 
 # ============================================================
 # FUNCIONES AUXILIARES
@@ -87,7 +104,7 @@ st.sidebar.write("Instituto Nacional del Agua (INA)")
 
 def preparar_datos(df):
     """
-    Prepara los datos obtenidos desde src.ina.
+    Prepara los datos provenientes de src.ina.
     """
 
     if df is None:
@@ -101,32 +118,35 @@ def preparar_datos(df):
 
     df = df.copy()
 
-    # --------------------------------------------------------
+    # ========================================================
     # FECHA
-    # --------------------------------------------------------
+    # ========================================================
 
-    if "datetime" in df.columns:
+    if "datetime" not in df.columns:
+        return pd.DataFrame()
 
-        df["datetime"] = pd.to_datetime(
-            df["datetime"],
-            errors="coerce",
-            utc=True,
+    df["datetime"] = pd.to_datetime(
+        df["datetime"],
+        errors="coerce",
+        utc=True,
+    )
+
+    # Convertir a horario argentino para visualización
+    try:
+
+        df["datetime"] = (
+            df["datetime"]
+            .dt.tz_convert(
+                "America/Argentina/Buenos_Aires"
+            )
         )
 
-        # Convertir a hora Argentina
-        try:
+    except Exception:
+        pass
 
-            df["datetime"] = (
-                df["datetime"]
-                .dt.tz_convert("America/Argentina/Buenos_Aires")
-            )
-
-        except Exception:
-            pass
-
-    # --------------------------------------------------------
+    # ========================================================
     # NIVEL
-    # --------------------------------------------------------
+    # ========================================================
 
     if "value" in df.columns:
 
@@ -142,33 +162,58 @@ def preparar_datos(df):
             errors="coerce",
         )
 
-    # --------------------------------------------------------
+    else:
+
+        return pd.DataFrame()
+
+    # ========================================================
     # LIMPIEZA
-    # --------------------------------------------------------
+    # ========================================================
 
-    columnas_necesarias = []
+    df = df.dropna(
+        subset=[
+            "datetime",
+            "nivel",
+        ]
+    )
 
-    if "datetime" in df.columns:
-        columnas_necesarias.append("datetime")
-
-    if "nivel" in df.columns:
-        columnas_necesarias.append("nivel")
-
-    if columnas_necesarias:
-
-        df = df.dropna(
-            subset=columnas_necesarias
+    df = (
+        df
+        .sort_values("datetime")
+        .drop_duplicates(
+            subset=["datetime"],
+            keep="last",
         )
-
-    if "datetime" in df.columns:
-
-        df = (
-            df
-            .sort_values("datetime")
-            .reset_index(drop=True)
-        )
+        .reset_index(drop=True)
+    )
 
     return df
+
+
+# ============================================================
+# ENTRENAR Y PRONOSTICAR
+# ============================================================
+
+def generar_pronostico(df):
+    """
+    Entrena el modelo y genera 15 días futuros.
+    """
+
+    models, metrics = train(
+        df
+    )
+
+    forecast = predict(
+        df,
+        models,
+        days=FORECAST_DAYS,
+    )
+
+    return (
+        forecast,
+        models,
+        metrics,
+    )
 
 
 # ============================================================
@@ -210,27 +255,34 @@ if actualizar:
                     "%Y-%m-%d"
                 )
 
-                # ------------------------------------------------
-                # CONSULTA
-                # ------------------------------------------------
+                # =================================================
+                # CONSULTAR INA
+                # =================================================
 
                 df_ina, error_ina = observed(
                     inicio,
                     fin,
                 )
 
-                # ------------------------------------------------
-                # ELIMINAR DATOS ANTERIORES
-                # ------------------------------------------------
-
+                # Eliminar resultados anteriores
                 st.session_state.pop(
                     "datos_ina",
                     None,
                 )
 
-                # ------------------------------------------------
-                # ERROR
-                # ------------------------------------------------
+                st.session_state.pop(
+                    "pronostico",
+                    None,
+                )
+
+                st.session_state.pop(
+                    "metricas_modelo",
+                    None,
+                )
+
+                # =================================================
+                # VALIDACIONES
+                # =================================================
 
                 if error_ina:
 
@@ -264,9 +316,9 @@ if actualizar:
 
                 else:
 
-                    # ============================================
-                    # PREPARAR DATOS
-                    # ============================================
+                    # =============================================
+                    # PREPARAR OBSERVACIONES
+                    # =============================================
 
                     df = preparar_datos(
                         df_ina
@@ -276,28 +328,10 @@ if actualizar:
 
                         st.warning(
                             "El INA devolvió observaciones, "
-                            "pero no fue posible procesarlas."
-                        )
-
-                    elif "datetime" not in df.columns:
-
-                        st.error(
-                            "No se pudo identificar "
-                            "la fecha de las observaciones."
-                        )
-
-                    elif "nivel" not in df.columns:
-
-                        st.error(
-                            "No se pudo identificar "
-                            "el nivel hidrométrico."
+                            "pero no pudieron procesarse."
                         )
 
                     else:
-
-                        # ========================================
-                        # GUARDAR EN SESIÓN
-                        # ========================================
 
                         st.session_state[
                             "datos_ina"
@@ -314,6 +348,45 @@ if actualizar:
                             "✅ Datos del INA actualizados correctamente."
                         )
 
+                        # =========================================
+                        # ENTRENAR MODELO
+                        # =========================================
+
+                        with st.spinner(
+                            "Generando pronóstico experimental "
+                            "de 15 días..."
+                        ):
+
+                            try:
+
+                                (
+                                    forecast,
+                                    models,
+                                    metrics,
+                                ) = generar_pronostico(
+                                    df
+                                )
+
+                                st.session_state[
+                                    "pronostico"
+                                ] = forecast
+
+                                st.session_state[
+                                    "metricas_modelo"
+                                ] = metrics
+
+                                st.session_state[
+                                    "modelo_info"
+                                ] = models
+
+                            except Exception as exc:
+
+                                st.session_state[
+                                    "error_modelo"
+                                ] = str(
+                                    exc
+                                )
+
             except Exception as exc:
 
                 st.error(
@@ -329,12 +402,13 @@ if "datos_ina" not in st.session_state:
 
     st.info(
         "Seleccione un período y presione "
-        "**Actualizar INA** para consultar los datos observados."
+        "**Actualizar INA** para consultar los datos observados "
+        "y generar el pronóstico experimental."
     )
 
 
 # ============================================================
-# MOSTRAR DATOS
+# DATOS OBSERVADOS
 # ============================================================
 
 else:
@@ -342,14 +416,6 @@ else:
     df = st.session_state[
         "datos_ina"
     ]
-
-    # ========================================================
-    # DATOS HIDROMÉTRICOS
-    # ========================================================
-
-    st.subheader(
-        "📊 Datos hidrométricos observados"
-    )
 
     valores = (
         df["nivel"]
@@ -364,15 +430,25 @@ else:
 
     else:
 
-        # ----------------------------------------------------
-        # DATOS ACTUALES
-        # ----------------------------------------------------
+        # ====================================================
+        # ÚLTIMA OBSERVACIÓN
+        # ====================================================
 
-        nivel_actual = valores.iloc[-1]
+        nivel_actual = float(
+            valores.iloc[-1]
+        )
 
-        minimo = valores.min()
-        maximo = valores.max()
-        promedio = valores.mean()
+        minimo = float(
+            valores.min()
+        )
+
+        maximo = float(
+            valores.max()
+        )
+
+        promedio = float(
+            valores.mean()
+        )
 
         ultima_fecha = (
             df.loc[
@@ -382,35 +458,35 @@ else:
             .iloc[-1]
         )
 
-        # ----------------------------------------------------
-        # MÉTRICAS PRINCIPALES
-        # ----------------------------------------------------
+        # ====================================================
+        # MÉTRICAS OBSERVADAS
+        # ====================================================
 
-        col1, col2, col3, col4 = st.columns(4)
+        st.subheader(
+            "📊 Situación observada"
+        )
 
-        col1.metric(
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric(
             "Último nivel",
             f"{nivel_actual:.2f} m",
         )
 
-        col2.metric(
-            "Mínimo",
+        c2.metric(
+            "Mínimo período",
             f"{minimo:.2f} m",
         )
 
-        col3.metric(
-            "Máximo",
+        c3.metric(
+            "Máximo período",
             f"{maximo:.2f} m",
         )
 
-        col4.metric(
+        c4.metric(
             "Promedio",
             f"{promedio:.2f} m",
         )
-
-        # ----------------------------------------------------
-        # INFORMACIÓN DEL ÚLTIMO DATO
-        # ----------------------------------------------------
 
         try:
 
@@ -427,21 +503,40 @@ else:
         st.caption(
             f"Última observación disponible: "
             f"**{fecha_texto}** · "
-            f"Registros utilizados: **{len(df)}**"
+            f"Registros observados: **{len(df)}**"
         )
 
+
         # ====================================================
-        # GRÁFICO
+        # OBTENER PRONÓSTICO
+        # ====================================================
+
+        forecast = st.session_state.get(
+            "pronostico"
+        )
+
+        metrics = st.session_state.get(
+            "metricas_modelo"
+        )
+
+        modelo_info = st.session_state.get(
+            "modelo_info"
+        )
+
+
+        # ====================================================
+        # GRÁFICO OBSERVADO + PRONÓSTICO
         # ====================================================
 
         st.subheader(
-            "📈 Evolución del nivel del río"
+            "📈 Nivel observado y pronóstico a 15 días"
         )
 
         fig = go.Figure()
 
+
         # ----------------------------------------------------
-        # SERIE OBSERVADA
+        # OBSERVADO
         # ----------------------------------------------------
 
         fig.add_trace(
@@ -450,46 +545,161 @@ else:
                 y=df["nivel"],
                 mode="lines+markers",
                 name="Nivel observado",
-                hovertemplate=(
-                    "%{x|%d/%m/%Y}"
-                    "<br>"
-                    "Nivel: %{y:.2f} m"
-                    "<extra></extra>"
+                line=dict(
+                    width=3,
                 ),
-            )
-        )
-
-        # ----------------------------------------------------
-        # ÚLTIMO VALOR
-        # ----------------------------------------------------
-
-        fig.add_trace(
-            go.Scatter(
-                x=[
-                    df["datetime"].iloc[-1]
-                ],
-                y=[
-                    df["nivel"].iloc[-1]
-                ],
-                mode="markers",
                 marker=dict(
-                    size=11,
+                    size=5,
                 ),
-                name="Último dato",
                 hovertemplate=(
                     "%{x|%d/%m/%Y}"
                     "<br>"
-                    "Último nivel: %{y:.2f} m"
+                    "Observado: %{y:.2f} m"
                     "<extra></extra>"
                 ),
             )
         )
+
+
+        # ====================================================
+        # PRONÓSTICO
+        # ====================================================
+
+        if (
+            forecast is not None
+            and isinstance(
+                forecast,
+                pd.DataFrame,
+            )
+            and not forecast.empty
+        ):
+
+            forecast = forecast.copy()
+
+            forecast[
+                "datetime"
+            ] = pd.to_datetime(
+                forecast[
+                    "datetime"
+                ],
+                errors="coerce",
+            )
+
+
+            # ------------------------------------------------
+            # CONEXIÓN ÚLTIMO OBSERVADO → PRIMER PRONÓSTICO
+            # ------------------------------------------------
+
+            conexion_x = [
+                df["datetime"].iloc[-1],
+                forecast["datetime"].iloc[0],
+            ]
+
+            conexion_y = [
+                df["nivel"].iloc[-1],
+                forecast["prediction"].iloc[0],
+            ]
+
+            fig.add_trace(
+                go.Scatter(
+                    x=conexion_x,
+                    y=conexion_y,
+                    mode="lines",
+                    line=dict(
+                        dash="dash",
+                        width=2,
+                    ),
+                    showlegend=False,
+                    hoverinfo="skip",
+                )
+            )
+
+
+            # ------------------------------------------------
+            # BANDA SUPERIOR
+            # ------------------------------------------------
+
+            fig.add_trace(
+                go.Scatter(
+                    x=forecast[
+                        "datetime"
+                    ],
+                    y=forecast[
+                        "upper"
+                    ],
+                    mode="lines",
+                    line=dict(
+                        width=0,
+                    ),
+                    showlegend=False,
+                    hoverinfo="skip",
+                )
+            )
+
+
+            # ------------------------------------------------
+            # BANDA INFERIOR
+            # ------------------------------------------------
+
+            fig.add_trace(
+                go.Scatter(
+                    x=forecast[
+                        "datetime"
+                    ],
+                    y=forecast[
+                        "lower"
+                    ],
+                    mode="lines",
+                    line=dict(
+                        width=0,
+                    ),
+                    fill="tonexty",
+                    name="Intervalo experimental",
+                    hoverinfo="skip",
+                )
+            )
+
+
+            # ------------------------------------------------
+            # LÍNEA DE PRONÓSTICO
+            # ------------------------------------------------
+
+            fig.add_trace(
+                go.Scatter(
+                    x=forecast[
+                        "datetime"
+                    ],
+                    y=forecast[
+                        "prediction"
+                    ],
+                    mode="lines+markers",
+                    name="Pronóstico experimental",
+                    line=dict(
+                        dash="dash",
+                        width=3,
+                    ),
+                    marker=dict(
+                        size=6,
+                    ),
+                    hovertemplate=(
+                        "%{x|%d/%m/%Y}"
+                        "<br>"
+                        "Pronóstico: %{y:.2f} m"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+
+        # ====================================================
+        # DISEÑO DEL GRÁFICO
+        # ====================================================
 
         fig.update_layout(
             xaxis_title="Fecha",
             yaxis_title="Nivel hidrométrico (m)",
             hovermode="x unified",
-            height=520,
+            height=570,
             legend=dict(
                 orientation="h",
                 yanchor="bottom",
@@ -500,7 +710,7 @@ else:
             margin=dict(
                 l=20,
                 r=20,
-                t=50,
+                t=60,
                 b=20,
             ),
         )
@@ -514,63 +724,217 @@ else:
             use_container_width=True,
         )
 
+
         # ====================================================
-        # RESUMEN DEL PERÍODO
+        # RESULTADOS DEL PRONÓSTICO
         # ====================================================
 
-        with st.expander(
-            "📋 Resumen del período"
+        if (
+            forecast is not None
+            and isinstance(
+                forecast,
+                pd.DataFrame,
+            )
+            and not forecast.empty
         ):
 
-            periodo = st.session_state.get(
-                "periodo_ina"
+            st.subheader(
+                "🔮 Pronóstico experimental · 15 días"
             )
 
-            if periodo:
 
-                fecha_inicio = periodo[
-                    0
-                ].strftime(
-                    "%d/%m/%Y"
+            # ------------------------------------------------
+            # RESUMEN
+            # ------------------------------------------------
+
+            primer_pronostico = float(
+                forecast[
+                    "prediction"
+                ].iloc[0]
+            )
+
+            ultimo_pronostico = float(
+                forecast[
+                    "prediction"
+                ].iloc[-1]
+            )
+
+            max_pronostico = float(
+                forecast[
+                    "prediction"
+                ].max()
+            )
+
+            min_pronostico = float(
+                forecast[
+                    "prediction"
+                ].min()
+            )
+
+
+            p1, p2, p3, p4 = st.columns(4)
+
+            p1.metric(
+                "Pronóstico día 1",
+                f"{primer_pronostico:.2f} m",
+            )
+
+            p2.metric(
+                "Pronóstico día 15",
+                f"{ultimo_pronostico:.2f} m",
+            )
+
+            p3.metric(
+                "Máximo previsto",
+                f"{max_pronostico:.2f} m",
+            )
+
+            p4.metric(
+                "Mínimo previsto",
+                f"{min_pronostico:.2f} m",
+            )
+
+
+            # =================================================
+            # TABLA PRONÓSTICO
+            # =================================================
+
+            tabla_forecast = (
+                forecast.copy()
+            )
+
+            tabla_forecast[
+                "Fecha"
+            ] = tabla_forecast[
+                "datetime"
+            ].dt.strftime(
+                "%d/%m/%Y"
+            )
+
+            tabla_forecast[
+                "Pronóstico (m)"
+            ] = tabla_forecast[
+                "prediction"
+            ].round(2)
+
+            tabla_forecast[
+                "Inferior (m)"
+            ] = tabla_forecast[
+                "lower"
+            ].round(2)
+
+            tabla_forecast[
+                "Superior (m)"
+            ] = tabla_forecast[
+                "upper"
+            ].round(2)
+
+            tabla_forecast = (
+                tabla_forecast[
+                    [
+                        "Fecha",
+                        "Pronóstico (m)",
+                        "Inferior (m)",
+                        "Superior (m)",
+                    ]
+                ]
+            )
+
+            with st.expander(
+                "📋 Ver pronóstico diario"
+            ):
+
+                st.dataframe(
+                    tabla_forecast,
+                    use_container_width=True,
+                    hide_index=True,
                 )
 
-                fecha_fin = periodo[
-                    1
-                ].strftime(
-                    "%d/%m/%Y"
+
+            # =================================================
+            # INFORMACIÓN DEL MODELO
+            # =================================================
+
+            with st.expander(
+                "🧠 Información del modelo"
+            ):
+
+                st.write(
+                    "**Modelo:** Random Forest Regressor"
                 )
 
                 st.write(
-                    f"**Período consultado:** "
-                    f"{fecha_inicio} al {fecha_fin}"
+                    "**Horizonte:** 15 días"
                 )
 
-            st.write(
-                f"**Cantidad de observaciones:** {len(df)}"
-            )
+                st.write(
+                    "**Variable objetivo:** "
+                    "nivel hidrométrico de San Nicolás"
+                )
 
-            st.write(
-                f"**Nivel mínimo:** {minimo:.2f} m"
-            )
+                if modelo_info:
 
-            st.write(
-                f"**Nivel máximo:** {maximo:.2f} m"
-            )
+                    st.write(
+                        "**Observaciones utilizadas:**",
+                        modelo_info.get(
+                            "observations",
+                            len(df),
+                        ),
+                    )
 
-            st.write(
-                f"**Nivel promedio:** {promedio:.2f} m"
-            )
+                    st.write(
+                        "**Filas efectivas de entrenamiento:**",
+                        modelo_info.get(
+                            "training_rows",
+                            "-",
+                        ),
+                    )
 
-            st.write(
-                f"**Último nivel:** {nivel_actual:.2f} m"
-            )
+                if metrics:
+
+                    rmse = metrics.get(
+                        "RMSE"
+                    )
+
+                    if rmse is not None:
+
+                        st.write(
+                            "**RMSE de validación:** "
+                            f"{float(rmse):.3f} m"
+                        )
+
+                st.caption(
+                    "El pronóstico y su intervalo de incertidumbre "
+                    "son experimentales. No constituyen un pronóstico "
+                    "oficial del Instituto Nacional del Agua."
+                )
+
 
         # ====================================================
-        # TABLA
+        # ERROR DE MODELO
+        # ====================================================
+
+        elif "error_modelo" in st.session_state:
+
+            st.warning(
+                "Los datos observados fueron obtenidos "
+                "correctamente, pero el modelo no pudo "
+                "generar el pronóstico."
+            )
+
+            st.code(
+                st.session_state[
+                    "error_modelo"
+                ]
+            )
+
+
+        # ====================================================
+        # OBSERVACIONES
         # ====================================================
 
         with st.expander(
-            "🗂️ Ver observaciones"
+            "🗂️ Ver datos observados"
         ):
 
             tabla = df[
@@ -609,72 +973,84 @@ else:
 
 
 # ============================================================
-# PRONÓSTICO EXPERIMENTAL
+# METODOLOGÍA
 # ============================================================
 
 st.divider()
 
-st.subheader(
-    "🔮 Pronóstico experimental"
-)
-
-try:
-
-    meta = forecast_meta()
-
-    if isinstance(
-        meta,
-        dict,
-    ):
-
-        st.info(
-            meta.get(
-                "observacion",
-                "Pronóstico experimental generado "
-                "por el modelo propio.",
-            )
-        )
-
-except Exception:
-
-    st.info(
-        "El módulo de pronóstico experimental "
-        "se encuentra disponible para futuras versiones."
-    )
-
-
-# ============================================================
-# ESTACIONES CONSIDERADAS
-# ============================================================
-
 with st.expander(
-    "📍 Estaciones consideradas"
+    "ℹ️ Metodología y alcance"
 ):
 
     try:
 
-        for estacion in STATIONS:
+        meta = forecast_meta()
 
-            st.write(
-                f"• {estacion}"
-            )
+        st.write(
+            "**Fuente de observaciones:** "
+            f"{meta.get('fuente', 'INA')}"
+        )
+
+        st.write(
+            "**Estación:** "
+            f"{meta.get('estacion', 'San Nicolás')}"
+        )
+
+        st.write(
+            "**Serie INA:** "
+            f"{meta.get('seriesId', 36)}"
+        )
+
+        st.write(
+            "**Variable:** "
+            f"{meta.get('variable', 'Altura hidrométrica')}"
+        )
+
+        st.write(
+            "**Unidad:** "
+            f"{meta.get('unidad', 'm')}"
+        )
 
     except Exception:
 
         st.write(
-            "• San Nicolás de los Arroyos"
+            "Fuente de datos observados: "
+            "Instituto Nacional del Agua (INA)."
         )
+
+    st.markdown(
+        """
+        El modelo utiliza la evolución reciente del nivel observado
+        en San Nicolás para construir retardos temporales, diferencias,
+        tendencias y promedios móviles.
+
+        A partir de esas variables se entrena un modelo
+        **Random Forest Regressor** y se genera recursivamente
+        un pronóstico diario de **15 días**.
+
+        La banda mostrada alrededor del pronóstico representa una
+        estimación experimental de incertidumbre basada en el error
+        de validación del modelo. La incertidumbre aumenta con el
+        horizonte temporal.
+        """
+    )
+
+    st.warning(
+        "Este pronóstico es experimental y no reemplaza "
+        "la información, alertas ni pronósticos oficiales "
+        "emitidos por organismos competentes."
+    )
 
 
 # ============================================================
-# FUENTE Y PIE
+# PIE
 # ============================================================
 
 st.divider()
 
 st.caption(
     "Paraná · San Nicolás V9 | "
-    "Datos observados: Instituto Nacional del Agua (INA) | "
+    "Observaciones: Instituto Nacional del Agua (INA) | "
     "Serie 36 · San Nicolás | "
-    "Predicción: modelo experimental propio"
+    "Pronóstico experimental: 15 días"
 )
