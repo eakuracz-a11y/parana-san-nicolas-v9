@@ -11,7 +11,7 @@ from sklearn.metrics import mean_squared_error
 
 MIN_OBSERVATIONS = 20
 
-DEFAULT_FORECAST_DAYS = 7
+DEFAULT_FORECAST_DAYS = 15
 
 RANDOM_STATE = 42
 
