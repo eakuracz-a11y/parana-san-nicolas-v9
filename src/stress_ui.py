@@ -8,7 +8,7 @@ from src.stress_scenario import (
 
 
 # ============================================================
-# INTERFAZ ESCENARIO DE ESTRÉS
+# INTERFAZ DEL ESCENARIO
 # ============================================================
 
 def render_stress_scenario(
@@ -21,19 +21,22 @@ def render_stress_scenario(
     st.divider()
 
     st.subheader(
-        "⚠️ Escenario hipotético de estrés · 60 días"
+        "⚠️ Escenario hipotético de máximos históricos · 60 días"
     )
 
     st.markdown(
         """
-        Esta sección responde a una pregunta de tipo
-        **“qué pasa si”**.
+        Simulación de tipo **“qué pasa si”** que evalúa la respuesta
+        del modelo cuando condiciones históricamente elevadas de
+        **lluvia y caudal coinciden en una misma fecha futura**.
 
-        Simula la respuesta del modelo cuando coinciden
-        condiciones históricamente elevadas de
-        **precipitación, caudal y niveles aguas arriba**.
+        No representa la probabilidad de que esas condiciones ocurran.
         """
     )
+
+    # ========================================================
+    # SELECTOR
+    # ========================================================
 
     scenario_label = st.selectbox(
         "Escenario",
@@ -42,41 +45,41 @@ def render_stress_scenario(
             "Severo",
             "Extremo histórico",
         ],
-        index=1,
-        help=(
-            "Alto utiliza aproximadamente el percentil 90; "
-            "Severo el percentil 95; Extremo histórico utiliza "
-            "los máximos disponibles en el período analizado."
-        ),
+        index=2,
     )
 
-    map_scenario = {
+    scenario_map = {
         "Alto": "alto",
         "Severo": "severo",
         "Extremo histórico": "extremo",
     }
 
-    scenario_key = map_scenario[
+    scenario_key = scenario_map[
         scenario_label
     ]
 
+    # ========================================================
+    # CALCULAR
+    # ========================================================
+
     try:
 
-        scenario_df, meta = (
-            build_stress_scenario(
-                models=models,
-                exog_history=exog_history,
-                upstream_history=upstream_history,
-                days=60,
-                scenario=scenario_key,
-            )
+        (
+            scenario_df,
+            meta,
+        ) = build_stress_scenario(
+            models=models,
+            exog_history=exog_history,
+            upstream_history=upstream_history,
+            days=60,
+            scenario=scenario_key,
         )
 
     except Exception as exc:
 
         st.warning(
-            "No fue posible generar el escenario "
-            f"hipotético: {exc}"
+            "No fue posible construir "
+            f"el escenario: {exc}"
         )
 
         return
@@ -84,47 +87,29 @@ def render_stress_scenario(
     if scenario_df.empty:
 
         st.info(
-            "No existen datos suficientes para "
-            "construir el escenario."
+            "No hay información suficiente."
         )
 
         return
 
     # ========================================================
-    # VALORES PRINCIPALES
+    # METADATA
     # ========================================================
 
-    current_level = None
-
-    if (
-        isinstance(
-            df,
-            pd.DataFrame,
-        )
-        and not df.empty
-        and "nivel"
-        in df.columns
-    ):
-
-        values = pd.to_numeric(
-            df[
-                "nivel"
-            ],
-            errors="coerce",
-        ).dropna()
-
-        if len(values):
-
-            current_level = float(
-                values.iloc[-1]
-            )
+    current_level = meta.get(
+        "current_level"
+    )
 
     max_level = meta.get(
         "max_level"
     )
 
-    max_date = meta.get(
-        "max_level_date"
+    growth_m = meta.get(
+        "growth_m"
+    )
+
+    growth_pct = meta.get(
+        "growth_pct"
     )
 
     level30 = meta.get(
@@ -135,24 +120,35 @@ def render_stress_scenario(
         "level_day_60"
     )
 
-    flow_max = meta.get(
-        "flow_scenario_max"
+    rain_peak = meta.get(
+        "rain_peak_scenario"
     )
 
     rain_total = meta.get(
-        "rain_event_total",
-        0.0,
+        "rain_event_total"
+    )
+
+    flow_peak = meta.get(
+        "flow_scenario_max"
+    )
+
+    peak_date = meta.get(
+        "peak_future_date"
+    )
+
+    max_level_date = meta.get(
+        "max_level_date"
     )
 
     # ========================================================
-    # FILA 1 DE MÉTRICAS
+    # PRIMERA FILA
     # ========================================================
 
-    c1, c2, c3, c4 = st.columns(
+    a1, a2, a3, a4 = st.columns(
         4
     )
 
-    c1.metric(
+    a1.metric(
         "Nivel actual",
         (
             f"{current_level:.2f} m"
@@ -162,8 +158,8 @@ def render_stress_scenario(
         ),
     )
 
-    c2.metric(
-        "Máximo del escenario",
+    a2.metric(
+        "Máximo estimado",
         (
             f"{max_level:.2f} m"
             if max_level
@@ -172,7 +168,98 @@ def render_stress_scenario(
         ),
     )
 
-    c3.metric(
+    a3.metric(
+        "Crecimiento probable",
+        (
+            f"{growth_m:+.2f} m"
+            if growth_m
+            is not None
+            else "Sin datos"
+        ),
+    )
+
+    a4.metric(
+        "Variación relativa",
+        (
+            f"{growth_pct:+.1f}%"
+            if growth_pct
+            is not None
+            and pd.notna(
+                growth_pct
+            )
+            else "Sin datos"
+        ),
+    )
+
+    # ========================================================
+    # SEGUNDA FILA
+    # ========================================================
+
+    b1, b2, b3, b4 = st.columns(
+        4
+    )
+
+    b1.metric(
+        "Lluvia máxima aplicada",
+        (
+            f"{rain_peak:.1f} mm"
+            if rain_peak
+            is not None
+            else "Sin datos"
+        ),
+    )
+
+    b2.metric(
+        "Lluvia acumulada del evento",
+        (
+            f"{rain_total:.1f} mm"
+            if rain_total
+            is not None
+            else "Sin datos"
+        ),
+    )
+
+    b3.metric(
+        "Caudal máximo aplicado",
+        (
+            f"{flow_peak:,.0f} m³/s"
+            if flow_peak
+            is not None
+            and pd.notna(
+                flow_peak
+            )
+            else "Sin datos"
+        ),
+    )
+
+    if peak_date is not None:
+
+        peak_date_text = pd.to_datetime(
+            peak_date
+        ).strftime(
+            "%d/%m/%Y"
+        )
+
+    else:
+
+        peak_date_text = (
+            "Sin datos"
+        )
+
+    b4.metric(
+        "Fecha máximos conjuntos",
+        peak_date_text,
+    )
+
+    # ========================================================
+    # TERCERA FILA
+    # ========================================================
+
+    c1, c2, c3 = st.columns(
+        3
+    )
+
+    c1.metric(
         "Referencia día 30",
         (
             f"{level30:.2f} m"
@@ -182,7 +269,7 @@ def render_stress_scenario(
         ),
     )
 
-    c4.metric(
+    c2.metric(
         "Referencia día 60",
         (
             f"{level60:.2f} m"
@@ -192,46 +279,13 @@ def render_stress_scenario(
         ),
     )
 
-    # ========================================================
-    # FILA 2
-    # ========================================================
+    if max_level_date is not None:
 
-    c5, c6, c7 = st.columns(
-        3
-    )
-
-    c5.metric(
-        "Lluvia del evento",
-        f"{rain_total:.1f} mm",
-    )
-
-    c6.metric(
-        "Caudal máximo escenario",
-        (
-            f"{flow_max:,.0f} m³/s"
-            if flow_max is not None
-            and pd.notna(
-                flow_max
-            )
-            else "Sin datos"
-        ),
-    )
-
-    if max_date is not None:
-
-        try:
-
-            max_date_text = pd.to_datetime(
-                max_date
-            ).strftime(
-                "%d/%m/%Y"
-            )
-
-        except Exception:
-
-            max_date_text = str(
-                max_date
-            )
+        max_date_text = pd.to_datetime(
+            max_level_date
+        ).strftime(
+            "%d/%m/%Y"
+        )
 
     else:
 
@@ -239,19 +293,19 @@ def render_stress_scenario(
             "Sin datos"
         )
 
-    c7.metric(
-        "Fecha del máximo",
+    c3.metric(
+        "Fecha máximo nivel",
         max_date_text,
     )
 
     # ========================================================
-    # GRÁFICO DEL ESCENARIO
+    # GRÁFICO
     # ========================================================
 
     fig = go.Figure()
 
     # --------------------------------------------------------
-    # OBSERVADO RECIENTE
+    # OBSERVADO
     # --------------------------------------------------------
 
     if (
@@ -276,17 +330,11 @@ def render_stress_scenario(
                 ],
                 mode="lines",
                 name="Nivel observado",
-                hovertemplate=(
-                    "%{x|%d/%m/%Y}"
-                    "<br>"
-                    "Observado: %{y:.2f} m"
-                    "<extra></extra>"
-                ),
             )
         )
 
     # --------------------------------------------------------
-    # BANDA SUPERIOR
+    # INCERTIDUMBRE
     # --------------------------------------------------------
 
     fig.add_trace(
@@ -305,10 +353,6 @@ def render_stress_scenario(
             hoverinfo="skip",
         )
     )
-
-    # --------------------------------------------------------
-    # BANDA INFERIOR
-    # --------------------------------------------------------
 
     fig.add_trace(
         go.Scatter(
@@ -329,7 +373,7 @@ def render_stress_scenario(
     )
 
     # --------------------------------------------------------
-    # NIVEL DEL ESCENARIO
+    # ESCENARIO
     # --------------------------------------------------------
 
     fig.add_trace(
@@ -351,21 +395,69 @@ def render_stress_scenario(
             name=(
                 f"Escenario {scenario_label}"
             ),
-            hovertemplate=(
-                "%{x|%d/%m/%Y}"
-                "<br>"
-                "Nivel escenario: %{y:.2f} m"
-                "<extra></extra>"
-            ),
         )
     )
 
+    # ========================================================
+    # LÍNEA VERTICAL:
+    # MÁXIMA LLUVIA + MÁXIMO CAUDAL
+    # ========================================================
+
+    if peak_date is not None:
+
+        fig.add_vline(
+            x=pd.to_datetime(
+                peak_date
+            ).timestamp()
+            * 1000,
+            line_width=2,
+            line_dash="dot",
+            annotation_text=(
+                "Máx. lluvia + máx. caudal"
+            ),
+            annotation_position="top",
+        )
+
+    # ========================================================
+    # MARCAR MÁXIMO NIVEL
+    # ========================================================
+
+    if (
+        max_level_date
+        is not None
+        and max_level
+        is not None
+    ):
+
+        fig.add_trace(
+            go.Scatter(
+                x=[
+                    max_level_date
+                ],
+                y=[
+                    max_level
+                ],
+                mode="markers+text",
+                marker=dict(
+                    size=12,
+                    symbol="diamond",
+                ),
+                text=[
+                    f"{max_level:.2f} m"
+                ],
+                textposition=(
+                    "top center"
+                ),
+                name="Máximo nivel estimado",
+            )
+        )
+
     fig.update_layout(
-        height=540,
+        height=550,
         hovermode="x unified",
         legend=dict(
             orientation="h",
-            y=1.04,
+            y=1.05,
         ),
     )
 
@@ -392,21 +484,117 @@ def render_stress_scenario(
     )
 
     # ========================================================
-    # FORZANTES DEL ESCENARIO
+    # EXPLICACIÓN
+    # ========================================================
+
+    st.caption(
+        "La línea vertical identifica la fecha hipotética en la que "
+        "el máximo de precipitación del escenario y el máximo de "
+        "caudal coinciden. El crecimiento mostrado corresponde a "
+        "la respuesta del modelo ante esas condiciones."
+    )
+
+    # ========================================================
+    # REFERENCIAS HISTÓRICAS
     # ========================================================
 
     with st.expander(
-        "🌧️💧 Ver condiciones impuestas al escenario"
+        "📊 Ver máximos históricos utilizados"
     ):
 
-        table = scenario_df[
-            [
-                "datetime",
-                "precip_mm",
-                "caudal_m3s",
-                "prediction",
-            ]
-        ].copy()
+        rain_stats = meta.get(
+            "rain_stats",
+            {},
+        )
+
+        flow_stats = meta.get(
+            "flow_stats",
+            {},
+        )
+
+        st.write(
+            "### Precipitación"
+        )
+
+        st.write(
+            "**Máximo diario histórico:**",
+            f"{rain_stats.get('max_day', 0):.1f} mm",
+        )
+
+        if rain_stats.get(
+            "max_day_date"
+        ) is not None:
+
+            st.write(
+                "**Fecha histórica:**",
+                pd.to_datetime(
+                    rain_stats[
+                        "max_day_date"
+                    ]
+                ).strftime(
+                    "%d/%m/%Y"
+                ),
+            )
+
+        st.write(
+            "**Máximo acumulado 3 días:**",
+            f"{rain_stats.get('max_3d', 0):.1f} mm",
+        )
+
+        st.write(
+            "**Máximo acumulado 7 días:**",
+            f"{rain_stats.get('max_7d', 0):.1f} mm",
+        )
+
+        st.write(
+            "### Caudal"
+        )
+
+        if pd.notna(
+            flow_stats.get(
+                "maximum"
+            )
+        ):
+
+            st.write(
+                "**Máximo histórico:**",
+                f"{flow_stats['maximum']:,.0f} m³/s",
+            )
+
+        if flow_stats.get(
+            "maximum_date"
+        ) is not None:
+
+            st.write(
+                "**Fecha histórica:**",
+                pd.to_datetime(
+                    flow_stats[
+                        "maximum_date"
+                    ]
+                ).strftime(
+                    "%d/%m/%Y"
+                ),
+            )
+
+        st.write(
+            "### Fecha trasladada al escenario"
+        )
+
+        st.write(
+            "Los máximos históricos de lluvia y caudal "
+            "se hacen coincidir hipotéticamente el:",
+            f"**{peak_date_text}**",
+        )
+
+    # ========================================================
+    # TABLA
+    # ========================================================
+
+    with st.expander(
+        "📋 Ver simulación día por día"
+    ):
+
+        table = scenario_df.copy()
 
         table[
             "Fecha"
@@ -416,6 +604,17 @@ def render_stress_scenario(
             ]
         ).dt.strftime(
             "%d/%m/%Y"
+        )
+
+        table[
+            "Nivel (m)"
+        ] = pd.to_numeric(
+            table[
+                "prediction"
+            ],
+            errors="coerce",
+        ).round(
+            2
         )
 
         table[
@@ -440,24 +639,13 @@ def render_stress_scenario(
             0
         )
 
-        table[
-            "Nivel simulado (m)"
-        ] = pd.to_numeric(
-            table[
-                "prediction"
-            ],
-            errors="coerce",
-        ).round(
-            2
-        )
-
         st.dataframe(
             table[
                 [
                     "Fecha",
+                    "Nivel (m)",
                     "Lluvia (mm)",
                     "Caudal (m³/s)",
-                    "Nivel simulado (m)",
                 ]
             ],
             use_container_width=True,
@@ -465,117 +653,13 @@ def render_stress_scenario(
         )
 
     # ========================================================
-    # REFERENCIAS HISTÓRICAS
-    # ========================================================
-
-    rain_stats = meta.get(
-        "rain_stats",
-        {},
-    )
-
-    flow_stats = meta.get(
-        "flow_stats",
-        {},
-    )
-
-    with st.expander(
-        "📊 Referencias históricas utilizadas"
-    ):
-
-        st.write(
-            "**Precipitación histórica del período cargado**"
-        )
-
-        st.write(
-            "Percentil 90 diario:",
-            f"{rain_stats.get('p90_day', 0):.1f} mm",
-        )
-
-        st.write(
-            "Percentil 95 diario:",
-            f"{rain_stats.get('p95_day', 0):.1f} mm",
-        )
-
-        st.write(
-            "Máximo diario:",
-            f"{rain_stats.get('max_day', 0):.1f} mm",
-        )
-
-        st.write(
-            "Máximo acumulado 3 días:",
-            f"{rain_stats.get('max_3d', 0):.1f} mm",
-        )
-
-        st.write(
-            "Máximo acumulado 7 días:",
-            f"{rain_stats.get('max_7d', 0):.1f} mm",
-        )
-
-        st.write(
-            "**Caudal histórico del período cargado**"
-        )
-
-        current_q = flow_stats.get(
-            "current"
-        )
-
-        p90_q = flow_stats.get(
-            "p90"
-        )
-
-        p95_q = flow_stats.get(
-            "p95"
-        )
-
-        max_q = flow_stats.get(
-            "maximum"
-        )
-
-        if pd.notna(
-            current_q
-        ):
-
-            st.write(
-                "Caudal actual:",
-                f"{current_q:,.0f} m³/s",
-            )
-
-        if pd.notna(
-            p90_q
-        ):
-
-            st.write(
-                "Percentil 90:",
-                f"{p90_q:,.0f} m³/s",
-            )
-
-        if pd.notna(
-            p95_q
-        ):
-
-            st.write(
-                "Percentil 95:",
-                f"{p95_q:,.0f} m³/s",
-            )
-
-        if pd.notna(
-            max_q
-        ):
-
-            st.write(
-                "Máximo:",
-                f"{max_q:,.0f} m³/s",
-            )
-
-    # ========================================================
     # ADVERTENCIA
     # ========================================================
 
     st.warning(
-        "Este gráfico es una simulación hipotética de estrés. "
-        "No indica que estas condiciones vayan a ocurrir y no "
-        "constituye un pronóstico hidrológico oficial. "
-        "Un Random Forest tampoco es un modelo hidráulico y "
-        "tiene capacidad limitada para extrapolar niveles fuera "
-        "de los rangos observados durante su entrenamiento."
+        "Este escenario es una simulación hipotética de estrés. "
+        "No significa que el máximo histórico de lluvia y el máximo "
+        "histórico de caudal vayan a ocurrir simultáneamente. "
+        "Tampoco constituye un pronóstico oficial ni un modelo "
+        "hidráulico de propagación de crecidas."
     )
