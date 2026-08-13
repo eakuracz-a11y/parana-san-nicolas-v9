@@ -716,7 +716,9 @@ else:
         )
 
         fig.update_xaxes(
-            tickformat="%d/%m/%Y"
+            range=[0, 7],
+    dtick=0.5,
+    title="Nivel hidrométrico (m)",
         )
 
         st.plotly_chart(
