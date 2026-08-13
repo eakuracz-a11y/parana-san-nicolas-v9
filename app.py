@@ -51,7 +51,7 @@ st.set_page_config(
 
 
 # ============================================================
-# ESTILO
+# ESTILO GENERAL
 # ============================================================
 
 st.markdown(
@@ -64,45 +64,11 @@ st.markdown(
     }
 
     [data-testid="stMetricValue"] {
-        font-size: 1.85rem;
+        font-size: 1.75rem;
     }
 
-    /* -------------------------------------------------------
-       ESTADO DEL SISTEMA COMPACTO
-       ------------------------------------------------------- */
-
-    .system-status {
-        border: 1px solid rgba(128, 128, 128, 0.28);
-        border-radius: 10px;
-        padding: 10px 14px;
-        margin-top: 8px;
-        margin-bottom: 20px;
-    }
-
-    .system-status-title {
+    [data-testid="stMetricLabel"] {
         font-size: 0.90rem;
-        font-weight: 600;
-        margin-bottom: 7px;
-        opacity: 0.90;
-    }
-
-    .system-status-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px 22px;
-        font-size: 0.86rem;
-    }
-
-    .system-status-item {
-        white-space: nowrap;
-    }
-
-    .system-ok {
-        font-weight: 600;
-    }
-
-    .system-warning {
-        font-weight: 600;
     }
 
     </style>
@@ -365,9 +331,9 @@ def calcular_tendencia_caudal(
         "actual"
     ] = actual
 
-    # ========================================================
-    # 3 DÍAS
-    # ========================================================
+    # --------------------------------------------------------
+    # VARIACIÓN 3 DÍAS
+    # --------------------------------------------------------
 
     if len(
         valores
@@ -382,9 +348,9 @@ def calcular_tendencia_caudal(
             )
         )
 
-    # ========================================================
-    # 7 DÍAS
-    # ========================================================
+    # --------------------------------------------------------
+    # VARIACIÓN 7 DÍAS
+    # --------------------------------------------------------
 
     if len(
         valores
@@ -413,14 +379,16 @@ def calcular_tendencia_caudal(
                 * 100
             )
 
-    # ========================================================
+    # --------------------------------------------------------
     # PENDIENTE RECIENTE
-    # ========================================================
+    # --------------------------------------------------------
 
     ultimos = valores[
         -min(
             7,
-            len(valores),
+            len(
+                valores
+            ),
         ):
     ]
 
@@ -450,9 +418,9 @@ def calcular_tendencia_caudal(
         "pendiente"
     ] = pendiente
 
-    # ========================================================
-    # CLASIFICACIÓN
-    # ========================================================
+    # --------------------------------------------------------
+    # ESTADO
+    # --------------------------------------------------------
 
     umbral = max(
         abs(
@@ -534,9 +502,9 @@ def calcular_tendencia_30_dias(
         "nivel_actual"
     ] = nivel_actual
 
-    # ========================================================
+    # --------------------------------------------------------
     # PRONÓSTICO 15 DÍAS
-    # ========================================================
+    # --------------------------------------------------------
 
     if (
         forecast is None
@@ -573,9 +541,9 @@ def calcular_tendencia_30_dias(
         "nivel_dia_15"
     ] = nivel15
 
-    # ========================================================
-    # TENDENCIA OBSERVADA
-    # ========================================================
+    # --------------------------------------------------------
+    # PENDIENTE OBSERVADA
+    # --------------------------------------------------------
 
     obs = (
         niveles
@@ -607,9 +575,9 @@ def calcular_tendencia_30_dias(
 
         pendiente_obs = 0.0
 
-    # ========================================================
-    # TENDENCIA PRONÓSTICO
-    # ========================================================
+    # --------------------------------------------------------
+    # PENDIENTE DEL PRONÓSTICO
+    # --------------------------------------------------------
 
     pred_values = pred.to_numpy(
         dtype=float
@@ -635,9 +603,9 @@ def calcular_tendencia_30_dias(
 
         pendiente_pred = 0.0
 
-    # ========================================================
-    # COMBINACIÓN
-    # ========================================================
+    # --------------------------------------------------------
+    # COMBINAR
+    # --------------------------------------------------------
 
     pendiente = (
         0.35
@@ -658,9 +626,9 @@ def calcular_tendencia_30_dias(
         "pendiente"
     ] = pendiente
 
-    # ========================================================
-    # EXTENSIÓN DÍAS 16 A 30
-    # ========================================================
+    # --------------------------------------------------------
+    # EXTENSIÓN 16–30
+    # --------------------------------------------------------
 
     forecast_dates = pd.to_datetime(
         forecast[
@@ -740,9 +708,9 @@ def calcular_tendencia_30_dias(
             * 100
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # ESTADO
-    # ========================================================
+    # --------------------------------------------------------
 
     if cambio30 >= 0.30:
 
@@ -886,7 +854,7 @@ if desde > hasta:
 
 
 # ============================================================
-# ACTUALIZACIÓN
+# ACTUALIZAR MODELO
 # ============================================================
 
 if actualizar:
@@ -908,7 +876,7 @@ if actualizar:
         )
 
         # ====================================================
-        # NIVEL SAN NICOLÁS
+        # DATOS INA
         # ====================================================
 
         with st.spinner(
@@ -961,7 +929,7 @@ if actualizar:
                             FORECAST_DAYS,
                         )
 
-                    except Exception as exc:
+                    except Exception:
 
                         exog_history = (
                             pd.DataFrame()
@@ -974,8 +942,8 @@ if actualizar:
                         exog_meta = {}
 
                         st.warning(
-                            "No fue posible obtener "
-                            "todas las variables externas."
+                            "No fue posible obtener todas "
+                            "las variables externas."
                         )
 
                 # ============================================
@@ -1004,8 +972,13 @@ if actualizar:
 
                         upstream_meta = {}
 
+                        st.warning(
+                            "No fue posible obtener todas "
+                            "las estaciones aguas arriba."
+                        )
+
                 # ============================================
-                # ENTRENAMIENTO DEL MODELO
+                # MODELO
                 # ============================================
 
                 with st.spinner(
@@ -1042,7 +1015,7 @@ if actualizar:
                         )
 
                 # ============================================
-                # GUARDAR ESTADO
+                # GUARDAR EN SESIÓN
                 # ============================================
 
                 st.session_state[
@@ -1244,7 +1217,7 @@ else:
 
 
     # ========================================================
-    # ESTADO DEL SISTEMA - COMPACTO
+    # ESTADO DEL SISTEMA - COMPACTO Y SIN HTML
     # ========================================================
 
     estado_ina_ok = (
@@ -1306,58 +1279,66 @@ else:
         )
 
 
-    texto_ina = (
-        "✅ Operativo"
-        if estado_ina_ok
-        else "⚠️ Sin datos"
-    )
-
-    texto_lluvia = (
-        "✅ Disponible"
-        if estado_lluvia_ok
-        else "⚠️ No disponible"
-    )
-
-    texto_caudal = (
-        "✅ Disponible"
-        if estado_caudal_ok
-        else "⚠️ No disponible"
+    st.caption(
+        "🟢 **Estado del sistema**"
     )
 
 
-    st.markdown(
-        f"""
-        <div class="system-status">
-
-            <div class="system-status-title">
-                🟢 Estado del sistema
-            </div>
-
-            <div class="system-status-row">
-
-                <div class="system-status-item">
-                    <b>INA:</b> {texto_ina}
-                </div>
-
-                <div class="system-status-item">
-                    <b>Precipitación:</b> {texto_lluvia}
-                </div>
-
-                <div class="system-status-item">
-                    <b>Caudal:</b> {texto_caudal}
-                </div>
-
-                <div class="system-status-item">
-                    <b>Aguas arriba:</b>
-                    {estaciones_disponibles}/6 estaciones
-                </div>
-
-            </div>
-
-        </div>
-        """,
-        unsafe_allow_html=True,
+    s1, s2, s3, s4 = st.columns(
+        [
+            1,
+            1.2,
+            1,
+            1.5,
+        ]
     )
+
+
+    with s1:
+
+        st.caption(
+            (
+                "**INA** · ✅ Operativo"
+                if estado_ina_ok
+                else
+                "**INA** · ⚠️ Sin datos"
+            )
+        )
+
+
+    with s2:
+
+        st.caption(
+            (
+                "**Lluvia** · ✅ Disponible"
+                if estado_lluvia_ok
+                else
+                "**Lluvia** · ⚠️ Sin datos"
+            )
+        )
+
+
+    with s3:
+
+        st.caption(
+            (
+                "**Caudal** · ✅ Disponible"
+                if estado_caudal_ok
+                else
+                "**Caudal** · ⚠️ Sin datos"
+            )
+        )
+
+
+    with s4:
+
+        st.caption(
+            "**Aguas arriba** · "
+            f"✅ {estaciones_disponibles}/6 estaciones"
+        )
+
+
+    st.divider()
 
 
     # ========================================================
@@ -1412,7 +1393,6 @@ else:
         )
 
 
-        # Banda superior
         fig.add_trace(
             go.Scatter(
                 x=f[
@@ -1431,7 +1411,6 @@ else:
         )
 
 
-        # Banda inferior
         fig.add_trace(
             go.Scatter(
                 x=f[
@@ -1451,7 +1430,6 @@ else:
         )
 
 
-        # Pronóstico
         fig.add_trace(
             go.Scatter(
                 x=f[
@@ -1468,9 +1446,7 @@ else:
                 marker=dict(
                     size=6,
                 ),
-                name=(
-                    "Pronóstico multivariable"
-                ),
+                name="Pronóstico multivariable",
                 hovertemplate=(
                     "%{x|%d/%m/%Y}"
                     "<br>"
@@ -1728,7 +1704,7 @@ else:
 
 
     # ========================================================
-    # ESCENARIO HIPOTÉTICO DE ESTRÉS 60 DÍAS
+    # ESCENARIO HIPOTÉTICO 60 DÍAS
     # ========================================================
 
     render_stress_scenario(
@@ -1820,7 +1796,7 @@ else:
 
         rain_fig.update_layout(
             height=320,
-            yaxis_title="mm/día",
+            yaxis_title="Precipitación (mm/día)",
         )
 
 
@@ -2265,5 +2241,5 @@ st.caption(
     f"Paraná · San Nicolás {APP_VERSION} | "
     "Pronóstico experimental: 15 días | "
     "Tendencia extendida: 30 días | "
-    "Escenarios hipotéticos: 60 días"
+    "Escenario hipotético: 60 días"
 )
