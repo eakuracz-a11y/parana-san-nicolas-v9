@@ -32,6 +32,10 @@ st.set_page_config(
 
 FORECAST_DAYS = 15
 
+Y_MIN = 0.0
+Y_MAX = 7.0
+Y_STEP = 0.5
+
 
 # ============================================================
 # ENCABEZADO
@@ -60,9 +64,6 @@ st.markdown(
 st.sidebar.header("Consulta online")
 
 fecha_hasta = date.today()
-
-# Se utilizan 90 días por defecto para disponer
-# de más información para entrenar el modelo.
 fecha_desde = fecha_hasta - timedelta(days=90)
 
 
@@ -104,7 +105,7 @@ st.sidebar.write("Horizonte experimental: 15 días")
 
 def preparar_datos(df):
     """
-    Prepara los datos provenientes de src.ina.
+    Prepara los datos provenientes del módulo INA.
     """
 
     if df is None:
@@ -131,7 +132,7 @@ def preparar_datos(df):
         utc=True,
     )
 
-    # Convertir a horario argentino para visualización
+    # Convertir a horario argentino
     try:
 
         df["datetime"] = (
@@ -191,13 +192,10 @@ def preparar_datos(df):
 
 
 # ============================================================
-# ENTRENAR Y PRONOSTICAR
+# GENERAR PRONÓSTICO
 # ============================================================
 
 def generar_pronostico(df):
-    """
-    Entrena el modelo y genera 15 días futuros.
-    """
 
     models, metrics = train(
         df
@@ -217,13 +215,14 @@ def generar_pronostico(df):
 
 
 # ============================================================
-# VALIDACIÓN DE FECHAS
+# VALIDACIÓN
 # ============================================================
 
 if desde > hasta:
 
     st.sidebar.error(
-        "La fecha Desde no puede ser posterior a la fecha Hasta."
+        "La fecha Desde no puede ser posterior "
+        "a la fecha Hasta."
     )
 
 
@@ -264,7 +263,10 @@ if actualizar:
                     fin,
                 )
 
-                # Eliminar resultados anteriores
+                # -------------------------------------------------
+                # LIMPIAR ESTADO ANTERIOR
+                # -------------------------------------------------
+
                 st.session_state.pop(
                     "datos_ina",
                     None,
@@ -277,6 +279,16 @@ if actualizar:
 
                 st.session_state.pop(
                     "metricas_modelo",
+                    None,
+                )
+
+                st.session_state.pop(
+                    "modelo_info",
+                    None,
+                )
+
+                st.session_state.pop(
+                    "error_modelo",
                     None,
                 )
 
@@ -317,7 +329,7 @@ if actualizar:
                 else:
 
                     # =============================================
-                    # PREPARAR OBSERVACIONES
+                    # PREPARAR DATOS
                     # =============================================
 
                     df = preparar_datos(
@@ -349,7 +361,7 @@ if actualizar:
                         )
 
                         # =========================================
-                        # ENTRENAR MODELO
+                        # MODELO
                         # =========================================
 
                         with st.spinner(
@@ -383,9 +395,7 @@ if actualizar:
 
                                 st.session_state[
                                     "error_modelo"
-                                ] = str(
-                                    exc
-                                )
+                                ] = str(exc)
 
             except Exception as exc:
 
@@ -402,13 +412,13 @@ if "datos_ina" not in st.session_state:
 
     st.info(
         "Seleccione un período y presione "
-        "**Actualizar INA** para consultar los datos observados "
+        "**Actualizar INA** para consultar los datos "
         "y generar el pronóstico experimental."
     )
 
 
 # ============================================================
-# DATOS OBSERVADOS
+# RESULTADOS
 # ============================================================
 
 else:
@@ -431,7 +441,7 @@ else:
     else:
 
         # ====================================================
-        # ÚLTIMA OBSERVACIÓN
+        # MÉTRICAS OBSERVADAS
         # ====================================================
 
         nivel_actual = float(
@@ -458,35 +468,38 @@ else:
             .iloc[-1]
         )
 
-        # ====================================================
-        # MÉTRICAS OBSERVADAS
-        # ====================================================
 
         st.subheader(
             "📊 Situación observada"
         )
 
+
         c1, c2, c3, c4 = st.columns(4)
+
 
         c1.metric(
             "Último nivel",
             f"{nivel_actual:.2f} m",
         )
 
+
         c2.metric(
             "Mínimo período",
             f"{minimo:.2f} m",
         )
+
 
         c3.metric(
             "Máximo período",
             f"{maximo:.2f} m",
         )
 
+
         c4.metric(
             "Promedio",
             f"{promedio:.2f} m",
         )
+
 
         try:
 
@@ -500,6 +513,7 @@ else:
                 ultima_fecha
             )
 
+
         st.caption(
             f"Última observación disponible: "
             f"**{fecha_texto}** · "
@@ -508,7 +522,7 @@ else:
 
 
         # ====================================================
-        # OBTENER PRONÓSTICO
+        # PRONÓSTICO
         # ====================================================
 
         forecast = st.session_state.get(
@@ -525,12 +539,13 @@ else:
 
 
         # ====================================================
-        # GRÁFICO OBSERVADO + PRONÓSTICO
+        # GRÁFICO
         # ====================================================
 
         st.subheader(
             "📈 Nivel observado y pronóstico a 15 días"
         )
+
 
         fig = go.Figure()
 
@@ -554,7 +569,7 @@ else:
                 hovertemplate=(
                     "%{x|%d/%m/%Y}"
                     "<br>"
-                    "Observado: %{y:.2f} m"
+                    "Nivel observado: %{y:.2f} m"
                     "<extra></extra>"
                 ),
             )
@@ -562,7 +577,7 @@ else:
 
 
         # ====================================================
-        # PRONÓSTICO
+        # PRONÓSTICO DISPONIBLE
         # ====================================================
 
         if (
@@ -576,34 +591,28 @@ else:
 
             forecast = forecast.copy()
 
-            forecast[
-                "datetime"
-            ] = pd.to_datetime(
-                forecast[
-                    "datetime"
-                ],
+
+            forecast["datetime"] = pd.to_datetime(
+                forecast["datetime"],
                 errors="coerce",
+                utc=True,
             )
 
 
             # ------------------------------------------------
-            # CONEXIÓN ÚLTIMO OBSERVADO → PRIMER PRONÓSTICO
+            # CONEXIÓN OBSERVADO → PRONÓSTICO
             # ------------------------------------------------
-
-            conexion_x = [
-                df["datetime"].iloc[-1],
-                forecast["datetime"].iloc[0],
-            ]
-
-            conexion_y = [
-                df["nivel"].iloc[-1],
-                forecast["prediction"].iloc[0],
-            ]
 
             fig.add_trace(
                 go.Scatter(
-                    x=conexion_x,
-                    y=conexion_y,
+                    x=[
+                        df["datetime"].iloc[-1],
+                        forecast["datetime"].iloc[0],
+                    ],
+                    y=[
+                        df["nivel"].iloc[-1],
+                        forecast["prediction"].iloc[0],
+                    ],
                     mode="lines",
                     line=dict(
                         dash="dash",
@@ -616,17 +625,13 @@ else:
 
 
             # ------------------------------------------------
-            # BANDA SUPERIOR
+            # LÍMITE SUPERIOR
             # ------------------------------------------------
 
             fig.add_trace(
                 go.Scatter(
-                    x=forecast[
-                        "datetime"
-                    ],
-                    y=forecast[
-                        "upper"
-                    ],
+                    x=forecast["datetime"],
+                    y=forecast["upper"],
                     mode="lines",
                     line=dict(
                         width=0,
@@ -638,40 +643,37 @@ else:
 
 
             # ------------------------------------------------
-            # BANDA INFERIOR
+            # LÍMITE INFERIOR + ÁREA
             # ------------------------------------------------
 
             fig.add_trace(
                 go.Scatter(
-                    x=forecast[
-                        "datetime"
-                    ],
-                    y=forecast[
-                        "lower"
-                    ],
+                    x=forecast["datetime"],
+                    y=forecast["lower"],
                     mode="lines",
                     line=dict(
                         width=0,
                     ),
                     fill="tonexty",
                     name="Intervalo experimental",
-                    hoverinfo="skip",
+                    hovertemplate=(
+                        "%{x|%d/%m/%Y}"
+                        "<br>"
+                        "Límite inferior: %{y:.2f} m"
+                        "<extra></extra>"
+                    ),
                 )
             )
 
 
             # ------------------------------------------------
-            # LÍNEA DE PRONÓSTICO
+            # PRONÓSTICO CENTRAL
             # ------------------------------------------------
 
             fig.add_trace(
                 go.Scatter(
-                    x=forecast[
-                        "datetime"
-                    ],
-                    y=forecast[
-                        "prediction"
-                    ],
+                    x=forecast["datetime"],
+                    y=forecast["prediction"],
                     mode="lines+markers",
                     name="Pronóstico experimental",
                     line=dict(
@@ -679,7 +681,7 @@ else:
                         width=3,
                     ),
                     marker=dict(
-                        size=6,
+                        size=7,
                     ),
                     hovertemplate=(
                         "%{x|%d/%m/%Y}"
@@ -692,14 +694,18 @@ else:
 
 
         # ====================================================
-        # DISEÑO DEL GRÁFICO
+        # CONFIGURACIÓN CORRECTA DE LOS EJES
         # ====================================================
 
         fig.update_layout(
-            xaxis_title="Fecha",
-            yaxis_title="Nivel hidrométrico (m)",
+            height=620,
             hovermode="x unified",
-            height=570,
+            margin=dict(
+                l=30,
+                r=30,
+                t=70,
+                b=40,
+            ),
             legend=dict(
                 orientation="h",
                 yanchor="bottom",
@@ -707,19 +713,40 @@ else:
                 xanchor="left",
                 x=0,
             ),
-            margin=dict(
-                l=20,
-                r=20,
-                t=60,
-                b=20,
-            ),
         )
 
+
+        # ----------------------------------------------------
+        # EJE X = FECHA
+        # ----------------------------------------------------
+
         fig.update_xaxes(
-            range=[0, 7],
-    dtick=0.5,
-    title="Nivel hidrométrico (m)",
+            title_text="Fecha",
+            type="date",
+            tickformat="%d/%m/%Y",
+            showgrid=True,
+            rangeslider_visible=False,
         )
+
+
+        # ----------------------------------------------------
+        # EJE Y = NIVEL
+        # ESCALA FIJA 0 - 7 METROS
+        # ----------------------------------------------------
+
+        fig.update_yaxes(
+            title_text="Nivel hidrométrico (m)",
+            range=[
+                Y_MIN,
+                Y_MAX,
+            ],
+            tickmode="linear",
+            tick0=0,
+            dtick=Y_STEP,
+            showgrid=True,
+            zeroline=True,
+        )
+
 
         st.plotly_chart(
             fig,
@@ -728,7 +755,7 @@ else:
 
 
         # ====================================================
-        # RESULTADOS DEL PRONÓSTICO
+        # PRONÓSTICO 15 DÍAS
         # ====================================================
 
         if (
@@ -745,15 +772,12 @@ else:
             )
 
 
-            # ------------------------------------------------
-            # RESUMEN
-            # ------------------------------------------------
-
             primer_pronostico = float(
                 forecast[
                     "prediction"
                 ].iloc[0]
             )
+
 
             ultimo_pronostico = float(
                 forecast[
@@ -761,11 +785,13 @@ else:
                 ].iloc[-1]
             )
 
+
             max_pronostico = float(
                 forecast[
                     "prediction"
                 ].max()
             )
+
 
             min_pronostico = float(
                 forecast[
@@ -776,20 +802,24 @@ else:
 
             p1, p2, p3, p4 = st.columns(4)
 
+
             p1.metric(
                 "Pronóstico día 1",
                 f"{primer_pronostico:.2f} m",
             )
+
 
             p2.metric(
                 "Pronóstico día 15",
                 f"{ultimo_pronostico:.2f} m",
             )
 
+
             p3.metric(
                 "Máximo previsto",
                 f"{max_pronostico:.2f} m",
             )
+
 
             p4.metric(
                 "Mínimo previsto",
@@ -798,12 +828,13 @@ else:
 
 
             # =================================================
-            # TABLA PRONÓSTICO
+            # TABLA DEL PRONÓSTICO
             # =================================================
 
             tabla_forecast = (
                 forecast.copy()
             )
+
 
             tabla_forecast[
                 "Fecha"
@@ -813,11 +844,13 @@ else:
                 "%d/%m/%Y"
             )
 
+
             tabla_forecast[
                 "Pronóstico (m)"
             ] = tabla_forecast[
                 "prediction"
             ].round(2)
+
 
             tabla_forecast[
                 "Inferior (m)"
@@ -825,22 +858,23 @@ else:
                 "lower"
             ].round(2)
 
+
             tabla_forecast[
                 "Superior (m)"
             ] = tabla_forecast[
                 "upper"
             ].round(2)
 
-            tabla_forecast = (
-                tabla_forecast[
-                    [
-                        "Fecha",
-                        "Pronóstico (m)",
-                        "Inferior (m)",
-                        "Superior (m)",
-                    ]
+
+            tabla_forecast = tabla_forecast[
+                [
+                    "Fecha",
+                    "Pronóstico (m)",
+                    "Inferior (m)",
+                    "Superior (m)",
                 ]
-            )
+            ]
+
 
             with st.expander(
                 "📋 Ver pronóstico diario"
@@ -871,7 +905,7 @@ else:
 
                 st.write(
                     "**Variable objetivo:** "
-                    "nivel hidrométrico de San Nicolás"
+                    "altura hidrométrica de San Nicolás"
                 )
 
                 if modelo_info:
@@ -905,23 +939,24 @@ else:
                             f"{float(rmse):.3f} m"
                         )
 
-                st.caption(
-                    "El pronóstico y su intervalo de incertidumbre "
-                    "son experimentales. No constituyen un pronóstico "
-                    "oficial del Instituto Nacional del Agua."
+                st.warning(
+                    "Pronóstico experimental. "
+                    "Actualmente utiliza la serie histórica "
+                    "de altura hidrométrica de San Nicolás. "
+                    "Todavía no incorpora precipitación futura "
+                    "ni variaciones de caudal como predictores."
                 )
 
 
         # ====================================================
-        # ERROR DE MODELO
+        # ERROR DEL MODELO
         # ====================================================
 
         elif "error_modelo" in st.session_state:
 
             st.warning(
-                "Los datos observados fueron obtenidos "
-                "correctamente, pero el modelo no pudo "
-                "generar el pronóstico."
+                "Los datos observados fueron obtenidos, "
+                "pero no fue posible generar el pronóstico."
             )
 
             st.code(
@@ -932,7 +967,7 @@ else:
 
 
         # ====================================================
-        # OBSERVACIONES
+        # DATOS OBSERVADOS
         # ====================================================
 
         with st.expander(
@@ -946,6 +981,7 @@ else:
                 ]
             ].copy()
 
+
             tabla[
                 "Fecha"
             ] = tabla[
@@ -954,11 +990,13 @@ else:
                 "%d/%m/%Y"
             )
 
+
             tabla[
                 "Nivel (m)"
             ] = tabla[
                 "nivel"
             ].round(2)
+
 
             tabla = tabla[
                 [
@@ -966,6 +1004,7 @@ else:
                     "Nivel (m)",
                 ]
             ]
+
 
             st.dataframe(
                 tabla,
@@ -980,6 +1019,7 @@ else:
 
 st.divider()
 
+
 with st.expander(
     "ℹ️ Metodología y alcance"
 ):
@@ -988,25 +1028,30 @@ with st.expander(
 
         meta = forecast_meta()
 
+
         st.write(
-            "**Fuente de observaciones:** "
+            "**Fuente:** "
             f"{meta.get('fuente', 'INA')}"
         )
+
 
         st.write(
             "**Estación:** "
             f"{meta.get('estacion', 'San Nicolás')}"
         )
 
+
         st.write(
             "**Serie INA:** "
             f"{meta.get('seriesId', 36)}"
         )
 
+
         st.write(
             "**Variable:** "
             f"{meta.get('variable', 'Altura hidrométrica')}"
         )
+
 
         st.write(
             "**Unidad:** "
@@ -1020,27 +1065,30 @@ with st.expander(
             "Instituto Nacional del Agua (INA)."
         )
 
+
     st.markdown(
         """
-        El modelo utiliza la evolución reciente del nivel observado
-        en San Nicolás para construir retardos temporales, diferencias,
-        tendencias y promedios móviles.
+        El modelo experimental utiliza la evolución histórica
+        reciente de la altura hidrométrica observada en San Nicolás.
 
-        A partir de esas variables se entrena un modelo
-        **Random Forest Regressor** y se genera recursivamente
-        un pronóstico diario de **15 días**.
+        Se generan retardos temporales, diferencias, promedios móviles
+        y tendencias recientes. Estas variables alimentan un modelo
+        **Random Forest Regressor**.
 
-        La banda mostrada alrededor del pronóstico representa una
-        estimación experimental de incertidumbre basada en el error
-        de validación del modelo. La incertidumbre aumenta con el
-        horizonte temporal.
+        El pronóstico se genera diariamente con un horizonte de
+        **15 días**.
+
+        La banda alrededor del pronóstico representa una estimación
+        experimental de incertidumbre basada en el error de validación
+        del modelo y aumenta progresivamente con el horizonte.
         """
     )
 
+
     st.warning(
-        "Este pronóstico es experimental y no reemplaza "
-        "la información, alertas ni pronósticos oficiales "
-        "emitidos por organismos competentes."
+        "Actualmente el modelo no incluye todavía "
+        "pronósticos de lluvia ni variaciones futuras de caudal. "
+        "El resultado no constituye un pronóstico oficial del INA."
     )
 
 
@@ -1050,9 +1098,11 @@ with st.expander(
 
 st.divider()
 
+
 st.caption(
     "Paraná · San Nicolás V9 | "
     "Observaciones: Instituto Nacional del Agua (INA) | "
     "Serie 36 · San Nicolás | "
-    "Pronóstico experimental: 15 días"
+    "Pronóstico experimental: 15 días | "
+    "Escala gráfica: 0–7 m"
 )
