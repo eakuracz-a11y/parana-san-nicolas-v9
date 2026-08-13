@@ -1,7 +1,10 @@
 import numpy as np
 import pandas as pd
 
-from src.model import crear_features
+from src.flood_response import (
+    fit_flood_response,
+    predict_stress_growth,
+)
 
 
 # ============================================================
@@ -10,9 +13,11 @@ from src.model import crear_features
 
 DEFAULT_STRESS_DAYS = 60
 
-# Día futuro en el que hacemos coincidir
-# caudal máximo + máximo de lluvia
-PEAK_DAY = 10
+# Día futuro donde hacemos coincidir:
+# lluvia máxima + caudal máximo + niveles altos aguas arriba
+FORCING_PEAK_DAY = 10
+
+MAX_LEVEL = 7.0
 
 
 SCENARIOS = {
@@ -22,7 +27,8 @@ SCENARIOS = {
         "quantile": 0.90,
         "rain_factor": 0.90,
         "flow_factor": 0.90,
-        "uncertainty_factor": 1.20,
+        "upstream_quantile": 0.90,
+        "uncertainty": 1.15,
     },
 
     "severo": {
@@ -30,7 +36,8 @@ SCENARIOS = {
         "quantile": 0.95,
         "rain_factor": 1.00,
         "flow_factor": 0.95,
-        "uncertainty_factor": 1.50,
+        "upstream_quantile": 0.95,
+        "uncertainty": 1.40,
     },
 
     "extremo": {
@@ -38,48 +45,14 @@ SCENARIOS = {
         "quantile": 1.00,
         "rain_factor": 1.00,
         "flow_factor": 1.00,
-        "uncertainty_factor": 1.80,
+        "upstream_quantile": 1.00,
+        "uncertainty": 1.70,
     },
 }
 
 
 # ============================================================
-# UTILIDADES
-# ============================================================
-
-def numeric_series(
-    df,
-    column,
-):
-
-    if (
-        df is None
-        or not isinstance(
-            df,
-            pd.DataFrame,
-        )
-        or df.empty
-        or column not in df.columns
-    ):
-
-        return pd.Series(
-            dtype=float
-        )
-
-    return (
-        pd.to_numeric(
-            df[
-                column
-            ],
-            errors="coerce",
-        )
-        .dropna()
-        .astype(float)
-    )
-
-
-# ============================================================
-# LLUVIA HISTÓRICA
+# LLUVIA
 # ============================================================
 
 def rainfall_statistics(
@@ -87,24 +60,20 @@ def rainfall_statistics(
 ):
 
     result = {
-
         "count": 0,
-
         "p90_day": 0.0,
         "p95_day": 0.0,
-
         "max_day": 0.0,
         "max_day_date": None,
-
         "max_3d": 0.0,
         "max_3d_date": None,
-
         "max_7d": 0.0,
         "max_7d_date": None,
-
-        "worst_7d_pattern": np.zeros(
-            7,
-            dtype=float,
+        "worst_7d_pattern": (
+            np.zeros(
+                7,
+                dtype=float,
+            )
         ),
     }
 
@@ -189,32 +158,28 @@ def rainfall_statistics(
         )
     )
 
-    # ========================================================
-    # MÁXIMO DIARIO
-    # ========================================================
-
-    idx_max = rain.idxmax()
+    idx_day = rain.idxmax()
 
     result[
         "max_day"
     ] = float(
         rain.loc[
-            idx_max
+            idx_day
         ]
     )
 
     result[
         "max_day_date"
     ] = work.loc[
-        idx_max,
+        idx_day,
         "datetime",
     ]
 
     # ========================================================
-    # MÁXIMO 3 DÍAS
+    # 3 DÍAS
     # ========================================================
 
-    rolling_3 = (
+    rolling3 = (
         rain
         .rolling(
             3,
@@ -223,14 +188,14 @@ def rainfall_statistics(
         .sum()
     )
 
-    if rolling_3.notna().any():
+    if rolling3.notna().any():
 
-        idx3 = rolling_3.idxmax()
+        idx3 = rolling3.idxmax()
 
         result[
             "max_3d"
         ] = float(
-            rolling_3.loc[
+            rolling3.loc[
                 idx3
             ]
         )
@@ -243,10 +208,10 @@ def rainfall_statistics(
         ]
 
     # ========================================================
-    # MÁXIMO 7 DÍAS
+    # 7 DÍAS
     # ========================================================
 
-    rolling_7 = (
+    rolling7 = (
         rain
         .rolling(
             7,
@@ -255,14 +220,14 @@ def rainfall_statistics(
         .sum()
     )
 
-    if rolling_7.notna().any():
+    if rolling7.notna().any():
 
-        idx7 = rolling_7.idxmax()
+        idx7 = rolling7.idxmax()
 
         result[
             "max_7d"
         ] = float(
-            rolling_7.loc[
+            rolling7.loc[
                 idx7
             ]
         )
@@ -274,17 +239,17 @@ def rainfall_statistics(
             "datetime",
         ]
 
-        start_idx = (
+        start = (
             idx7
             - 6
         )
 
-        if start_idx >= 0:
+        if start >= 0:
 
             pattern = (
-                rain.loc[
-                    start_idx:
-                    idx7
+                rain.iloc[
+                    start:
+                    idx7 + 1
                 ]
                 .to_numpy(
                     dtype=float
@@ -300,7 +265,7 @@ def rainfall_statistics(
                 ] = pattern
 
     # ========================================================
-    # FALLBACK SI NO HAY 7 DÍAS COMPLETOS
+    # FALLBACK
     # ========================================================
 
     if (
@@ -317,7 +282,6 @@ def rainfall_statistics(
             dtype=float,
         )
 
-        # El máximo diario queda en el centro
         pattern[
             3
         ] = result[
@@ -332,7 +296,7 @@ def rainfall_statistics(
 
 
 # ============================================================
-# CAUDAL HISTÓRICO
+# CAUDAL
 # ============================================================
 
 def flow_statistics(
@@ -340,14 +304,9 @@ def flow_statistics(
 ):
 
     result = {
-
-        "count": 0,
-
         "current": np.nan,
-
         "p90": np.nan,
         "p95": np.nan,
-
         "maximum": np.nan,
         "maximum_date": None,
     }
@@ -405,28 +364,20 @@ def flow_statistics(
 
         return result
 
-    flow = work[
+    q = work[
         "caudal_m3s"
     ]
 
     result[
-        "count"
-    ] = len(
-        flow
-    )
-
-    result[
         "current"
     ] = float(
-        flow.iloc[
-            -1
-        ]
+        q.iloc[-1]
     )
 
     result[
         "p90"
     ] = float(
-        flow.quantile(
+        q.quantile(
             0.90
         )
     )
@@ -434,17 +385,17 @@ def flow_statistics(
     result[
         "p95"
     ] = float(
-        flow.quantile(
+        q.quantile(
             0.95
         )
     )
 
-    idx = flow.idxmax()
+    idx = q.idxmax()
 
     result[
         "maximum"
     ] = float(
-        flow.loc[
+        q.loc[
             idx
         ]
     )
@@ -463,9 +414,9 @@ def flow_statistics(
 # AGUAS ARRIBA
 # ============================================================
 
-def upstream_statistics(
+def upstream_targets(
     upstream_history,
-    quantile,
+    scenario,
 ):
 
     result = {}
@@ -481,7 +432,13 @@ def upstream_statistics(
 
         return result
 
-    level_cols = [
+    quantile = SCENARIOS[
+        scenario
+    ][
+        "upstream_quantile"
+    ]
+
+    columns = [
         c
         for c in upstream_history.columns
         if c.startswith(
@@ -489,24 +446,23 @@ def upstream_statistics(
         )
     ]
 
-    for col in level_cols:
+    for col in columns:
 
-        values = numeric_series(
-            upstream_history,
-            col,
+        values = (
+            pd.to_numeric(
+                upstream_history[
+                    col
+                ],
+                errors="coerce",
+            )
+            .dropna()
         )
 
         if values.empty:
 
             continue
 
-        current = float(
-            values.iloc[
-                -1
-            ]
-        )
-
-        if quantile >= 1:
+        if quantile >= 1.0:
 
             target = float(
                 values.max()
@@ -522,137 +478,128 @@ def upstream_statistics(
 
         result[
             col
-        ] = {
-            "current": current,
-            "target": target,
-        }
+        ] = target
 
     return result
 
 
 # ============================================================
-# PERFIL DE LLUVIA FUTURA
+# SELECCIONAR LLUVIA DEL ESCENARIO
 # ============================================================
 
-def build_rain_scenario(
-    exog_history,
-    days,
+def select_rain_values(
+    stats,
     scenario,
 ):
-
-    stats = rainfall_statistics(
-        exog_history
-    )
 
     config = SCENARIOS[
         scenario
     ]
 
-    rain = np.zeros(
-        days,
-        dtype=float,
-    )
+    if scenario == "alto":
 
-    pattern = np.array(
-        stats[
-            "worst_7d_pattern"
-        ],
-        dtype=float,
-    )
+        rain_day = (
+            stats[
+                "p90_day"
+            ]
+        )
 
-    pattern = (
-        pattern
-        * config[
-            "rain_factor"
-        ]
-    )
+        rain_3d = min(
+            stats[
+                "max_3d"
+            ],
+            stats[
+                "max_7d"
+            ],
+        )
 
-    # ========================================================
-    # ALINEAR EL MÁXIMO DE LLUVIA CON PEAK_DAY
-    # ========================================================
+        rain_7d = (
+            stats[
+                "max_7d"
+            ]
+            * 0.90
+        )
 
-    if len(
-        pattern
-    ):
+    elif scenario == "severo":
 
-        peak_pattern_index = int(
-            np.argmax(
-                pattern
-            )
+        rain_day = (
+            stats[
+                "p95_day"
+            ]
+        )
+
+        rain_3d = (
+            stats[
+                "max_3d"
+            ]
+        )
+
+        rain_7d = (
+            stats[
+                "max_7d"
+            ]
         )
 
     else:
 
-        peak_pattern_index = 3
-
-    start_day = (
-        PEAK_DAY
-        - peak_pattern_index
-        - 1
-    )
-
-    for i, value in enumerate(
-        pattern
-    ):
-
-        pos = (
-            start_day
-            + i
+        rain_day = (
+            stats[
+                "max_day"
+            ]
         )
 
-        if (
-            0
-            <= pos
-            < days
-        ):
+        rain_3d = (
+            stats[
+                "max_3d"
+            ]
+        )
 
-            rain[
-                pos
-            ] = max(
-                float(
-                    value
-                ),
-                0.0,
-            )
+        rain_7d = (
+            stats[
+                "max_7d"
+            ]
+        )
 
-    return (
-        rain,
-        stats,
-    )
+    return {
+        "day": max(
+            rain_day
+            * config[
+                "rain_factor"
+            ],
+            0.0,
+        ),
+        "three": max(
+            rain_3d
+            * config[
+                "rain_factor"
+            ],
+            0.0,
+        ),
+        "seven": max(
+            rain_7d
+            * config[
+                "rain_factor"
+            ],
+            0.0,
+        ),
+    }
 
 
 # ============================================================
-# PERFIL DE CAUDAL FUTURO
+# CAUDAL DEL ESCENARIO
 # ============================================================
 
-def build_flow_scenario(
-    exog_history,
-    days,
+def select_flow_peak(
+    stats,
     scenario,
 ):
 
-    stats = flow_statistics(
-        exog_history
-    )
+    config = SCENARIOS[
+        scenario
+    ]
 
     current = stats[
         "current"
-    ]
-
-    if not np.isfinite(
-        current
-    ):
-
-        return (
-            np.full(
-                days,
-                np.nan,
-            ),
-            stats,
-        )
-
-    config = SCENARIOS[
-        scenario
     ]
 
     if scenario == "alto":
@@ -674,13 +621,18 @@ def build_flow_scenario(
         ]
 
     if not np.isfinite(
+        current
+    ):
+
+        current = target
+
+    if not np.isfinite(
         target
     ):
 
         target = current
 
-    # Factor según escenario
-    target = (
+    return float(
         current
         + (
             target
@@ -691,26 +643,118 @@ def build_flow_scenario(
         ]
     )
 
+
+# ============================================================
+# PERFIL DE LLUVIA 60 DÍAS
+# ============================================================
+
+def build_rain_profile(
+    rain_stats,
+    scenario,
+    days,
+):
+
+    config = SCENARIOS[
+        scenario
+    ]
+
+    profile = np.zeros(
+        days,
+        dtype=float,
+    )
+
+    pattern = np.array(
+        rain_stats[
+            "worst_7d_pattern"
+        ],
+        dtype=float,
+    )
+
+    pattern = (
+        pattern
+        * config[
+            "rain_factor"
+        ]
+    )
+
+    peak_index = int(
+        np.argmax(
+            pattern
+        )
+    )
+
+    start = (
+        FORCING_PEAK_DAY
+        - peak_index
+        - 1
+    )
+
+    for i, value in enumerate(
+        pattern
+    ):
+
+        pos = (
+            start
+            + i
+        )
+
+        if (
+            0
+            <= pos
+            < days
+        ):
+
+            profile[
+                pos
+            ] = max(
+                float(
+                    value
+                ),
+                0.0,
+            )
+
+    return profile
+
+
+# ============================================================
+# PERFIL DEL CAUDAL
+# ============================================================
+
+def build_flow_profile(
+    current,
+    peak,
+    days,
+):
+
+    if (
+        not np.isfinite(
+            current
+        )
+        or not np.isfinite(
+            peak
+        )
+    ):
+
+        return np.full(
+            days,
+            np.nan,
+        )
+
     values = []
 
-    for h in range(
+    for day in range(
         1,
         days + 1,
     ):
 
-        # ====================================================
-        # CRECIMIENTO HASTA PEAK_DAY
-        # ====================================================
-
-        if h <= PEAK_DAY:
+        if day <= FORCING_PEAK_DAY:
 
             fraction = (
-                h
-                / PEAK_DAY
+                day
+                / FORCING_PEAK_DAY
             )
 
-            # Curva suavizada
-            fraction = (
+            smooth = (
                 3
                 * fraction ** 2
                 - 2
@@ -720,57 +764,40 @@ def build_flow_scenario(
             value = (
                 current
                 + (
-                    target
+                    peak
                     - current
                 )
-                * fraction
+                * smooth
             )
 
-        # ====================================================
-        # MESETA ALTA
-        # ====================================================
-
-        elif h <= (
-            PEAK_DAY
-            + 7
+        elif day <= (
+            FORCING_PEAK_DAY
+            + 5
         ):
 
-            value = target
-
-        # ====================================================
-        # DESCENSO GRADUAL
-        # ====================================================
-
-        elif h <= 50:
-
-            span = (
-                50
-                - (
-                    PEAK_DAY
-                    + 7
-                )
-            )
-
-            fraction = (
-                h
-                - (
-                    PEAK_DAY
-                    + 7
-                )
-            ) / span
-
-            value = (
-                target
-                + (
-                    current
-                    - target
-                )
-                * fraction
-            )
+            value = peak
 
         else:
 
-            value = current
+            elapsed = (
+                day
+                - (
+                    FORCING_PEAK_DAY
+                    + 5
+                )
+            )
+
+            value = (
+                current
+                + (
+                    peak
+                    - current
+                )
+                * np.exp(
+                    -elapsed
+                    / 20.0
+                )
+            )
 
         values.append(
             max(
@@ -781,141 +808,147 @@ def build_flow_scenario(
             )
         )
 
+    return np.array(
+        values,
+        dtype=float,
+    )
+
+
+# ============================================================
+# HIDROGRAMA DEL NIVEL
+# ============================================================
+
+def build_level_profile(
+    current_level,
+    peak_level,
+    forcing_peak_day,
+    response_lag,
+    days,
+):
+
+    level_peak_day = min(
+        forcing_peak_day
+        + response_lag,
+        days,
+    )
+
+    rise_start = max(
+        1,
+        forcing_peak_day
+        - 4,
+    )
+
+    growth = max(
+        peak_level
+        - current_level,
+        0.0,
+    )
+
+    values = []
+
+    for day in range(
+        1,
+        days + 1,
+    ):
+
+        # ====================================================
+        # ANTES DEL INICIO DE RESPUESTA
+        # ====================================================
+
+        if day < rise_start:
+
+            level = (
+                current_level
+            )
+
+        # ====================================================
+        # CRECIMIENTO
+        # ====================================================
+
+        elif day <= level_peak_day:
+
+            denominator = max(
+                level_peak_day
+                - rise_start,
+                1,
+            )
+
+            fraction = (
+                day
+                - rise_start
+            ) / denominator
+
+            fraction = np.clip(
+                fraction,
+                0.0,
+                1.0,
+            )
+
+            smooth = (
+                3
+                * fraction ** 2
+                - 2
+                * fraction ** 3
+            )
+
+            level = (
+                current_level
+                + growth
+                * smooth
+            )
+
+        # ====================================================
+        # RECESIÓN
+        # ====================================================
+
+        else:
+
+            elapsed = (
+                day
+                - level_peak_day
+            )
+
+            remaining_growth = (
+                growth
+                * np.exp(
+                    -elapsed
+                    / 24.0
+                )
+            )
+
+            level = (
+                current_level
+                + remaining_growth
+            )
+
+        values.append(
+            float(
+                np.clip(
+                    level,
+                    0.0,
+                    MAX_LEVEL,
+                )
+            )
+        )
+
     return (
         np.array(
             values,
             dtype=float,
         ),
-        stats,
+        level_peak_day,
     )
 
 
 # ============================================================
-# PERFIL AGUAS ARRIBA
-# ============================================================
-
-def upstream_value_for_day(
-    current,
-    target,
-    h,
-):
-
-    if h <= PEAK_DAY:
-
-        fraction = (
-            h
-            / PEAK_DAY
-        )
-
-        fraction = (
-            3
-            * fraction ** 2
-            - 2
-            * fraction ** 3
-        )
-
-        return float(
-            current
-            + (
-                target
-                - current
-            )
-            * fraction
-        )
-
-    if h <= (
-        PEAK_DAY
-        + 7
-    ):
-
-        return float(
-            target
-        )
-
-    if h <= 50:
-
-        fraction = (
-            h
-            - (
-                PEAK_DAY
-                + 7
-            )
-        ) / (
-            50
-            - (
-                PEAK_DAY
-                + 7
-            )
-        )
-
-        return float(
-            target
-            + (
-                current
-                - target
-            )
-            * fraction
-        )
-
-    return float(
-        current
-    )
-
-
-# ============================================================
-# CREAR FEATURES
-# ============================================================
-
-def build_feature_row(
-    history,
-    feature_cols,
-):
-
-    featured = crear_features(
-        history
-    )
-
-    latest = featured.iloc[
-        -1
-    ]
-
-    row = {}
-
-    for col in feature_cols:
-
-        value = latest.get(
-            col,
-            np.nan,
-        )
-
-        if pd.isna(
-            value
-        ):
-
-            value = 0.0
-
-        row[
-            col
-        ] = float(
-            value
-        )
-
-    return pd.DataFrame(
-        [
-            row
-        ]
-    )
-
-
-# ============================================================
-# ESCENARIO DE ESTRÉS
+# ESCENARIO COMPLETO
 # ============================================================
 
 def build_stress_scenario(
     models,
     exog_history=None,
     upstream_history=None,
-    days=60,
+    days=DEFAULT_STRESS_DAYS,
     scenario="extremo",
 ):
 
@@ -926,22 +959,21 @@ def build_stress_scenario(
         )
 
     if (
-        not isinstance(
+        models is None
+        or not isinstance(
             models,
             dict,
         )
-        or "model"
-        not in models
         or "dataset"
         not in models
     ):
 
         raise ValueError(
-            "No existe un modelo entrenado válido."
+            "No existe dataset del modelo principal."
         )
 
     days = max(
-        1,
+        30,
         min(
             int(
                 days
@@ -950,386 +982,354 @@ def build_stress_scenario(
         ),
     )
 
-    model = models[
-        "model"
-    ]
-
-    feature_cols = models[
-        "feature_cols"
-    ]
-
-    rmse = float(
-        models.get(
-            "rmse",
-            0.15,
-        )
-    )
-
-    history = models[
+    dataset = models[
         "dataset"
     ].copy()
 
-    history[
+    dataset[
         "datetime"
     ] = pd.to_datetime(
-        history[
+        dataset[
             "datetime"
         ],
         errors="coerce",
-    ).dt.normalize()
-
-    last_date = history[
-        "datetime"
-    ].max()
-
-    nivel_actual = float(
-        history[
-            "nivel"
-        ].iloc[-1]
     )
 
-    # ========================================================
-    # ESCENARIOS
-    # ========================================================
+    dataset = dataset.dropna(
+        subset=[
+            "datetime",
+            "nivel",
+        ]
+    )
 
-    rain_values, rain_stats = (
-        build_rain_scenario(
-            exog_history,
-            days,
-            scenario,
+    if dataset.empty:
+
+        raise ValueError(
+            "El dataset histórico está vacío."
         )
-    )
 
-    flow_values, flow_stats = (
-        build_flow_scenario(
-            exog_history,
-            days,
-            scenario,
-        )
-    )
-
-    config = SCENARIOS[
-        scenario
-    ]
-
-    upstream_stats = (
-        upstream_statistics(
-            upstream_history,
-            config[
-                "quantile"
+    current_level = float(
+        pd.to_numeric(
+            dataset[
+                "nivel"
             ],
+            errors="coerce",
+        )
+        .dropna()
+        .iloc[-1]
+    )
+
+    last_date = (
+        dataset[
+            "datetime"
+        ]
+        .max()
+        .normalize()
+    )
+
+    # ========================================================
+    # ESTADÍSTICAS
+    # ========================================================
+
+    rain_stats = rainfall_statistics(
+        exog_history
+    )
+
+    flow_stats = flow_statistics(
+        exog_history
+    )
+
+    rain_values = select_rain_values(
+        rain_stats,
+        scenario,
+    )
+
+    flow_peak = select_flow_peak(
+        flow_stats,
+        scenario,
+    )
+
+    upstream = upstream_targets(
+        upstream_history,
+        scenario,
+    )
+
+    # ========================================================
+    # ENTRENAR RESPUESTA A CRECIENTES
+    # ========================================================
+
+    response_model = (
+        fit_flood_response(
+            dataset
         )
     )
 
-    upstream_cols = [
-        c
-        for c in history.columns
-        if c.startswith(
-            "nivel_"
-        )
-    ]
-
-    peak_future_date = (
-        last_date
-        + pd.Timedelta(
-            days=PEAK_DAY
-        )
-    )
-
-    output = []
-
-    # ========================================================
-    # SIMULACIÓN RECURSIVA 60 DÍAS
-    # ========================================================
-
-    for h in range(
-        1,
-        days + 1,
-    ):
-
-        target_date = (
-            last_date
-            + pd.Timedelta(
-                days=h
-            )
-        )
-
-        row = {
-
-            "datetime": target_date,
-
-            "nivel": float(
-                history[
-                    "nivel"
-                ].iloc[-1]
+    response = (
+        predict_stress_growth(
+            response_model=(
+                response_model
             ),
-
-            "precip_mm": float(
+            dataset=dataset,
+            rain_day=(
                 rain_values[
-                    h - 1
+                    "day"
                 ]
             ),
-
-            "caudal_m3s": (
-                float(
-                    flow_values[
-                        h - 1
-                    ]
-                )
-                if np.isfinite(
-                    flow_values[
-                        h - 1
-                    ]
-                )
-                else np.nan
+            rain_3d=(
+                rain_values[
+                    "three"
+                ]
             ),
-        }
+            rain_7d=(
+                rain_values[
+                    "seven"
+                ]
+            ),
+            flow_peak=flow_peak,
+            upstream_targets=upstream,
+        )
+    )
 
-        # ====================================================
-        # AGUAS ARRIBA
-        # ====================================================
+    predicted_growth = response[
+        "growth"
+    ]
 
-        for col in upstream_cols:
+    peak_level = response[
+        "peak_level"
+    ]
 
-            info = upstream_stats.get(
-                col
+    response_lag = response[
+        "response_lag"
+    ]
+
+    # ========================================================
+    # PERFILES TEMPORALES
+    # ========================================================
+
+    rain_profile = (
+        build_rain_profile(
+            rain_stats,
+            scenario,
+            days,
+        )
+    )
+
+    flow_profile = (
+        build_flow_profile(
+            current=(
+                flow_stats[
+                    "current"
+                ]
+            ),
+            peak=flow_peak,
+            days=days,
+        )
+    )
+
+    (
+        level_profile,
+        level_peak_day,
+    ) = build_level_profile(
+        current_level=(
+            current_level
+        ),
+        peak_level=(
+            peak_level
+        ),
+        forcing_peak_day=(
+            FORCING_PEAK_DAY
+        ),
+        response_lag=(
+            response_lag
+        ),
+        days=days,
+    )
+
+    dates = pd.date_range(
+        start=(
+            last_date
+            + pd.Timedelta(
+                days=1
             )
+        ),
+        periods=days,
+        freq="D",
+    )
 
-            if info:
+    # ========================================================
+    # INCERTIDUMBRE
+    # ========================================================
 
-                row[
-                    col
-                ] = upstream_value_for_day(
-                    info[
-                        "current"
-                    ],
-                    info[
-                        "target"
-                    ],
-                    h,
-                )
+    uncertainty_factor = SCENARIOS[
+        scenario
+    ][
+        "uncertainty"
+    ]
 
-            else:
+    rmse = max(
+        response[
+            "rmse"
+        ],
+        0.05,
+    )
 
-                valid = (
-                    history[
-                        col
-                    ]
-                    .dropna()
-                )
+    lower = []
 
-                row[
-                    col
-                ] = (
-                    float(
-                        valid.iloc[-1]
-                    )
-                    if len(
-                        valid
-                    )
-                    else np.nan
-                )
+    upper = []
 
-        # ====================================================
-        # PREDICCIÓN
-        # ====================================================
+    for i, level in enumerate(
+        level_profile,
+        start=1,
+    ):
 
-        trial = pd.concat(
-            [
-                history,
-                pd.DataFrame(
-                    [
-                        row
-                    ]
-                ),
-            ],
-            ignore_index=True,
+        # Más incertidumbre después del máximo forzante
+        horizon_factor = (
+            1.0
+            + 0.035
+            * i
         )
 
-        X = build_feature_row(
-            trial,
-            feature_cols,
+        margin = (
+            1.96
+            * rmse
+            * uncertainty_factor
+            * horizon_factor
         )
 
-        prediction = float(
-            model.predict(
-                X
-            )[0]
-        )
-
-        prediction = float(
-            np.clip(
-                prediction,
+        lower.append(
+            max(
                 0.0,
-                7.0,
+                level
+                - margin,
             )
         )
 
-        # ====================================================
-        # INCERTIDUMBRE
-        # ====================================================
-
-        sigma = (
-            rmse
-            * np.sqrt(
-                h
+        upper.append(
+            min(
+                MAX_LEVEL,
+                level
+                + margin,
             )
-            * config[
-                "uncertainty_factor"
-            ]
-        )
-
-        lower = max(
-            0.0,
-            prediction
-            - 1.96
-            * sigma,
-        )
-
-        upper = min(
-            7.0,
-            prediction
-            + 1.96
-            * sigma,
-        )
-
-        output.append(
-            {
-                "datetime": target_date,
-                "prediction": prediction,
-                "lower": lower,
-                "upper": upper,
-                "precip_mm": row[
-                    "precip_mm"
-                ],
-                "caudal_m3s": row[
-                    "caudal_m3s"
-                ],
-                "horizon_day": h,
-                "scenario": config[
-                    "label"
-                ],
-            }
-        )
-
-        row[
-            "nivel"
-        ] = prediction
-
-        history = pd.concat(
-            [
-                history,
-                pd.DataFrame(
-                    [
-                        row
-                    ]
-                ),
-            ],
-            ignore_index=True,
         )
 
     scenario_df = pd.DataFrame(
-        output
+        {
+            "datetime": dates,
+            "prediction": (
+                level_profile
+            ),
+            "lower": lower,
+            "upper": upper,
+            "precip_mm": (
+                rain_profile
+            ),
+            "caudal_m3s": (
+                flow_profile
+            ),
+            "horizon_day": (
+                np.arange(
+                    1,
+                    days + 1,
+                )
+            ),
+            "scenario": (
+                SCENARIOS[
+                    scenario
+                ][
+                    "label"
+                ]
+            ),
+        }
     )
 
     # ========================================================
-    # RESULTADOS
+    # FECHAS IMPORTANTES
     # ========================================================
 
-    idx_max = scenario_df[
-        "prediction"
-    ].idxmax()
-
-    max_level = float(
-        scenario_df.loc[
-            idx_max,
-            "prediction",
-        ]
+    forcing_peak_date = (
+        last_date
+        + pd.Timedelta(
+            days=FORCING_PEAK_DAY
+        )
     )
 
-    max_level_date = (
-        scenario_df.loc[
-            idx_max,
-            "datetime",
-        ]
+    peak_level_date = (
+        last_date
+        + pd.Timedelta(
+            days=level_peak_day
+        )
     )
 
-    growth_m = (
-        max_level
-        - nivel_actual
-    )
+    # ========================================================
+    # METADATA
+    # ========================================================
 
     growth_pct = (
-        growth_m
-        / nivel_actual
+        predicted_growth
+        / current_level
         * 100
-        if nivel_actual
-        != 0
-        else np.nan
-    )
-
-    rain_peak = float(
-        np.nanmax(
-            rain_values
-        )
-    )
-
-    rain_total = float(
-        np.nansum(
-            rain_values
-        )
-    )
-
-    flow_peak = (
-        float(
-            np.nanmax(
-                flow_values
-            )
-        )
-        if np.isfinite(
-            flow_values
-        ).any()
+        if current_level
         else np.nan
     )
 
     metadata = {
-
-        "scenario": config[
-            "label"
-        ],
-
-        "current_level": nivel_actual,
-
+        "scenario": (
+            SCENARIOS[
+                scenario
+            ][
+                "label"
+            ]
+        ),
+        "current_level": (
+            current_level
+        ),
+        "max_level": (
+            peak_level
+        ),
+        "growth_m": (
+            predicted_growth
+        ),
+        "growth_pct": (
+            growth_pct
+        ),
         "peak_future_date": (
-            peak_future_date
+            forcing_peak_date
         ),
-
-        "max_level": max_level,
-
         "max_level_date": (
-            max_level_date
+            peak_level_date
         ),
-
-        "growth_m": growth_m,
-
-        "growth_pct": growth_pct,
-
+        "response_lag_days": (
+            response_lag
+        ),
         "rain_peak_scenario": (
-            rain_peak
+            rain_values[
+                "day"
+            ]
         ),
-
-        "rain_event_total": (
-            rain_total
+        "rain_3d_scenario": (
+            rain_values[
+                "three"
+            ]
         ),
-
+        "rain_7d_scenario": (
+            rain_values[
+                "seven"
+            ]
+        ),
+        "rain_event_total": float(
+            np.sum(
+                rain_profile
+            )
+        ),
         "flow_scenario_max": (
             flow_peak
         ),
-
-        "rain_stats": rain_stats,
-
-        "flow_stats": flow_stats,
-
+        "rain_stats": (
+            rain_stats
+        ),
+        "flow_stats": (
+            flow_stats
+        ),
         "level_day_30": float(
             scenario_df[
                 "prediction"
@@ -1337,7 +1337,6 @@ def build_stress_scenario(
                 29
             ]
         ),
-
         "level_day_60": float(
             scenario_df[
                 "prediction"
@@ -1345,7 +1344,31 @@ def build_stress_scenario(
                 59
             ]
         ),
-
+        "flood_model_rmse": (
+            response[
+                "rmse"
+            ]
+        ),
+        "flood_model_mae": (
+            response[
+                "mae"
+            ]
+        ),
+        "flood_training_rows": (
+            response[
+                "training_rows"
+            ]
+        ),
+        "historical_max_growth": (
+            response[
+                "historical_max_growth"
+            ]
+        ),
+        "historical_p95_growth": (
+            response[
+                "historical_p95_growth"
+            ]
+        ),
     }
 
     return (
