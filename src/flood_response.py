@@ -14,176 +14,191 @@ from sklearn.metrics import (
 # CONFIGURACIÓN
 # ============================================================
 
-RESPONSE_HORIZON = 14
+RESPONSE_HORIZON_DAYS = 14
 
-MIN_TRAINING_ROWS = 35
+MIN_TRAINING_ROWS = 60
 
-MAX_PUBLIC_LEVEL = 7.0
-
-
-# ============================================================
-# UTILIDADES
-# ============================================================
-
-def _numeric(
-    series,
-):
-
-    return pd.to_numeric(
-        series,
-        errors="coerce",
-    )
-
-
-def _safe_float(
-    value,
-    default=0.0,
-):
-
-    try:
-
-        value = float(
-            value
-        )
-
-        if np.isfinite(
-            value
-        ):
-
-            return value
-
-    except Exception:
-
-        pass
-
-    return float(
-        default
-    )
+MAX_LEVEL = 7.0
 
 
 # ============================================================
-# PREPARAR DATASET
+# UNIFICAR HISTÓRICOS
 # ============================================================
 
-def prepare_flood_dataset(
-    dataset,
+def merge_historical_data(
+    level_history,
+    rain_history,
+    flow_history,
 ):
 
     if (
-        dataset is None
-        or not isinstance(
-            dataset,
-            pd.DataFrame,
-        )
-        or dataset.empty
+        level_history is None
+        or level_history.empty
     ):
 
         raise ValueError(
-            "No existe dataset histórico para "
-            "entrenar el modelo de creciente."
+            "No existe histórico de nivel "
+            "de San Nicolás."
         )
 
-    df = dataset.copy()
+    level = level_history.copy()
 
-    if (
-        "datetime"
-        not in df.columns
-        or "nivel"
-        not in df.columns
-    ):
-
-        raise ValueError(
-            "El dataset debe contener datetime y nivel."
-        )
-
-    df[
+    level[
         "datetime"
     ] = pd.to_datetime(
-        df[
+        level[
             "datetime"
+        ],
+        errors="coerce",
+    ).dt.normalize()
+
+    level[
+        "nivel"
+    ] = pd.to_numeric(
+        level[
+            "nivel"
         ],
         errors="coerce",
     )
 
-    df[
-        "nivel"
-    ] = _numeric(
-        df[
-            "nivel"
+    level = level.dropna(
+        subset=[
+            "datetime",
+            "nivel",
         ]
     )
 
+    # ========================================================
+    # LLUVIA
+    # ========================================================
+
     if (
-        "precip_mm"
-        not in df.columns
+        rain_history is not None
+        and not rain_history.empty
     ):
 
-        df[
+        rain = rain_history.copy()
+
+        rain[
+            "datetime"
+        ] = pd.to_datetime(
+            rain[
+                "datetime"
+            ],
+            errors="coerce",
+        ).dt.normalize()
+
+        rain[
+            "precip_mm"
+        ] = (
+            pd.to_numeric(
+                rain[
+                    "precip_mm"
+                ],
+                errors="coerce",
+            )
+            .fillna(
+                0.0
+            )
+            .clip(
+                lower=0
+            )
+        )
+
+        level = level.merge(
+            rain[
+                [
+                    "datetime",
+                    "precip_mm",
+                ]
+            ],
+            on="datetime",
+            how="left",
+        )
+
+    else:
+
+        level[
             "precip_mm"
         ] = 0.0
 
-    df[
-        "precip_mm"
-    ] = (
-        _numeric(
-            df[
-                "precip_mm"
-            ]
-        )
-        .fillna(
-            0.0
-        )
-        .clip(
-            lower=0
-        )
-    )
+    # ========================================================
+    # CAUDAL
+    # ========================================================
 
     if (
-        "caudal_m3s"
-        not in df.columns
+        flow_history is not None
+        and not flow_history.empty
     ):
 
-        df[
+        flow = flow_history.copy()
+
+        flow[
+            "datetime"
+        ] = pd.to_datetime(
+            flow[
+                "datetime"
+            ],
+            errors="coerce",
+        ).dt.normalize()
+
+        flow[
+            "caudal_m3s"
+        ] = pd.to_numeric(
+            flow[
+                "caudal_m3s"
+            ],
+            errors="coerce",
+        )
+
+        level = level.merge(
+            flow[
+                [
+                    "datetime",
+                    "caudal_m3s",
+                ]
+            ],
+            on="datetime",
+            how="left",
+        )
+
+    else:
+
+        level[
             "caudal_m3s"
         ] = np.nan
 
-    df[
-        "caudal_m3s"
-    ] = _numeric(
-        df[
-            "caudal_m3s"
+    # ========================================================
+    # LIMPIEZA
+    # ========================================================
+
+    level[
+        "precip_mm"
+    ] = (
+        level[
+            "precip_mm"
         ]
+        .fillna(
+            0.0
+        )
     )
 
-    upstream_cols = [
-        c
-        for c in df.columns
-        if (
-            c.startswith(
-                "nivel_"
-            )
-            and c != "nivel"
+    # Interpolación corta del caudal.
+    # No queremos inventar períodos enormes.
+    level[
+        "caudal_m3s"
+    ] = (
+        level[
+            "caudal_m3s"
+        ]
+        .interpolate(
+            limit=7,
+            limit_direction="both",
         )
-    ]
+    )
 
-    for col in upstream_cols:
-
-        df[
-            col
-        ] = _numeric(
-            df[
-                col
-            ]
-        )
-
-    df = (
-        df
-        .dropna(
-            subset=[
-                "datetime",
-                "nivel",
-            ]
-        )
+    level = (
+        level
         .sort_values(
             "datetime"
         )
@@ -198,42 +213,33 @@ def prepare_flood_dataset(
         )
     )
 
-    return (
-        df,
-        upstream_cols,
-    )
+    return level
 
 
 # ============================================================
-# CARACTERÍSTICAS HIDROLÓGICAS
+# FEATURES
 # ============================================================
 
-def build_flood_features(
-    dataset,
+def create_response_features(
+    df,
 ):
 
-    df, upstream_cols = (
-        prepare_flood_dataset(
-            dataset
-        )
-    )
-
-    out = df.copy()
+    work = df.copy()
 
     # ========================================================
     # LLUVIA
     # ========================================================
 
-    out[
-        "stress_rain_1d"
-    ] = out[
+    work[
+        "rain_1d"
+    ] = work[
         "precip_mm"
     ]
 
-    out[
-        "stress_rain_3d"
+    work[
+        "rain_3d"
     ] = (
-        out[
+        work[
             "precip_mm"
         ]
         .rolling(
@@ -243,10 +249,10 @@ def build_flood_features(
         .sum()
     )
 
-    out[
-        "stress_rain_7d"
+    work[
+        "rain_7d"
     ] = (
-        out[
+        work[
             "precip_mm"
         ]
         .rolling(
@@ -260,194 +266,63 @@ def build_flood_features(
     # CAUDAL
     # ========================================================
 
-    q = out[
+    q = work[
         "caudal_m3s"
     ]
 
-    if q.notna().sum() >= 5:
+    work[
+        "flow_k"
+    ] = (
+        q
+        / 1000.0
+    )
 
-        q = q.interpolate(
-            limit_direction="both"
-        )
-
-        out[
-            "stress_flow_k"
-        ] = (
+    work[
+        "flow_rise_3d_k"
+    ] = (
+        (
             q
-            / 1000.0
-        )
-
-        out[
-            "stress_flow_rise3_k"
-        ] = (
-            (
-                q
-                - q.shift(
-                    3
-                )
-            )
-            .clip(
-                lower=0
-            )
-            / 1000.0
-        )
-
-        q_reference = (
-            q.rolling(
-                30,
-                min_periods=5,
-            )
-            .median()
-        )
-
-        q_reference = (
-            q_reference
-            .replace(
-                0,
-                np.nan,
+            - q.shift(
+                3
             )
         )
-
-        out[
-            "stress_flow_ratio"
-        ] = (
-            q
-            / q_reference
+        .clip(
+            lower=0
         )
+        / 1000.0
+    )
 
-    else:
-
-        out[
-            "stress_flow_k"
-        ] = 0.0
-
-        out[
-            "stress_flow_rise3_k"
-        ] = 0.0
-
-        out[
-            "stress_flow_ratio"
-        ] = 1.0
-
-    # ========================================================
-    # NIVELES AGUAS ARRIBA
-    # ========================================================
-
-    upstream_ratio_columns = []
-
-    upstream_rise_columns = []
-
-    for col in upstream_cols:
-
-        values = out[
-            col
-        ]
-
-        if values.notna().sum() < 5:
-
-            continue
-
-        values = values.interpolate(
-            limit_direction="both"
+    rolling_flow_reference = (
+        q
+        .rolling(
+            30,
+            min_periods=5,
         )
-
-        reference = (
-            values
-            .rolling(
-                30,
-                min_periods=5,
-            )
-            .median()
-        )
-
-        reference = reference.replace(
+        .median()
+        .replace(
             0,
             np.nan,
         )
+    )
 
-        ratio_col = (
-            f"__ratio_{col}"
-        )
-
-        rise_col = (
-            f"__rise_{col}"
-        )
-
-        out[
-            ratio_col
-        ] = (
-            values
-            / reference
-        )
-
-        out[
-            rise_col
-        ] = (
-            values
-            - values.shift(
-                3
-            )
-        ).clip(
-            lower=0
-        )
-
-        upstream_ratio_columns.append(
-            ratio_col
-        )
-
-        upstream_rise_columns.append(
-            rise_col
-        )
-
-    if upstream_ratio_columns:
-
-        out[
-            "stress_upstream_ratio"
-        ] = (
-            out[
-                upstream_ratio_columns
-            ]
-            .mean(
-                axis=1
-            )
-        )
-
-    else:
-
-        out[
-            "stress_upstream_ratio"
-        ] = 1.0
-
-    if upstream_rise_columns:
-
-        out[
-            "stress_upstream_rise3"
-        ] = (
-            out[
-                upstream_rise_columns
-            ]
-            .mean(
-                axis=1
-            )
-        )
-
-    else:
-
-        out[
-            "stress_upstream_rise3"
-        ] = 0.0
-
-    # ========================================================
-    # DINÁMICA LOCAL
-    # ========================================================
-
-    out[
-        "stress_local_rise3"
+    work[
+        "flow_ratio"
     ] = (
-        out[
+        q
+        / rolling_flow_reference
+    )
+
+    # ========================================================
+    # DINÁMICA DEL NIVEL
+    # ========================================================
+
+    work[
+        "local_rise_3d"
+    ] = (
+        work[
             "nivel"
         ]
-        - out[
+        - work[
             "nivel"
         ].shift(
             3
@@ -456,29 +331,23 @@ def build_flood_features(
         lower=0
     )
 
-    # ========================================================
-    # LIMPIEZA
-    # ========================================================
-
     feature_cols = [
-        "stress_rain_1d",
-        "stress_rain_3d",
-        "stress_rain_7d",
-        "stress_flow_k",
-        "stress_flow_rise3_k",
-        "stress_flow_ratio",
-        "stress_upstream_ratio",
-        "stress_upstream_rise3",
-        "stress_local_rise3",
+        "rain_1d",
+        "rain_3d",
+        "rain_7d",
+        "flow_k",
+        "flow_rise_3d_k",
+        "flow_ratio",
+        "local_rise_3d",
     ]
 
     for col in feature_cols:
 
-        out[
+        work[
             col
         ] = (
             pd.to_numeric(
-                out[
+                work[
                     col
                 ],
                 errors="coerce",
@@ -493,25 +362,24 @@ def build_flood_features(
         )
 
     return (
-        out,
+        work,
         feature_cols,
-        upstream_cols,
     )
 
 
 # ============================================================
 # TARGET:
-# CRECIMIENTO MÁXIMO EN LOS SIGUIENTES 14 DÍAS
+# MÁXIMA CRECIDA POSTERIOR
 # ============================================================
 
-def add_response_target(
-    features,
+def create_growth_target(
+    df,
 ):
 
-    df = features.copy()
+    work = df.copy()
 
     levels = (
-        df[
+        work[
             "nivel"
         ]
         .to_numpy(
@@ -519,25 +387,23 @@ def add_response_target(
         )
     )
 
-    targets = np.full(
+    growth = np.full(
         len(
-            df
+            work
         ),
         np.nan,
-        dtype=float,
     )
 
-    lags = np.full(
+    lag = np.full(
         len(
-            df
+            work
         ),
         np.nan,
-        dtype=float,
     )
 
     for i in range(
         len(
-            df
+            work
         )
     ):
 
@@ -548,10 +414,10 @@ def add_response_target(
 
         end = min(
             len(
-                df
+                work
             ),
             i
-            + RESPONSE_HORIZON
+            + RESPONSE_HORIZON_DAYS
             + 1,
         )
 
@@ -582,54 +448,64 @@ def add_response_target(
             ]
         )
 
-        growth = (
+        delta = (
             future_max
-            - levels[
-                i
-            ]
+            - float(
+                levels[
+                    i
+                ]
+            )
         )
 
-        targets[
+        growth[
             i
         ] = max(
-            growth,
+            delta,
             0.0,
         )
 
-        lags[
+        lag[
             i
         ] = (
             relative_index
             + 1
         )
 
-    df[
+    work[
         "target_growth"
-    ] = targets
+    ] = growth
 
-    df[
+    work[
         "target_lag"
-    ] = lags
+    ] = lag
 
-    return df
+    return work
 
 
 # ============================================================
-# ENTRENAR MODELO DE RESPUESTA A CRECIENTES
+# ENTRENAMIENTO
 # ============================================================
 
 def fit_flood_response(
-    dataset,
+    level_history,
+    rain_history,
+    flow_history,
 ):
 
-    features, feature_cols, upstream_cols = (
-        build_flood_features(
-            dataset
+    merged = merge_historical_data(
+        level_history=level_history,
+        rain_history=rain_history,
+        flow_history=flow_history,
+    )
+
+    featured, feature_cols = (
+        create_response_features(
+            merged
         )
     )
 
-    work = add_response_target(
-        features
+    work = create_growth_target(
+        featured
     )
 
     work = (
@@ -653,14 +529,10 @@ def fit_flood_response(
     ) < MIN_TRAINING_ROWS:
 
         raise ValueError(
-            "No existen suficientes registros "
-            "para calibrar la respuesta a crecientes. "
-            f"Disponibles: {len(work)}."
+            "No existen suficientes fechas históricas "
+            "coincidentes para calibrar la creciente. "
+            f"Registros disponibles: {len(work)}."
         )
-
-    # ========================================================
-    # VALIDACIÓN CRONOLÓGICA
-    # ========================================================
 
     split = int(
         len(
@@ -670,7 +542,7 @@ def fit_flood_response(
     )
 
     split = max(
-        20,
+        30,
         split,
     )
 
@@ -706,21 +578,14 @@ def fit_flood_response(
         split:
     ]
 
-    # ========================================================
-    # MODELO
-    #
-    # positive=True fuerza que una mayor condición de estrés
-    # no reduzca artificialmente el crecimiento estimado.
-    # ========================================================
-
     validation_model = Pipeline(
-        steps=[
+        [
             (
                 "scale",
                 StandardScaler(),
             ),
             (
-                "regression",
+                "model",
                 LinearRegression(
                     positive=True,
                 ),
@@ -733,14 +598,14 @@ def fit_flood_response(
         y_train,
     )
 
-    test_prediction = (
+    validation_prediction = (
         validation_model.predict(
             X_test
         )
     )
 
-    test_prediction = np.clip(
-        test_prediction,
+    validation_prediction = np.clip(
+        validation_prediction,
         0.0,
         None,
     )
@@ -749,7 +614,7 @@ def fit_flood_response(
         np.sqrt(
             mean_squared_error(
                 y_test,
-                test_prediction,
+                validation_prediction,
             )
         )
     )
@@ -757,22 +622,18 @@ def fit_flood_response(
     mae = float(
         mean_absolute_error(
             y_test,
-            test_prediction,
+            validation_prediction,
         )
     )
 
-    # ========================================================
-    # MODELO FINAL
-    # ========================================================
-
-    model = Pipeline(
-        steps=[
+    final_model = Pipeline(
+        [
             (
                 "scale",
                 StandardScaler(),
             ),
             (
-                "regression",
+                "model",
                 LinearRegression(
                     positive=True,
                 ),
@@ -780,7 +641,7 @@ def fit_flood_response(
         ]
     )
 
-    model.fit(
+    final_model.fit(
         work[
             feature_cols
         ],
@@ -793,18 +654,17 @@ def fit_flood_response(
     # RETARDO HISTÓRICO
     # ========================================================
 
-    positive_events = work[
+    growing_events = work[
         work[
             "target_growth"
-        ]
-        > 0.05
+        ] >= 0.05
     ]
 
-    if not positive_events.empty:
+    if not growing_events.empty:
 
         response_lag = int(
             round(
-                positive_events[
+                growing_events[
                     "target_lag"
                 ].median()
             )
@@ -818,369 +678,157 @@ def fit_flood_response(
         np.clip(
             response_lag,
             1,
-            RESPONSE_HORIZON,
-        )
-    )
-
-    # ========================================================
-    # RESPUESTAS HISTÓRICAS
-    # ========================================================
-
-    historical_max_growth = float(
-        work[
-            "target_growth"
-        ].max()
-    )
-
-    historical_p95_growth = float(
-        work[
-            "target_growth"
-        ].quantile(
-            0.95
+            RESPONSE_HORIZON_DAYS,
         )
     )
 
     return {
-        "model": model,
-        "feature_cols": feature_cols,
-        "upstream_cols": upstream_cols,
-        "training_rows": len(
-            work
-        ),
-        "rmse": max(
-            rmse,
-            0.03,
-        ),
-        "mae": mae,
-        "response_lag": response_lag,
-        "historical_max_growth": (
-            historical_max_growth
-        ),
-        "historical_p95_growth": (
-            historical_p95_growth
-        ),
-        "training_frame": work,
+        "model":
+            final_model,
+
+        "feature_cols":
+            feature_cols,
+
+        "rmse":
+            max(
+                rmse,
+                0.03,
+            ),
+
+        "mae":
+            mae,
+
+        "response_lag":
+            response_lag,
+
+        "training_rows":
+            int(
+                len(
+                    work
+                )
+            ),
+
+        "historical_max_growth":
+            float(
+                work[
+                    "target_growth"
+                ].max()
+            ),
+
+        "historical_p95_growth":
+            float(
+                work[
+                    "target_growth"
+                ].quantile(
+                    0.95
+                )
+            ),
+
+        "historical_median_growth":
+            float(
+                work[
+                    "target_growth"
+                ].median()
+            ),
     }
 
 
 # ============================================================
-# ESTADÍSTICAS NECESARIAS PARA UN ESCENARIO FUTURO
+# PREDECIR CRECIMIENTO PARA UN DÍA FUTURO
 # ============================================================
 
-def historical_reference(
-    dataset,
-):
-
-    df, upstream_cols = (
-        prepare_flood_dataset(
-            dataset
-        )
-    )
-
-    result = {
-        "rain_max_day": float(
-            df[
-                "precip_mm"
-            ].max()
-        ),
-        "rain_max_3d": float(
-            df[
-                "precip_mm"
-            ]
-            .rolling(
-                3,
-                min_periods=1,
-            )
-            .sum()
-            .max()
-        ),
-        "rain_max_7d": float(
-            df[
-                "precip_mm"
-            ]
-            .rolling(
-                7,
-                min_periods=1,
-            )
-            .sum()
-            .max()
-        ),
-        "flow_current": np.nan,
-        "flow_max": np.nan,
-        "flow_median": np.nan,
-        "upstream": {},
-    }
-
-    flow = (
-        df[
-            "caudal_m3s"
-        ]
-        .dropna()
-    )
-
-    if not flow.empty:
-
-        result[
-            "flow_current"
-        ] = float(
-            flow.iloc[-1]
-        )
-
-        result[
-            "flow_max"
-        ] = float(
-            flow.max()
-        )
-
-        result[
-            "flow_median"
-        ] = float(
-            flow.median()
-        )
-
-    for col in upstream_cols:
-
-        values = (
-            df[
-                col
-            ]
-            .dropna()
-        )
-
-        if values.empty:
-
-            continue
-
-        result[
-            "upstream"
-        ][
-            col
-        ] = {
-            "current": float(
-                values.iloc[-1]
-            ),
-            "maximum": float(
-                values.max()
-            ),
-            "median": float(
-                values.median()
-            ),
-        }
-
-    return result
-
-
-# ============================================================
-# CREAR VECTOR DE ESTRÉS
-# ============================================================
-
-def build_stress_vector(
+def predict_growth(
     response_model,
-    dataset,
-    rain_day,
+    current_level,
+    rain_1d,
     rain_3d,
     rain_7d,
-    flow_peak,
-    upstream_targets=None,
+    flow_current,
+    flow_change_3d,
+    historical_flow_reference,
 ):
 
-    reference = historical_reference(
-        dataset
-    )
-
-    current_flow = reference.get(
-        "flow_current"
-    )
-
-    flow_median = reference.get(
-        "flow_median"
-    )
-
-    if not np.isfinite(
-        current_flow
-    ):
-
-        current_flow = flow_peak
-
-    if (
-        not np.isfinite(
-            flow_median
-        )
-        or flow_median == 0
-    ):
-
-        flow_median = max(
-            current_flow,
-            1.0,
-        )
-
-    flow_rise3 = max(
-        (
-            flow_peak
-            - current_flow
-        )
-        / 1000.0,
-        0.0,
+    flow_reference = max(
+        float(
+            historical_flow_reference
+        ),
+        1.0,
     )
 
     flow_ratio = (
-        flow_peak
-        / flow_median
-    )
-
-    upstream_targets = (
-        upstream_targets
-        or {}
-    )
-
-    ratio_values = []
-
-    rise_values = []
-
-    for col, info in (
-        reference[
-            "upstream"
-        ].items()
-    ):
-
-        current = info[
-            "current"
-        ]
-
-        median = info[
-            "median"
-        ]
-
-        target = upstream_targets.get(
-            col,
-            info[
-                "maximum"
-            ],
+        float(
+            flow_current
         )
+        / flow_reference
+    )
 
-        if (
-            median is not None
-            and median != 0
-        ):
-
-            ratio_values.append(
-                target
-                / median
-            )
-
-        rise_values.append(
+    row = {
+        "rain_1d":
             max(
-                target
-                - current,
+                float(
+                    rain_1d
+                ),
                 0.0,
-            )
-        )
-
-    upstream_ratio = (
-        float(
-            np.mean(
-                ratio_values
-            )
-        )
-        if ratio_values
-        else 1.0
-    )
-
-    upstream_rise = (
-        float(
-            np.mean(
-                rise_values
-            )
-        )
-        if rise_values
-        else 0.0
-    )
-
-    values = {
-        "stress_rain_1d": max(
-            _safe_float(
-                rain_day
             ),
-            0.0,
-        ),
-        "stress_rain_3d": max(
-            _safe_float(
-                rain_3d
+
+        "rain_3d":
+            max(
+                float(
+                    rain_3d
+                ),
+                0.0,
             ),
-            0.0,
-        ),
-        "stress_rain_7d": max(
-            _safe_float(
-                rain_7d
+
+        "rain_7d":
+            max(
+                float(
+                    rain_7d
+                ),
+                0.0,
             ),
-            0.0,
-        ),
-        "stress_flow_k": max(
-            _safe_float(
-                flow_peak
-            )
-            / 1000.0,
-            0.0,
-        ),
-        "stress_flow_rise3_k": (
-            flow_rise3
-        ),
-        "stress_flow_ratio": max(
-            _safe_float(
+
+        "flow_k":
+            max(
+                float(
+                    flow_current
+                )
+                / 1000.0,
+                0.0,
+            ),
+
+        "flow_rise_3d_k":
+            max(
+                float(
+                    flow_change_3d
+                )
+                / 1000.0,
+                0.0,
+            ),
+
+        "flow_ratio":
+            max(
                 flow_ratio,
-                1.0,
+                0.0,
             ),
+
+        "local_rise_3d":
             0.0,
-        ),
-        "stress_upstream_ratio": max(
-            upstream_ratio,
-            0.0,
-        ),
-        "stress_upstream_rise3": max(
-            upstream_rise,
-            0.0,
-        ),
-        "stress_local_rise3": 0.0,
     }
 
-    return pd.DataFrame(
+    X = pd.DataFrame(
         [
             {
-                col: values.get(
-                    col,
-                    0.0,
-                )
+                col:
+                    row.get(
+                        col,
+                        0.0,
+                    )
                 for col
                 in response_model[
                     "feature_cols"
                 ]
             }
         ]
-    )
-
-
-# ============================================================
-# PREDECIR CRECIMIENTO BAJO ESTRÉS
-# ============================================================
-
-def predict_stress_growth(
-    response_model,
-    dataset,
-    rain_day,
-    rain_3d,
-    rain_7d,
-    flow_peak,
-    upstream_targets=None,
-):
-
-    X = build_stress_vector(
-        response_model=response_model,
-        dataset=dataset,
-        rain_day=rain_day,
-        rain_3d=rain_3d,
-        rain_7d=rain_7d,
-        flow_peak=flow_peak,
-        upstream_targets=upstream_targets,
     )
 
     growth = float(
@@ -1191,58 +839,24 @@ def predict_stress_growth(
         )[0]
     )
 
+    # Escenario específicamente de CRECIDA:
+    # jamás reducimos el nivel base.
     growth = max(
         growth,
         0.0,
     )
 
-    current_level = float(
-        pd.to_numeric(
-            dataset[
-                "nivel"
-            ],
-            errors="coerce",
-        )
-        .dropna()
-        .iloc[-1]
+    max_allowed_growth = max(
+        MAX_LEVEL
+        - float(
+            current_level
+        ),
+        0.0,
     )
 
     growth = min(
         growth,
-        max(
-            MAX_PUBLIC_LEVEL
-            - current_level,
-            0.0,
-        ),
+        max_allowed_growth,
     )
 
-    return {
-        "growth": growth,
-        "peak_level": (
-            current_level
-            + growth
-        ),
-        "current_level": current_level,
-        "response_lag": response_model[
-            "response_lag"
-        ],
-        "rmse": response_model[
-            "rmse"
-        ],
-        "mae": response_model[
-            "mae"
-        ],
-        "training_rows": response_model[
-            "training_rows"
-        ],
-        "historical_max_growth": (
-            response_model[
-                "historical_max_growth"
-            ]
-        ),
-        "historical_p95_growth": (
-            response_model[
-                "historical_p95_growth"
-            ]
-        ),
-    }
+    return growth
