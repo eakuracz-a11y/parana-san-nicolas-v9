@@ -29,7 +29,7 @@ from src.stress_ui import (
 # VERSIÓN
 # ============================================================
 
-APP_VERSION = "V11.2"
+APP_VERSION = "V11.3"
 
 
 # ============================================================
@@ -80,50 +80,13 @@ st.markdown(
     <style>
 
     .block-container {
-        padding-top: 0.8rem;
+        padding-top: 0.65rem;
         padding-bottom: 2rem;
-        max-width: 1750px;
+        max-width: 1780px;
     }
-
-    /* --------------------------------------------------------
-       MÉTRICAS
-    -------------------------------------------------------- */
-
-    [data-testid="stMetric"] {
-        padding: 0.45rem 0.55rem;
-        border: 1px solid rgba(130, 130, 130, 0.24);
-        border-radius: 9px;
-        min-height: 92px;
-        overflow: visible !important;
-    }
-
-    [data-testid="stMetricLabel"] {
-        font-size: 0.76rem !important;
-        line-height: 1.05rem !important;
-        white-space: normal !important;
-        overflow: visible !important;
-        text-overflow: unset !important;
-    }
-
-    [data-testid="stMetricValue"] {
-        font-size: 1.30rem !important;
-        line-height: 1.55rem !important;
-        white-space: nowrap !important;
-        overflow: visible !important;
-        text-overflow: unset !important;
-    }
-
-    [data-testid="stMetricDelta"] {
-        font-size: 0.74rem !important;
-        white-space: nowrap !important;
-    }
-
-    /* --------------------------------------------------------
-       REDUCIR ESPACIOS
-    -------------------------------------------------------- */
 
     div[data-testid="stVerticalBlock"] {
-        gap: 0.55rem;
+        gap: 0.45rem;
     }
 
     h1 {
@@ -132,27 +95,92 @@ st.markdown(
 
     h2,
     h3 {
-        margin-top: 0.45rem;
-        margin-bottom: 0.35rem;
+        margin-top: 0.35rem;
+        margin-bottom: 0.30rem;
     }
 
-    /* --------------------------------------------------------
-       DATAFRAMES
-    -------------------------------------------------------- */
+    /* ======================================================
+       METRIC GENERAL
+    ====================================================== */
 
-    [data-testid="stDataFrame"] {
-        font-size: 0.84rem;
+    [data-testid="stMetric"] {
+        padding: 0.35rem 0.45rem;
+        border: 1px solid rgba(130, 130, 130, 0.20);
+        border-radius: 8px;
+        min-height: 82px;
     }
 
-    /* --------------------------------------------------------
-       STATUS
-    -------------------------------------------------------- */
+    [data-testid="stMetricLabel"] {
+        font-size: 0.70rem !important;
+        line-height: 0.95rem !important;
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
+    }
+
+    [data-testid="stMetricValue"] {
+        font-size: 1.12rem !important;
+        line-height: 1.35rem !important;
+        white-space: nowrap !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
+    }
+
+    [data-testid="stMetricDelta"] {
+        font-size: 0.68rem !important;
+        white-space: nowrap !important;
+    }
+
+    /* ======================================================
+       TARJETAS COMPACTAS
+    ====================================================== */
+
+    .compact-card {
+        border: 1px solid rgba(130, 130, 130, 0.24);
+        border-radius: 9px;
+        padding: 0.55rem 0.65rem;
+        min-height: 82px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        background: rgba(255,255,255,0.01);
+    }
+
+    .compact-label {
+        font-size: 0.72rem;
+        line-height: 0.90rem;
+        opacity: 0.78;
+        margin-bottom: 0.25rem;
+        white-space: normal;
+    }
+
+    .compact-value {
+        font-size: 1.22rem;
+        line-height: 1.35rem;
+        font-weight: 650;
+        white-space: nowrap;
+    }
+
+    .compact-unit {
+        font-size: 0.67rem;
+        line-height: 0.85rem;
+        opacity: 0.65;
+        margin-top: 0.15rem;
+        white-space: nowrap;
+    }
+
+    .compact-trend {
+        font-size: 1.05rem;
+        line-height: 1.25rem;
+        font-weight: 650;
+        white-space: nowrap;
+    }
 
     .status-title {
-        font-size: 0.82rem;
+        font-size: 0.76rem;
         font-weight: 700;
-        margin-top: 0.15rem;
-        margin-bottom: 0.15rem;
+        margin-top: 0.10rem;
+        margin-bottom: 0.05rem;
     }
 
     </style>
@@ -162,7 +190,7 @@ st.markdown(
 
 
 # ============================================================
-# FUNCIONES DE FORMATO
+# FORMATOS
 # ============================================================
 
 def formato_numero(
@@ -195,26 +223,6 @@ def formato_numero(
     return texto
 
 
-def formato_caudal(
-    valor,
-):
-
-    if valor is None:
-        return "--"
-
-    try:
-
-        if pd.isna(valor):
-            return "--"
-    except Exception:
-        pass
-
-    return formato_numero(
-        valor,
-        0,
-    )
-
-
 def formato_nivel(
     valor,
 ):
@@ -231,6 +239,53 @@ def formato_nivel(
 
     return (
         f"{float(valor):.2f} m"
+    )
+
+
+def formato_caudal(
+    valor,
+):
+
+    return formato_numero(
+        valor,
+        0,
+    )
+
+
+# ============================================================
+# TARJETA COMPACTA
+# ============================================================
+
+def tarjeta_compacta(
+    label,
+    value,
+    unit="",
+    trend=False,
+):
+
+    value_class = (
+        "compact-trend"
+        if trend
+        else "compact-value"
+    )
+
+    unit_html = (
+        f'<div class="compact-unit">{unit}</div>'
+        if unit
+        else ""
+    )
+
+    html = f"""
+    <div class="compact-card">
+        <div class="compact-label">{label}</div>
+        <div class="{value_class}">{value}</div>
+        {unit_html}
+    </div>
+    """
+
+    st.markdown(
+        html,
+        unsafe_allow_html=True,
     )
 
 
@@ -356,7 +411,7 @@ st.sidebar.caption(
 
 
 # ============================================================
-# UTILIDADES
+# PREPARAR DATOS
 # ============================================================
 
 def preparar_datos(
@@ -760,7 +815,7 @@ def calcular_posicion_historica(
 
 
 # ============================================================
-# TENDENCIA DEL CAUDAL
+# TENDENCIA CAUDAL
 # ============================================================
 
 def calcular_tendencia_caudal(
@@ -944,7 +999,7 @@ def calcular_tendencia_caudal(
 
 
 # ============================================================
-# TENDENCIA ESTACIONES
+# TENDENCIA ESTACIÓN
 # ============================================================
 
 def tendencia_estacion(
@@ -979,7 +1034,7 @@ def tendencia_estacion(
 
 
 # ============================================================
-# VALIDACIÓN DE FECHAS
+# VALIDACIÓN
 # ============================================================
 
 if desde > hasta:
@@ -1013,7 +1068,7 @@ if actualizar:
 
 
         # ====================================================
-        # NIVEL SAN NICOLÁS
+        # NIVEL
         # ====================================================
 
         with st.spinner(
@@ -1049,7 +1104,7 @@ if actualizar:
             else:
 
                 # ============================================
-                # HISTÓRICO COMPLETO
+                # HISTÓRICO
                 # ============================================
 
                 with st.spinner(
@@ -1363,7 +1418,7 @@ if actualizar:
 
 
                 # ============================================
-                # GUARDAR EN SESIÓN
+                # SESIÓN
                 # ============================================
 
                 st.session_state[
@@ -1575,7 +1630,7 @@ else:
 
 
     # ========================================================
-    # VARIACIÓN 24 HORAS
+    # VARIACIÓN 24 H
     # ========================================================
 
     df_daily = nivel_diario(
@@ -1785,13 +1840,14 @@ else:
     m5.metric(
         "Caudal actual",
         (
-            f"{formato_caudal(tq['actual'])} m³/s"
+            f"{formato_caudal(tq['actual'])}"
             if tq[
                 "actual"
             ]
             is not None
             else "--"
         ),
+        help="m³/s",
     )
 
 
@@ -1802,7 +1858,7 @@ else:
 
 
     # ========================================================
-    # ESTADO SISTEMA
+    # ESTADO
     # ========================================================
 
     estado_lluvia = (
@@ -1939,13 +1995,13 @@ else:
 
 
     # ========================================================
-    # GRÁFICO PRINCIPAL + PROYECCIÓN
+    # GRÁFICO PRINCIPAL
     # ========================================================
 
     grafico_col, resumen_col = st.columns(
         [
-            3.4,
-            1.1,
+            3.45,
+            1.05,
         ]
     )
 
@@ -2223,7 +2279,7 @@ else:
 
         fig_main.update_layout(
 
-            height=490,
+            height=480,
 
             margin=dict(
                 l=10,
@@ -2268,7 +2324,7 @@ else:
 
 
     # ========================================================
-    # PANEL PROYECCIÓN
+    # PROYECCIÓN
     # ========================================================
 
     with resumen_col:
@@ -2499,33 +2555,78 @@ else:
             )
 
 
-            rc1, rc2, rc3, rc4 = st.columns(
-                4
+            lluvia_cards = st.columns(
+                [
+                    1,
+                    1,
+                    1,
+                    1,
+                ]
             )
 
 
-            rc1.metric(
-                "3 días",
-                f"{rain3['precip_mm'].sum():.1f} mm",
-            )
+            with lluvia_cards[
+                0
+            ]:
+
+                tarjeta_compacta(
+                    "3 días",
+                    formato_numero(
+                        rain3[
+                            "precip_mm"
+                        ].sum(),
+                        1,
+                    ),
+                    "mm acumulados",
+                )
 
 
-            rc2.metric(
-                "7 días",
-                f"{rain7['precip_mm'].sum():.1f} mm",
-            )
+            with lluvia_cards[
+                1
+            ]:
+
+                tarjeta_compacta(
+                    "7 días",
+                    formato_numero(
+                        rain7[
+                            "precip_mm"
+                        ].sum(),
+                        1,
+                    ),
+                    "mm acumulados",
+                )
 
 
-            rc3.metric(
-                "15 días",
-                f"{rain15['precip_mm'].sum():.1f} mm",
-            )
+            with lluvia_cards[
+                2
+            ]:
+
+                tarjeta_compacta(
+                    "15 días",
+                    formato_numero(
+                        rain15[
+                            "precip_mm"
+                        ].sum(),
+                        1,
+                    ),
+                    "mm acumulados",
+                )
 
 
-            rc4.metric(
-                "Máximo diario",
-                f"{rain15['precip_mm'].max():.1f} mm",
-            )
+            with lluvia_cards[
+                3
+            ]:
+
+                tarjeta_compacta(
+                    "Máximo diario",
+                    formato_numero(
+                        rain15[
+                            "precip_mm"
+                        ].max(),
+                        1,
+                    ),
+                    "mm/día",
+                )
 
 
             rain_fig = go.Figure()
@@ -2553,7 +2654,7 @@ else:
 
             rain_fig.update_layout(
 
-                height=270,
+                height=265,
 
                 margin=dict(
                     l=5,
@@ -2597,68 +2698,89 @@ else:
         )
 
 
-        qc1, qc2, qc3, qc4 = st.columns(
+        caudal_cards = st.columns(
             [
-                1.2,
+                1.15,
                 1,
                 1,
-                1.25,
+                1.15,
             ]
         )
 
 
-        qc1.metric(
-            "Actual",
-            (
+        with caudal_cards[
+            0
+        ]:
+
+            tarjeta_compacta(
+                "Actual",
                 formato_caudal(
                     tq[
                         "actual"
                     ]
-                )
-                if tq[
-                    "actual"
-                ]
-                is not None
-                else "--"
-            ),
-            help="m³/s",
-        )
+                ),
+                "m³/s",
+            )
 
 
-        qc2.metric(
-            "Δ 3 días",
-            (
-                f"{formato_numero(tq['delta_3'], 0)}"
-                if tq[
-                    "delta_3"
-                ]
-                is not None
-                else "--"
-            ),
-            help="m³/s",
-        )
+        with caudal_cards[
+            1
+        ]:
+
+            tarjeta_compacta(
+                "Δ 3 días",
+                (
+                    formato_numero(
+                        tq[
+                            "delta_3"
+                        ],
+                        0,
+                    )
+                    if tq[
+                        "delta_3"
+                    ]
+                    is not None
+                    else "--"
+                ),
+                "m³/s",
+            )
 
 
-        qc3.metric(
-            "Δ 7 días",
-            (
-                f"{formato_numero(tq['delta_7'], 0)}"
-                if tq[
-                    "delta_7"
-                ]
-                is not None
-                else "--"
-            ),
-            help="m³/s",
-        )
+        with caudal_cards[
+            2
+        ]:
+
+            tarjeta_compacta(
+                "Δ 7 días",
+                (
+                    formato_numero(
+                        tq[
+                            "delta_7"
+                        ],
+                        0,
+                    )
+                    if tq[
+                        "delta_7"
+                    ]
+                    is not None
+                    else "--"
+                ),
+                "m³/s",
+            )
 
 
-        qc4.metric(
-            "Tendencia",
-            tq[
-                "estado"
-            ],
-        )
+        with caudal_cards[
+            3
+        ]:
+
+            tarjeta_compacta(
+                "Tendencia",
+                tq[
+                    "estado"
+                ],
+                "",
+                trend=True,
+            )
 
 
         if (
@@ -2694,7 +2816,7 @@ else:
 
             qfig.update_layout(
 
-                height=270,
+                height=265,
 
                 margin=dict(
                     l=5,
@@ -2812,7 +2934,7 @@ else:
 
 
     # ========================================================
-    # PRONÓSTICO DIARIO DETALLADO
+    # DETALLE 15 DÍAS
     # ========================================================
 
     with st.expander(
@@ -2929,7 +3051,7 @@ else:
 
 
     # ========================================================
-    # IMPORTANCIA VARIABLES
+    # IMPORTANCIA
     # ========================================================
 
     importance = models.get(
@@ -3006,11 +3128,8 @@ else:
             y utiliza lluvia, caudal y niveles aguas arriba.
 
             **30 días:** aplica el mismo procedimiento recursivo.
-            Cuando termina el pronóstico meteorológico directo,
-            la lluvia utiliza extensión climatológica histórica.
 
             **60 días:** escenario de estrés histórico.
-            No constituye un pronóstico meteorológico convencional.
 
             Cada actualización vuelve a utilizar la última medición
             real disponible de San Nicolás como punto de partida.
