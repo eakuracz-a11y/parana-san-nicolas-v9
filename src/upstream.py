@@ -8,9 +8,26 @@ import unicodedata
 # CONFIGURACIÓN INA
 # ============================================================
 
-INA_SERIES_URL = "https://alerta.ina.gob.ar/pub/datos/series"
+INA_SERIES_URL = (
+    "https://alerta.ina.gob.ar/pub/datos/series"
+)
 
-INA_A5_URL = "https://alerta.ina.gob.ar/a5/getObservaciones"
+INA_A5_URL = (
+    "https://alerta.ina.gob.ar/a5/getObservaciones"
+)
+
+
+# ============================================================
+# CONFIGURACIÓN GENERAL
+# ============================================================
+
+MAX_FORECAST_DAYS = 30
+
+TREND_WINDOW = 7
+
+LEVEL_MIN = 0.0
+
+LEVEL_MAX = 15.0
 
 
 # ============================================================
@@ -46,12 +63,17 @@ _CATALOG_CACHE = None
 # NORMALIZACIÓN DE TEXTO
 # ============================================================
 
-def normalizar_texto(texto):
+def normalizar_texto(
+    texto,
+):
 
     if texto is None:
+
         return ""
 
-    texto = str(texto)
+    texto = str(
+        texto
+    )
 
     texto = unicodedata.normalize(
         "NFKD",
@@ -60,14 +82,37 @@ def normalizar_texto(texto):
 
     texto = "".join(
         c
-        for c in texto
-        if not unicodedata.combining(c)
+        for c
+        in texto
+        if not unicodedata.combining(
+            c
+        )
     )
 
     return (
         texto
         .strip()
         .lower()
+    )
+
+
+# ============================================================
+# NOMBRE DE COLUMNA DE ESTACIÓN
+# ============================================================
+
+def nombre_columna_estacion(
+    estacion,
+):
+
+    return (
+        "nivel_"
+        + normalizar_texto(
+            estacion
+        )
+        .replace(
+            " ",
+            "_",
+        )
     )
 
 
@@ -86,19 +131,40 @@ def request_json(
         params=params,
         timeout=timeout,
         headers={
-            "User-Agent": (
-                "Parana-San-Nicolas-V9/1.0"
-            ),
-            "Accept": (
-                "application/json,"
-                "text/plain,*/*"
-            ),
+            "User-Agent":
+                "Parana-San-Nicolas-V11/1.0",
+
+            "Accept":
+                "application/json,text/plain,*/*",
         },
     )
 
     response.raise_for_status()
 
     return response.json()
+
+
+# ============================================================
+# NORMALIZAR FECHAS
+# ============================================================
+
+def normalizar_fechas(
+    serie,
+):
+
+    return (
+        pd.to_datetime(
+            serie,
+            errors="coerce",
+            utc=True,
+        )
+        .dt
+        .tz_localize(
+            None
+        )
+        .dt
+        .normalize()
+    )
 
 
 # ============================================================
@@ -109,7 +175,11 @@ def obtener_catalogo():
 
     global _CATALOG_CACHE
 
-    if _CATALOG_CACHE is not None:
+    if (
+        _CATALOG_CACHE
+        is not None
+    ):
+
         return _CATALOG_CACHE
 
     try:
@@ -146,6 +216,7 @@ def obtener_catalogo():
             ):
 
                 catalogo = value
+
                 break
 
     else:
@@ -168,6 +239,7 @@ def buscar_serie_nivel(
     catalogo = obtener_catalogo()
 
     if not catalogo:
+
         return None
 
     objetivo = normalizar_texto(
@@ -182,6 +254,7 @@ def buscar_serie_nivel(
             row,
             dict,
         ):
+
             continue
 
         nombre = normalizar_texto(
@@ -192,6 +265,7 @@ def buscar_serie_nivel(
         )
 
         if nombre != objetivo:
+
             continue
 
         try:
@@ -204,17 +278,24 @@ def buscar_serie_nivel(
             )
 
         except Exception:
+
             continue
 
         if varid != VAR_ID_LEVEL:
+
             continue
 
         series_id = (
-            row.get("seriesid")
-            or row.get("seriesId")
+            row.get(
+                "seriesid"
+            )
+            or row.get(
+                "seriesId"
+            )
         )
 
         if series_id is None:
+
             continue
 
         try:
@@ -224,11 +305,12 @@ def buscar_serie_nivel(
             )
 
         except Exception:
+
             continue
 
-        # -----------------------------------------------
+        # ----------------------------------------------------
         # PROCEDIMIENTO
-        # -----------------------------------------------
+        # ----------------------------------------------------
 
         try:
 
@@ -243,9 +325,9 @@ def buscar_serie_nivel(
 
             procid = -1
 
-        # -----------------------------------------------
-        # OBSERVACIONES
-        # -----------------------------------------------
+        # ----------------------------------------------------
+        # CANTIDAD DE OBSERVACIONES
+        # ----------------------------------------------------
 
         try:
 
@@ -261,9 +343,9 @@ def buscar_serie_nivel(
 
             obs_count = 0
 
-        # -----------------------------------------------
+        # ----------------------------------------------------
         # FECHA FINAL
-        # -----------------------------------------------
+        # ----------------------------------------------------
 
         to_date = pd.to_datetime(
             row.get(
@@ -273,14 +355,15 @@ def buscar_serie_nivel(
             utc=True,
         )
 
-        # -----------------------------------------------
-        # SCORE
-        # -----------------------------------------------
+        # ----------------------------------------------------
+        # PUNTAJE
+        # ----------------------------------------------------
 
         score = 0
 
         # Medición directa
         if procid == 1:
+
             score += 100
 
         # Otra observación real
@@ -288,19 +371,24 @@ def buscar_serie_nivel(
             4,
             8,
         ]:
+
             score += 40
 
-        # Evitar simulados y trazas
+        # Evitar simulaciones
         if procid == 4:
+
             score -= 100
 
         if procid == 8:
+
             score -= 80
 
         if obs_count > 100:
+
             score += 20
 
         if obs_count > 1000:
+
             score += 20
 
         if pd.notna(
@@ -317,51 +405,76 @@ def buscar_serie_nivel(
             ).days
 
             if age <= 3:
+
                 score += 60
 
             elif age <= 15:
+
                 score += 50
 
             elif age <= 60:
+
                 score += 30
 
             elif age <= 365:
+
                 score += 10
 
         candidatos.append(
             {
-                "station": estacion,
-                "series_id": series_id,
-                "procid": procid,
-                "proc_name": row.get(
-                    "proc_nombre"
-                ),
-                "obs_count": obs_count,
-                "from_date": row.get(
-                    "from_date"
-                ),
-                "to_date": row.get(
-                    "to_date"
-                ),
-                "unit": row.get(
-                    "unit_nombre"
-                ),
-                "score": score,
+                "station":
+                    estacion,
+
+                "series_id":
+                    series_id,
+
+                "procid":
+                    procid,
+
+                "proc_name":
+                    row.get(
+                        "proc_nombre"
+                    ),
+
+                "obs_count":
+                    obs_count,
+
+                "from_date":
+                    row.get(
+                        "from_date"
+                    ),
+
+                "to_date":
+                    row.get(
+                        "to_date"
+                    ),
+
+                "unit":
+                    row.get(
+                        "unit_nombre"
+                    ),
+
+                "score":
+                    score,
             }
         )
 
     if not candidatos:
+
         return None
 
     candidatos = sorted(
         candidatos,
-        key=lambda x: x[
-            "score"
-        ],
+        key=lambda x:
+            x[
+                "score"
+            ],
         reverse=True,
     )
 
-    return candidatos[0]
+    return candidatos[
+        0
+    ]
 
 
 # ============================================================
@@ -375,16 +488,24 @@ def consultar_serie(
 ):
 
     params = {
-        "tipo": "puntual",
-        "series_id": int(
-            series_id
-        ),
-        "timestart": str(
-            start
-        ),
-        "timeend": str(
-            end
-        ),
+
+        "tipo":
+            "puntual",
+
+        "series_id":
+            int(
+                series_id
+            ),
+
+        "timestart":
+            str(
+                start
+            ),
+
+        "timeend":
+            str(
+                end
+            ),
     }
 
     try:
@@ -410,6 +531,7 @@ def consultar_serie(
     )
 
     if df.empty:
+
         return df
 
     if (
@@ -423,20 +545,10 @@ def consultar_serie(
 
     df[
         "datetime"
-    ] = pd.to_datetime(
+    ] = normalizar_fechas(
         df[
             "timestart"
-        ],
-        errors="coerce",
-        utc=True,
-    )
-
-    df[
-        "datetime"
-    ] = (
-        df["datetime"]
-        .dt.tz_localize(None)
-        .dt.normalize()
+        ]
     )
 
     df[
@@ -456,11 +568,20 @@ def consultar_serie(
     )
 
     df = (
-        df.groupby(
+        df
+        .groupby(
             "datetime",
             as_index=False,
-        )["value"]
+        )[
+            "value"
+        ]
         .mean()
+        .sort_values(
+            "datetime"
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
     return df
@@ -490,6 +611,7 @@ def get_upstream_history(
         ] = info
 
         if info is None:
+
             continue
 
         df = consultar_serie(
@@ -501,22 +623,19 @@ def get_upstream_history(
         )
 
         if df.empty:
+
             continue
 
         nombre_columna = (
-            "nivel_"
-            + normalizar_texto(
+            nombre_columna_estacion(
                 estacion
-            )
-            .replace(
-                " ",
-                "_",
             )
         )
 
         df = df.rename(
             columns={
-                "value": nombre_columna
+                "value":
+                    nombre_columna
             }
         )
 
@@ -540,10 +659,24 @@ def get_upstream_history(
             ]
         )
 
+    resultado[
+        "datetime"
+    ] = normalizar_fechas(
+        resultado[
+            "datetime"
+        ]
+    )
+
     resultado = (
         resultado
         .sort_values(
             "datetime"
+        )
+        .drop_duplicates(
+            subset=[
+                "datetime"
+            ],
+            keep="last",
         )
         .reset_index(
             drop=True
@@ -557,15 +690,19 @@ def get_upstream_history(
 
 
 # ============================================================
-# CREAR VARIABLES AGUAS ARRIBA
+# PREPARAR DATOS AGUAS ARRIBA
 # ============================================================
 
-def preparar_upstream_features(
+def preparar_upstream_history(
     df,
 ):
 
     if (
         df is None
+        or not isinstance(
+            df,
+            pd.DataFrame,
+        )
         or df.empty
     ):
 
@@ -573,11 +710,38 @@ def preparar_upstream_features(
 
     out = df.copy()
 
+    if "datetime" not in out.columns:
+
+        return pd.DataFrame()
+
+    out[
+        "datetime"
+    ] = normalizar_fechas(
+        out[
+            "datetime"
+        ]
+    )
+
     level_cols = [
         c
-        for c in out.columns
-        if c.startswith(
-            "nivel_"
+        for c
+        in out.columns
+        if (
+            c.startswith(
+                "nivel_"
+            )
+            and "_lag"
+            not in c
+            and "_diff"
+            not in c
+            and "_trend"
+            not in c
+            and "_mean"
+            not in c
+            and "_actual"
+            not in c
+            and "_next"
+            not in c
         )
     ]
 
@@ -592,34 +756,622 @@ def preparar_upstream_features(
             errors="coerce",
         )
 
-        out[
-            col
-        ] = (
-            out[col]
-            .interpolate(
-                limit=3,
-                limit_direction="both",
+        if (
+            out[
+                col
+            ]
+            .notna()
+            .sum()
+            >= 2
+        ):
+
+            out[
+                col
+            ] = (
+                out[
+                    col
+                ]
+                .interpolate(
+                    limit=3,
+                    limit_direction="both",
+                )
+            )
+
+    return (
+        out
+        .dropna(
+            subset=[
+                "datetime"
+            ]
+        )
+        .sort_values(
+            "datetime"
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+# ============================================================
+# CALCULAR PENDIENTE RECIENTE
+# ============================================================
+
+def calcular_pendiente(
+    serie,
+    ventana=TREND_WINDOW,
+):
+
+    valores = (
+        pd.to_numeric(
+            serie,
+            errors="coerce",
+        )
+        .dropna()
+        .tail(
+            ventana
+        )
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+    if len(
+        valores
+    ) < 3:
+
+        return 0.0
+
+    x = np.arange(
+        len(
+            valores
+        ),
+        dtype=float,
+    )
+
+    try:
+
+        pendiente = float(
+            np.polyfit(
+                x,
+                valores,
+                1,
+            )[0]
+        )
+
+    except Exception:
+
+        pendiente = 0.0
+
+    return pendiente
+
+
+# ============================================================
+# ESTIMAR VOLATILIDAD RECIENTE
+# ============================================================
+
+def calcular_volatilidad(
+    serie,
+    ventana=14,
+):
+
+    valores = (
+        pd.to_numeric(
+            serie,
+            errors="coerce",
+        )
+        .dropna()
+        .tail(
+            ventana
+        )
+    )
+
+    if len(
+        valores
+    ) < 3:
+
+        return 0.03
+
+    cambios = valores.diff().dropna()
+
+    if cambios.empty:
+
+        return 0.03
+
+    volatilidad = float(
+        cambios.std()
+    )
+
+    if (
+        not np.isfinite(
+            volatilidad
+        )
+        or volatilidad <= 0
+    ):
+
+        volatilidad = 0.03
+
+    return volatilidad
+
+
+# ============================================================
+# PROYECTAR UNA ESTACIÓN
+# ============================================================
+
+def proyectar_estacion(
+    serie,
+    days,
+):
+
+    valid = (
+        pd.to_numeric(
+            serie,
+            errors="coerce",
+        )
+        .dropna()
+    )
+
+    if valid.empty:
+
+        return [
+            np.nan
+        ] * days
+
+    actual = float(
+        valid.iloc[-1]
+    )
+
+    pendiente = calcular_pendiente(
+        valid,
+        ventana=TREND_WINDOW,
+    )
+
+    volatilidad = calcular_volatilidad(
+        valid,
+        ventana=14,
+    )
+
+    # ========================================================
+    # LIMITAR VARIACIÓN DIARIA
+    # ========================================================
+
+    limite_diario = max(
+        min(
+            abs(
+                actual
+            )
+            * 0.04,
+            0.25,
+        ),
+        volatilidad
+        * 1.5,
+        0.03,
+    )
+
+    pendiente = float(
+        np.clip(
+            pendiente,
+            -limite_diario,
+            limite_diario,
+        )
+    )
+
+    resultado = []
+
+    nivel = actual
+
+    for h in range(
+        1,
+        days + 1,
+    ):
+
+        # ----------------------------------------------------
+        # AMORTIGUACIÓN
+        #
+        # La tendencia reciente tiene mayor peso al comienzo
+        # y pierde fuerza progresivamente.
+        # ----------------------------------------------------
+
+        amortiguacion = np.exp(
+            -h
+            / 12.0
+        )
+
+        incremento = (
+            pendiente
+            * amortiguacion
+        )
+
+        incremento = float(
+            np.clip(
+                incremento,
+                -limite_diario,
+                limite_diario,
             )
         )
 
-        # -----------------------------------------------
+        nivel = (
+            nivel
+            + incremento
+        )
+
+        nivel = float(
+            np.clip(
+                nivel,
+                LEVEL_MIN,
+                LEVEL_MAX,
+            )
+        )
+
+        resultado.append(
+            nivel
+        )
+
+    return resultado
+
+
+# ============================================================
+# PROYECCIÓN DIARIA DE ESTACIONES AGUAS ARRIBA
+# ============================================================
+
+def project_upstream(
+    upstream_history,
+    future_dates=None,
+    days=15,
+):
+
+    days = max(
+        1,
+        min(
+            int(
+                days
+            ),
+            MAX_FORECAST_DAYS,
+        ),
+    )
+
+    history = preparar_upstream_history(
+        upstream_history
+    )
+
+    if history.empty:
+
+        return pd.DataFrame()
+
+    if (
+        future_dates is not None
+    ):
+
+        future_dates = pd.to_datetime(
+            future_dates,
+            errors="coerce",
+        )
+
+        future_dates = pd.DatetimeIndex(
+            future_dates
+        )
+
+        future_dates = future_dates[
+            ~future_dates.isna()
+        ]
+
+        if len(
+            future_dates
+        ) > 0:
+
+            dates = pd.DatetimeIndex(
+                future_dates[
+                    :days
+                ]
+            )
+
+        else:
+
+            dates = None
+
+    else:
+
+        dates = None
+
+    if dates is None:
+
+        last_date = history[
+            "datetime"
+        ].max()
+
+        dates = pd.date_range(
+            last_date
+            + pd.Timedelta(
+                days=1
+            ),
+            periods=days,
+            freq="D",
+        )
+
+    else:
+
+        days = len(
+            dates
+        )
+
+    result = pd.DataFrame(
+        {
+            "datetime":
+                dates
+        }
+    )
+
+    level_cols = [
+        c
+        for c
+        in history.columns
+        if (
+            c.startswith(
+                "nivel_"
+            )
+            and "_lag"
+            not in c
+            and "_diff"
+            not in c
+            and "_trend"
+            not in c
+            and "_mean"
+            not in c
+            and "_actual"
+            not in c
+            and "_next"
+            not in c
+        )
+    ]
+
+    for col in level_cols:
+
+        projection = proyectar_estacion(
+            history[
+                col
+            ],
+            days=days,
+        )
+
+        result[
+            col
+        ] = projection
+
+    return result
+
+
+# ============================================================
+# OBTENER HISTÓRICO + PROYECCIÓN
+# ============================================================
+
+def get_upstream_data(
+    start,
+    end,
+    forecast_days=15,
+    future_dates=None,
+):
+
+    forecast_days = max(
+        1,
+        min(
+            int(
+                forecast_days
+            ),
+            MAX_FORECAST_DAYS,
+        ),
+    )
+
+    (
+        history,
+        metadata,
+    ) = get_upstream_history(
+        start,
+        end,
+    )
+
+    history = preparar_upstream_history(
+        history
+    )
+
+    future = project_upstream(
+        upstream_history=history,
+        future_dates=future_dates,
+        days=forecast_days,
+    )
+
+    # ========================================================
+    # METADATA DE PROYECCIÓN
+    # ========================================================
+
+    projection_meta = {}
+
+    level_cols = [
+        c
+        for c
+        in history.columns
+        if (
+            c.startswith(
+                "nivel_"
+            )
+            and "_lag"
+            not in c
+            and "_diff"
+            not in c
+            and "_trend"
+            not in c
+            and "_mean"
+            not in c
+            and "_actual"
+            not in c
+            and "_next"
+            not in c
+        )
+    ]
+
+    for col in level_cols:
+
+        serie = (
+            pd.to_numeric(
+                history[
+                    col
+                ],
+                errors="coerce",
+            )
+            .dropna()
+        )
+
+        if serie.empty:
+
+            projection_meta[
+                col
+            ] = {
+                "actual":
+                    None,
+
+                "pendiente":
+                    None,
+
+                "estado":
+                    "Sin datos",
+            }
+
+            continue
+
+        actual = float(
+            serie.iloc[-1]
+        )
+
+        pendiente = calcular_pendiente(
+            serie,
+            ventana=TREND_WINDOW,
+        )
+
+        umbral = max(
+            abs(
+                actual
+            )
+            * 0.003,
+            0.01,
+        )
+
+        if pendiente > umbral:
+
+            estado = "Creciente"
+
+        elif pendiente < -umbral:
+
+            estado = "Bajante"
+
+        else:
+
+            estado = "Estable"
+
+        projection_meta[
+            col
+        ] = {
+            "actual":
+                actual,
+
+            "pendiente":
+                pendiente,
+
+            "estado":
+                estado,
+        }
+
+    return (
+        history,
+        future,
+        metadata,
+        projection_meta,
+    )
+
+
+# ============================================================
+# CREAR VARIABLES AGUAS ARRIBA
+# ============================================================
+
+def preparar_upstream_features(
+    df,
+):
+
+    if (
+        df is None
+        or not isinstance(
+            df,
+            pd.DataFrame,
+        )
+        or df.empty
+    ):
+
+        return pd.DataFrame()
+
+    out = preparar_upstream_history(
+        df
+    )
+
+    if out.empty:
+
+        return out
+
+    level_cols = [
+        c
+        for c
+        in out.columns
+        if (
+            c.startswith(
+                "nivel_"
+            )
+            and "_lag"
+            not in c
+            and "_diff"
+            not in c
+            and "_trend"
+            not in c
+            and "_mean"
+            not in c
+            and "_actual"
+            not in c
+            and "_next"
+            not in c
+        )
+    ]
+
+    for col in level_cols:
+
+        # ----------------------------------------------------
+        # NIVEL ACTUAL
+        # ----------------------------------------------------
+
+        out[
+            f"{col}_actual"
+        ] = out[
+            col
+        ]
+
+        # ----------------------------------------------------
         # CAMBIO DIARIO
-        # -----------------------------------------------
+        # ----------------------------------------------------
 
         out[
             f"{col}_diff1"
-        ] = out[
-            col
-        ].diff()
+        ] = (
+            out[
+                col
+            ]
+            .diff()
+        )
 
-        # -----------------------------------------------
+        # ----------------------------------------------------
         # TENDENCIA 3 DÍAS
-        # -----------------------------------------------
+        # ----------------------------------------------------
 
         out[
             f"{col}_trend3"
         ] = (
-            out[col]
+            out[
+                col
+            ]
             - out[
                 col
             ].shift(
@@ -627,9 +1379,42 @@ def preparar_upstream_features(
             )
         ) / 3.0
 
-        # -----------------------------------------------
+        # ----------------------------------------------------
+        # TENDENCIA 7 DÍAS
+        # ----------------------------------------------------
+
+        out[
+            f"{col}_trend7"
+        ] = (
+            out[
+                col
+            ]
+            - out[
+                col
+            ].shift(
+                7
+            )
+        ) / 7.0
+
+        # ----------------------------------------------------
+        # MEDIA 7 DÍAS
+        # ----------------------------------------------------
+
+        out[
+            f"{col}_mean7"
+        ] = (
+            out[
+                col
+            ]
+            .rolling(
+                7
+            )
+            .mean()
+        )
+
+        # ----------------------------------------------------
         # LAGS
-        # -----------------------------------------------
+        # ----------------------------------------------------
 
         for lag in [
             1,
@@ -638,6 +1423,7 @@ def preparar_upstream_features(
             5,
             7,
             10,
+            14,
         ]:
 
             out[
