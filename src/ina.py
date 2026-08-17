@@ -1,474 +1,616 @@
+import time
 import requests
 import pandas as pd
 
 
 # ============================================================
-# CONFIGURACIÓN
+# CONFIGURACIÓN INA
 # ============================================================
 
-INA_A5_URL = "https://alerta.ina.gob.ar/a5/getObservaciones"
+# Endpoint principal A5
+INA_A5_URL = (
+    "https://alerta.ina.gob.ar/a5/getObservaciones"
+)
 
-SAN_NICOLAS_SERIES_ID = 36
-
-
-STATIONS = [
-    "Corrientes",
-    "Goya",
-    "La Paz",
-    "Paraná",
-    "Diamante",
-    "Rosario",
-    "Villa Constitución",
-    "San Nicolás",
-]
+# Endpoint legado de respaldo
+INA_LEGACY_URL = (
+    "https://alerta.ina.gob.ar/pub/datos/datos"
+)
 
 
 # ============================================================
-# DIAGNÓSTICO
+# SAN NICOLÁS
 # ============================================================
 
-_LAST_DIAGNOSTIC = {}
+# Serie utilizada actualmente para San Nicolás
+SERIES_ID = 36
 
-
-def get_last_diagnostic():
-    return _LAST_DIAGNOSTIC
-
-
-# ============================================================
-# EXTRAER OBSERVACIONES
-# ============================================================
-
-def extraer_observaciones(data):
-    """
-    Intenta obtener la lista de observaciones desde las
-    estructuras JSON posibles de la API A5 del INA.
-    """
-
-    if data is None:
-        return []
-
-    if isinstance(data, list):
-        return data
-
-    if isinstance(data, dict):
-
-        claves_posibles = [
-            "observaciones",
-            "observations",
-            "data",
-            "datos",
-            "results",
-            "items",
-        ]
-
-        for clave in claves_posibles:
-
-            valor = data.get(clave)
-
-            if isinstance(valor, list):
-                return valor
-
-            if isinstance(valor, dict):
-
-                resultado = extraer_observaciones(valor)
-
-                if resultado:
-                    return resultado
-
-        # Buscar recursivamente cualquier lista
-        for valor in data.values():
-
-            if isinstance(valor, list):
-                return valor
-
-            if isinstance(valor, dict):
-
-                resultado = extraer_observaciones(valor)
-
-                if resultado:
-                    return resultado
-
-    return []
+TIPO = "puntual"
 
 
 # ============================================================
-# NORMALIZAR DATAFRAME
+# CONFIGURACIÓN DE RED
 # ============================================================
 
-def normalizar_dataframe(registros):
+REQUEST_TIMEOUT = 45
 
-    if not registros:
+MAX_RETRIES = 3
+
+RETRY_WAIT_SECONDS = 2
+
+
+# ============================================================
+# HEADERS
+# ============================================================
+
+HEADERS = {
+    "User-Agent":
+        "Parana-San-Nicolas-V11/1.0",
+
+    "Accept":
+        "application/json,text/plain,*/*",
+
+    "Connection":
+        "close",
+}
+
+
+# ============================================================
+# NORMALIZAR FECHA
+# ============================================================
+
+def _normalizar_fecha(
+    value,
+):
+
+    dt = pd.to_datetime(
+        value,
+        errors="coerce",
+    )
+
+    if pd.isna(
+        dt
+    ):
+
+        return None
+
+    return dt.strftime(
+        "%Y-%m-%d"
+    )
+
+
+# ============================================================
+# REQUEST CON REINTENTOS
+# ============================================================
+
+def _request_json(
+    url,
+    params,
+):
+
+    ultimo_error = None
+
+    for intento in range(
+        1,
+        MAX_RETRIES + 1,
+    ):
+
+        try:
+
+            response = requests.get(
+                url,
+                params=params,
+                timeout=REQUEST_TIMEOUT,
+                headers=HEADERS,
+            )
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            return (
+                data,
+                None,
+            )
+
+        except requests.exceptions.Timeout:
+
+            ultimo_error = (
+                "Tiempo de espera agotado "
+                "al consultar INA."
+            )
+
+        except requests.exceptions.ConnectionError:
+
+            ultimo_error = (
+                "No fue posible establecer conexión "
+                "con el servidor del INA."
+            )
+
+        except requests.exceptions.HTTPError as exc:
+
+            status = None
+
+            try:
+
+                status = (
+                    exc.response.status_code
+                )
+
+            except Exception:
+
+                pass
+
+            if status is not None:
+
+                ultimo_error = (
+                    "INA respondió con error HTTP "
+                    f"{status}."
+                )
+
+            else:
+
+                ultimo_error = (
+                    "INA respondió con un error HTTP."
+                )
+
+        except ValueError:
+
+            ultimo_error = (
+                "INA respondió, pero el contenido "
+                "no pudo interpretarse como JSON."
+            )
+
+        except Exception as exc:
+
+            ultimo_error = (
+                "Error inesperado consultando INA: "
+                f"{exc}"
+            )
+
+        if intento < MAX_RETRIES:
+
+            time.sleep(
+                RETRY_WAIT_SECONDS
+            )
+
+    return (
+        None,
+        ultimo_error,
+    )
+
+
+# ============================================================
+# PARSEAR RESPUESTA A5
+# ============================================================
+
+def _parse_a5(
+    data,
+):
+
+    if not isinstance(
+        data,
+        list,
+    ):
+
         return pd.DataFrame()
 
-    df = pd.DataFrame(registros)
+    if len(
+        data
+    ) == 0:
+
+        return pd.DataFrame()
+
+    df = pd.DataFrame(
+        data
+    )
 
     if df.empty:
-        return df
 
-    rename_map = {}
+        return pd.DataFrame()
 
-    for columna in df.columns:
+    if (
+        "timestart"
+        not in df.columns
+        or "valor"
+        not in df.columns
+    ):
 
-        nombre = str(columna).strip().lower()
+        return pd.DataFrame()
 
-        # ----------------------------------------------------
-        # FECHA
-        # ----------------------------------------------------
+    df[
+        "datetime"
+    ] = pd.to_datetime(
+        df[
+            "timestart"
+        ],
+        errors="coerce",
+        utc=True,
+    )
 
-        if nombre in [
-            "timestart",
-            "time_start",
+    df[
+        "value"
+    ] = pd.to_numeric(
+        df[
+            "valor"
+        ],
+        errors="coerce",
+    )
+
+    df = df.dropna(
+        subset=[
             "datetime",
-            "timestamp",
-            "fecha",
-            "date",
-            "time",
-            "observedat",
-            "observed_at",
-        ]:
-
-            rename_map[columna] = "datetime"
-
-        # ----------------------------------------------------
-        # VALOR
-        # ----------------------------------------------------
-
-        elif nombre in [
-            "valor",
             "value",
-            "nivel",
-            "altura",
-            "level",
-            "height",
-        ]:
-
-            rename_map[columna] = "value"
-
-    df = df.rename(
-        columns=rename_map
+        ]
     )
 
-    # ========================================================
-    # BÚSQUEDA SECUNDARIA DE FECHA
-    # ========================================================
+    if df.empty:
 
-    if "datetime" not in df.columns:
+        return pd.DataFrame()
 
-        for columna in df.columns:
-
-            nombre = str(columna).lower()
-
-            if (
-                "time" in nombre
-                or "date" in nombre
-                or "fecha" in nombre
-            ):
-
-                df = df.rename(
-                    columns={
-                        columna: "datetime"
-                    }
-                )
-
-                break
-
-    # ========================================================
-    # BÚSQUEDA SECUNDARIA DE VALOR
-    # ========================================================
-
-    if "value" not in df.columns:
-
-        for columna in df.columns:
-
-            nombre = str(columna).lower()
-
-            if (
-                "valor" in nombre
-                or "value" in nombre
-                or "nivel" in nombre
-                or "altura" in nombre
-                or "level" in nombre
-                or "height" in nombre
-            ):
-
-                df = df.rename(
-                    columns={
-                        columna: "value"
-                    }
-                )
-
-                break
-
-    # ========================================================
-    # CONVERSIÓN DE TIPOS
-    # ========================================================
-
-    if "datetime" in df.columns:
-
-        df["datetime"] = pd.to_datetime(
-            df["datetime"],
-            errors="coerce",
+    # Orden cronológico
+    df = (
+        df
+        .sort_values(
+            "datetime"
         )
-
-    if "value" in df.columns:
-
-        df["value"] = pd.to_numeric(
-            df["value"],
-            errors="coerce",
+        .drop_duplicates(
+            subset=[
+                "datetime"
+            ],
+            keep="last",
         )
-
-    return df
-
-
-# ============================================================
-# CONSULTA API A5 INA
-# ============================================================
-
-def consultar_ina_a5(start, end):
-
-    global _LAST_DIAGNOSTIC
-
-    params = {
-        "tipo": "puntual",
-        "series_id": SAN_NICOLAS_SERIES_ID,
-        "timestart": str(start),
-        "timeend": str(end),
-    }
-
-    headers = {
-        "User-Agent": "Parana-San-Nicolas-V9/1.0",
-        "Accept": "application/json,text/plain,*/*",
-    }
-
-    response = requests.get(
-        INA_A5_URL,
-        params=params,
-        headers=headers,
-        timeout=30,
+        .reset_index(
+            drop=True
+        )
     )
 
-    _LAST_DIAGNOSTIC = {
-        "configuracion": {
-            "api": "A5",
-            "tipo": "puntual",
-            "seriesId": SAN_NICOLAS_SERIES_ID,
-            "timeStart": str(start),
-            "timeEnd": str(end),
-        },
-        "consulta_directa": {
-            "status_datos": response.status_code,
-            "url_datos": response.url,
-            "texto_datos": response.text[:8000],
-        },
-    }
-
-    response.raise_for_status()
-
-    try:
-
-        data = response.json()
-
-    except ValueError:
-
-        raise RuntimeError(
-            "El INA respondió, pero la respuesta "
-            "de la API A5 no es JSON."
-        )
-
-    _LAST_DIAGNOSTIC[
-        "consulta_directa"
-    ]["json_datos"] = data
-
-    return data
+    return df[
+        [
+            "datetime",
+            "value",
+        ]
+    ]
 
 
 # ============================================================
-# FUNCIÓN PRINCIPAL UTILIZADA POR APP.PY
+# PARSEAR RESPUESTA LEGACY
 # ============================================================
 
-def observed(start, end):
+def _parse_legacy(
+    data,
+):
 
-    global _LAST_DIAGNOSTIC
+    if data is None:
 
-    try:
+        return pd.DataFrame()
 
-        # ====================================================
-        # VALIDAR FECHAS
-        # ====================================================
+    # ========================================================
+    # CASO LISTA
+    # ========================================================
 
-        start_dt = pd.to_datetime(
-            start,
-            errors="coerce",
-        )
+    if isinstance(
+        data,
+        list,
+    ):
 
-        end_dt = pd.to_datetime(
-            end,
-            errors="coerce",
-        )
-
-        if pd.isna(start_dt):
-
-            return (
-                pd.DataFrame(),
-                "La fecha inicial no es válida.",
-            )
-
-        if pd.isna(end_dt):
-
-            return (
-                pd.DataFrame(),
-                "La fecha final no es válida.",
-            )
-
-        today = pd.Timestamp.today().normalize()
-
-        # ----------------------------------------------------
-        # No consultar futuro
-        # ----------------------------------------------------
-
-        if end_dt > today:
-            end_dt = today
-
-        if start_dt > end_dt:
-
-            return (
-                pd.DataFrame(),
-                "La fecha Desde no puede ser posterior a Hasta.",
-            )
-
-        # ====================================================
-        # FORMATO DE FECHA PARA API
-        # ====================================================
-
-        inicio = start_dt.strftime(
-            "%Y-%m-%d"
-        )
-
-        fin = end_dt.strftime(
-            "%Y-%m-%d"
-        )
-
-        # ====================================================
-        # CONSULTAR INA
-        # ====================================================
-
-        data = consultar_ina_a5(
-            inicio,
-            fin,
-        )
-
-        registros = extraer_observaciones(
+        df = pd.DataFrame(
             data
         )
 
-        _LAST_DIAGNOSTIC[
-            "consulta_directa"
-        ]["cantidad_registros"] = len(registros)
+    # ========================================================
+    # CASO DICCIONARIO
+    # ========================================================
 
-        # ====================================================
-        # SIN REGISTROS
-        # ====================================================
+    elif isinstance(
+        data,
+        dict,
+    ):
 
-        if not registros:
+        lista = None
 
-            mensaje = None
+        # Buscar la primera lista disponible
+        for value in data.values():
 
-            if isinstance(data, dict):
+            if isinstance(
+                value,
+                list,
+            ):
 
-                mensaje = (
-                    data.get("mensaje")
-                    or data.get("message")
-                    or data.get("error")
-                    or data.get("detail")
-                )
+                lista = value
+                break
 
-            if mensaje:
+        if lista is None:
 
-                return (
-                    pd.DataFrame(),
-                    f"Respuesta del INA: {mensaje}",
-                )
+            return pd.DataFrame()
 
-            return (
-                pd.DataFrame(),
-                (
-                    "La API A5 del INA respondió, "
-                    "pero no devolvió observaciones "
-                    "para la serie 36."
-                ),
-            )
-
-        # ====================================================
-        # NORMALIZAR
-        # ====================================================
-
-        df = normalizar_dataframe(
-            registros
+        df = pd.DataFrame(
+            lista
         )
 
-        if df.empty:
+    else:
 
-            return (
-                pd.DataFrame(),
-                (
-                    "El INA devolvió registros, "
-                    "pero no pudieron convertirse "
-                    "a una tabla válida."
-                ),
-            )
+        return pd.DataFrame()
 
-        # ====================================================
-        # VALIDAR COLUMNAS
-        # ====================================================
+    if df.empty:
 
-        if "datetime" not in df.columns:
+        return pd.DataFrame()
 
-            return (
-                pd.DataFrame(),
-                (
-                    "INA devolvió observaciones, pero "
-                    "no se identificó la fecha. "
-                    f"Columnas recibidas: {list(df.columns)}"
-                ),
-            )
+    # ========================================================
+    # DETECTAR FECHA
+    # ========================================================
 
-        if "value" not in df.columns:
+    date_col = None
 
-            return (
-                pd.DataFrame(),
-                (
-                    "INA devolvió observaciones, pero "
-                    "no se identificó el nivel. "
-                    f"Columnas recibidas: {list(df.columns)}"
-                ),
-            )
+    for candidate in [
+        "timestart",
+        "timeStart",
+        "datetime",
+        "fecha",
+        "timestamp",
+    ]:
 
-        # ====================================================
-        # LIMPIEZA
-        # ====================================================
+        if candidate in df.columns:
 
-        df = df.dropna(
+            date_col = candidate
+            break
+
+    # ========================================================
+    # DETECTAR VALOR
+    # ========================================================
+
+    value_col = None
+
+    for candidate in [
+        "valor",
+        "value",
+        "nivel",
+    ]:
+
+        if candidate in df.columns:
+
+            value_col = candidate
+            break
+
+    if (
+        date_col is None
+        or value_col is None
+    ):
+
+        return pd.DataFrame()
+
+    df[
+        "datetime"
+    ] = pd.to_datetime(
+        df[
+            date_col
+        ],
+        errors="coerce",
+        utc=True,
+    )
+
+    df[
+        "value"
+    ] = pd.to_numeric(
+        df[
+            value_col
+        ],
+        errors="coerce",
+    )
+
+    df = df.dropna(
+        subset=[
+            "datetime",
+            "value",
+        ]
+    )
+
+    if df.empty:
+
+        return pd.DataFrame()
+
+    df = (
+        df
+        .sort_values(
+            "datetime"
+        )
+        .drop_duplicates(
             subset=[
-                "datetime",
-                "value",
-            ]
+                "datetime"
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    return df[
+        [
+            "datetime",
+            "value",
+        ]
+    ]
+
+
+# ============================================================
+# CONSULTAR ENDPOINT A5
+# ============================================================
+
+def _observed_a5(
+    start,
+    end,
+):
+
+    params = {
+        "tipo":
+            TIPO,
+
+        "series_id":
+            SERIES_ID,
+
+        "timestart":
+            start,
+
+        "timeend":
+            end,
+    }
+
+    (
+        data,
+        error,
+    ) = _request_json(
+        INA_A5_URL,
+        params=params,
+    )
+
+    if error is not None:
+
+        return (
+            pd.DataFrame(),
+            error,
         )
 
-        df = (
-            df
-            .sort_values("datetime")
-            .reset_index(drop=True)
+    df = _parse_a5(
+        data
+    )
+
+    if df.empty:
+
+        return (
+            pd.DataFrame(),
+            (
+                "INA A5 respondió correctamente, "
+                "pero no devolvió observaciones válidas."
+            ),
         )
 
-        if df.empty:
+    return (
+        df,
+        None,
+    )
 
-            return (
-                pd.DataFrame(),
-                (
-                    "INA devolvió observaciones, pero "
-                    "no quedaron valores válidos."
-                ),
-            )
+
+# ============================================================
+# CONSULTAR ENDPOINT LEGACY
+# ============================================================
+
+def _observed_legacy(
+    start,
+    end,
+):
+
+    params = {
+        "seriesId":
+            SERIES_ID,
+
+        "timeStart":
+            start,
+
+        "timeEnd":
+            end,
+    }
+
+    (
+        data,
+        error,
+    ) = _request_json(
+        INA_LEGACY_URL,
+        params=params,
+    )
+
+    if error is not None:
+
+        return (
+            pd.DataFrame(),
+            error,
+        )
+
+    df = _parse_legacy(
+        data
+    )
+
+    if df.empty:
+
+        return (
+            pd.DataFrame(),
+            (
+                "El endpoint alternativo del INA "
+                "no devolvió observaciones válidas."
+            ),
+        )
+
+    return (
+        df,
+        None,
+    )
+
+
+# ============================================================
+# FUNCIÓN PRINCIPAL
+# ============================================================
+
+def observed(
+    start,
+    end,
+):
+
+    # ========================================================
+    # NORMALIZAR FECHAS
+    # ========================================================
+
+    start = _normalizar_fecha(
+        start
+    )
+
+    end = _normalizar_fecha(
+        end
+    )
+
+    if start is None:
+
+        return (
+            pd.DataFrame(),
+            "La fecha inicial no es válida.",
+        )
+
+    if end is None:
+
+        return (
+            pd.DataFrame(),
+            "La fecha final no es válida.",
+        )
+
+    if (
+        pd.Timestamp(
+            start
+        )
+        > pd.Timestamp(
+            end
+        )
+    ):
+
+        return (
+            pd.DataFrame(),
+            (
+                "La fecha inicial no puede ser "
+                "posterior a la fecha final."
+            ),
+        )
+
+    # ========================================================
+    # PRIMER INTENTO: A5
+    # ========================================================
+
+    (
+        df,
+        error_a5,
+    ) = _observed_a5(
+        start,
+        end,
+    )
+
+    if not df.empty:
 
         return (
             df,
@@ -476,72 +618,170 @@ def observed(start, end):
         )
 
     # ========================================================
-    # ERRORES
+    # SEGUNDO INTENTO: LEGACY
     # ========================================================
 
-    except requests.exceptions.Timeout:
+    (
+        df_legacy,
+        error_legacy,
+    ) = _observed_legacy(
+        start,
+        end,
+    )
+
+    if not df_legacy.empty:
 
         return (
-            pd.DataFrame(),
-            "La consulta al INA excedió el tiempo máximo de espera.",
+            df_legacy,
+            None,
         )
 
-    except requests.exceptions.HTTPError as exc:
+    # ========================================================
+    # ERROR FINAL
+    # ========================================================
 
-        return (
-            pd.DataFrame(),
-            f"La API A5 del INA devolvió un error HTTP: {exc}",
+    mensaje = (
+        "No fue posible obtener datos del INA."
+    )
+
+    if error_a5:
+
+        mensaje += (
+            " A5: "
+            + str(
+                error_a5
+            )
         )
 
-    except requests.exceptions.ConnectionError:
+    if error_legacy:
 
-        return (
-            pd.DataFrame(),
-            "No fue posible conectar con la API del INA.",
+        mensaje += (
+            " Alternativo: "
+            + str(
+                error_legacy
+            )
         )
 
-    except requests.exceptions.RequestException as exc:
-
-        return (
-            pd.DataFrame(),
-            f"Error de comunicación con el INA: {exc}",
-        )
-
-    except Exception as exc:
-
-        _LAST_DIAGNOSTIC[
-            "error_general"
-        ] = (
-            f"{type(exc).__name__}: {exc}"
-        )
-
-        return (
-            pd.DataFrame(),
-            (
-                "Error procesando datos del INA: "
-                f"{type(exc).__name__}: {exc}"
-            ),
-        )
+    return (
+        pd.DataFrame(),
+        mensaje,
+    )
 
 
 # ============================================================
-# METADATOS
+# DIAGNÓSTICO
 # ============================================================
 
-def forecast_meta():
+def diagnostico(
+    start,
+    end,
+):
 
-    return {
-        "fuente": "Instituto Nacional del Agua (INA)",
-        "api": "A5",
-        "estacion": "San Nicolás",
-        "siteCode": 36,
-        "seriesId": SAN_NICOLAS_SERIES_ID,
-        "variable": "Altura hidrométrica",
-        "varId": 2,
-        "procedimiento": "medición directa",
-        "unidad": "m",
-        "observacion": (
-            "Pronóstico experimental generado "
-            "por el modelo propio."
-        ),
+    start = _normalizar_fecha(
+        start
+    )
+
+    end = _normalizar_fecha(
+        end
+    )
+
+    resultado = {
+        "series_id":
+            SERIES_ID,
+
+        "tipo":
+            TIPO,
+
+        "inicio":
+            start,
+
+        "fin":
+            end,
+
+        "a5_ok":
+            False,
+
+        "legacy_ok":
+            False,
+
+        "a5_registros":
+            0,
+
+        "legacy_registros":
+            0,
+
+        "a5_error":
+            None,
+
+        "legacy_error":
+            None,
     }
+
+    if (
+        start is None
+        or end is None
+    ):
+
+        resultado[
+            "a5_error"
+        ] = "Fechas inválidas."
+
+        return resultado
+
+    # ========================================================
+    # A5
+    # ========================================================
+
+    (
+        df_a5,
+        error_a5,
+    ) = _observed_a5(
+        start,
+        end,
+    )
+
+    resultado[
+        "a5_error"
+    ] = error_a5
+
+    resultado[
+        "a5_registros"
+    ] = len(
+        df_a5
+    )
+
+    resultado[
+        "a5_ok"
+    ] = (
+        not df_a5.empty
+    )
+
+    # ========================================================
+    # LEGACY
+    # ========================================================
+
+    (
+        df_legacy,
+        error_legacy,
+    ) = _observed_legacy(
+        start,
+        end,
+    )
+
+    resultado[
+        "legacy_error"
+    ] = error_legacy
+
+    resultado[
+        "legacy_registros"
+    ] = len(
+        df_legacy
+    )
+
+    resultado[
+        "legacy_ok"
+    ] = (
+        not df_legacy.empty
+    )
+
+    return resultado
