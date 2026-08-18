@@ -29,10 +29,10 @@ from src.stress_ui import (
 
 # ============================================================
 # PARANÁ · SAN NICOLÁS
-# APP V11.8
+# APP V11.8.1
 # ============================================================
 
-APP_VERSION = "V11.8"
+APP_VERSION = "V11.8.1"
 
 
 # ============================================================
@@ -52,8 +52,7 @@ HISTORY_START = "1900-01-01"
 
 
 # ============================================================
-# ESCALA DE NIVEL
-# SIEMPRE 0–7 m
+# ESCALA HIDROMÉTRICA
 # ============================================================
 
 Y_MIN = 0.0
@@ -101,7 +100,7 @@ FECHA_FIN_MODELO = HOY
 
 
 # ============================================================
-# STREAMLIT
+# CONFIGURACIÓN STREAMLIT
 # ============================================================
 
 st.set_page_config(
@@ -113,28 +112,18 @@ st.set_page_config(
 
 
 # ============================================================
-# CSS
-# OPTIMIZADO PARA PC + CELULAR
+# CSS RESPONSIVE
 # ============================================================
 
 st.markdown(
     """
     <style>
 
-    /* ==============================================
-       CONTENEDOR GENERAL
-       ============================================== */
-
     .block-container {
-        padding-top: 1rem;
+        padding-top: 0.9rem;
         padding-bottom: 3rem;
         max-width: 1500px;
     }
-
-
-    /* ==============================================
-       MÉTRICAS
-       ============================================== */
 
     [data-testid="stMetric"] {
         padding: 0.35rem 0.45rem;
@@ -143,7 +132,7 @@ st.markdown(
     }
 
     [data-testid="stMetricValue"] {
-        font-size: 1.30rem;
+        font-size: 1.25rem;
     }
 
     [data-testid="stMetricLabel"] {
@@ -151,13 +140,12 @@ st.markdown(
     }
 
     [data-testid="stMetricDelta"] {
-        font-size: 0.76rem;
+        font-size: 0.74rem;
     }
 
-
-    /* ==============================================
-       TÍTULOS
-       ============================================== */
+    [data-testid="stCaptionContainer"] {
+        font-size: 0.82rem;
+    }
 
     h1 {
         font-size: 2rem;
@@ -166,27 +154,13 @@ st.markdown(
 
     h2 {
         font-size: 1.45rem;
-        margin-top: 1.1rem;
-        margin-bottom: 0.6rem;
+        margin-top: 1rem;
+        margin-bottom: 0.5rem;
     }
 
     h3 {
         font-size: 1.1rem;
     }
-
-
-    /* ==============================================
-       CAPTIONS
-       ============================================== */
-
-    [data-testid="stCaptionContainer"] {
-        font-size: 0.82rem;
-    }
-
-
-    /* ==============================================
-       BOTONES
-       ============================================== */
 
     .stButton > button {
         min-height: 3rem;
@@ -194,42 +168,45 @@ st.markdown(
         border-radius: 0.7rem;
     }
 
-
-    /* ==============================================
-       CELULAR
-       ============================================== */
-
     @media (max-width: 768px) {
 
         .block-container {
-            padding-top: 0.6rem;
-            padding-left: 0.65rem;
-            padding-right: 0.65rem;
+            padding-top: 0.45rem;
+            padding-left: 0.55rem;
+            padding-right: 0.55rem;
         }
 
         h1 {
-            font-size: 1.55rem !important;
+            font-size: 1.45rem !important;
         }
 
         h2 {
-            font-size: 1.2rem !important;
+            font-size: 1.15rem !important;
+        }
+
+        [data-testid="stMetric"] {
+            padding: 0.25rem 0.3rem;
         }
 
         [data-testid="stMetricValue"] {
-            font-size: 1.05rem !important;
+            font-size: 1rem !important;
         }
 
         [data-testid="stMetricLabel"] {
-            font-size: 0.72rem !important;
+            font-size: 0.68rem !important;
+        }
+
+        [data-testid="stMetricDelta"] {
+            font-size: 0.65rem !important;
         }
 
         [data-testid="stCaptionContainer"] {
-            font-size: 0.76rem !important;
+            font-size: 0.72rem !important;
         }
 
         .stButton > button {
             width: 100%;
-            min-height: 3.2rem;
+            min-height: 3.1rem;
         }
 
     }
@@ -264,7 +241,7 @@ st.markdown(
 
 
 # ============================================================
-# PERÍODO AUTOMÁTICO EN PANTALLA
+# PERÍODO AUTOMÁTICO
 # ============================================================
 
 p1, p2, p3 = st.columns(
@@ -272,7 +249,7 @@ p1, p2, p3 = st.columns(
 )
 
 p1.metric(
-    "Inicio automático",
+    "Inicio modelo",
     FECHA_INICIO_MODELO.strftime(
         "%d/%m/%Y"
     ),
@@ -286,7 +263,7 @@ p2.metric(
 )
 
 p3.metric(
-    "Período del modelo",
+    "Período",
     (
         f"{(
             FECHA_FIN_MODELO
@@ -295,10 +272,9 @@ p3.metric(
     ),
 )
 
-
 st.caption(
-    "El período de entrenamiento se actualiza automáticamente "
-    "desde el **1 de enero del año actual hasta hoy**."
+    "El modelo utiliza automáticamente datos desde el "
+    "**1 de enero del año actual hasta hoy**."
 )
 
 
@@ -314,7 +290,7 @@ actualizar = st.button(
 
 
 # ============================================================
-# FUNCIONES AUXILIARES
+# NORMALIZAR FECHAS
 # ============================================================
 
 def normalizar_fechas(
@@ -526,7 +502,7 @@ def formato_numero(
 
 
 # ============================================================
-# ESCALA 0–7
+# ESCALA NIVEL 0–7
 # ============================================================
 
 def aplicar_escala_nivel(
@@ -534,9 +510,7 @@ def aplicar_escala_nivel(
 ):
 
     fig.update_yaxes(
-        title_text=(
-            "Nivel hidrométrico (m)"
-        ),
+        title_text="Nivel hidrométrico (m)",
         range=[
             Y_MIN,
             Y_MAX,
@@ -544,17 +518,17 @@ def aplicar_escala_nivel(
         tick0=0,
         dtick=Y_STEP,
         autorange=False,
-        fixedrange=False,
     )
 
     return fig
 
 
 # ============================================================
-# EJE FECHA
+# EJE FECHA CORTO
+# PRONÓSTICOS 15 / 30 DÍAS
 # ============================================================
 
-def aplicar_eje_fecha(
+def aplicar_eje_fecha_corto(
     fig,
     intervalo_dias=2,
     formato="%d/%m",
@@ -572,6 +546,31 @@ def aplicar_eje_fecha(
             * 1000
         ),
         tickangle=0,
+        automargin=True,
+    )
+
+    return fig
+
+
+# ============================================================
+# EJE FECHA LARGO
+# HISTORIA / CAUDAL
+# ============================================================
+
+def aplicar_eje_fecha_largo(
+    fig,
+    nticks=9,
+    formato="%d/%m/%Y",
+):
+
+    fig.update_xaxes(
+        title_text="Fecha",
+        type="date",
+        tickformat=formato,
+        nticks=nticks,
+        tickangle=0,
+        automargin=True,
+        showgrid=True,
     )
 
     return fig
@@ -701,7 +700,7 @@ def agregar_banda_incertidumbre(
             line=dict(
                 width=1,
                 color=(
-                    "rgba(255,165,0,0.25)"
+                    "rgba(255,165,0,0.28)"
                 ),
             ),
             showlegend=False,
@@ -721,7 +720,7 @@ def agregar_banda_incertidumbre(
             line=dict(
                 width=1,
                 color=(
-                    "rgba(255,165,0,0.25)"
+                    "rgba(255,165,0,0.28)"
                 ),
             ),
             fill="tonexty",
@@ -1330,7 +1329,7 @@ def construir_envolvente_historica(
 
 
 # ============================================================
-# CARGA COMPLETA
+# ACTUALIZACIÓN GENERAL
 # ============================================================
 
 def actualizar_sistema():
@@ -1350,14 +1349,17 @@ def actualizar_sistema():
     )
 
     # ========================================================
-    # NIVEL ACTUAL / AÑO
+    # NIVEL INA
     # ========================================================
 
     with st.spinner(
         "Consultando nivel del INA..."
     ):
 
-        df_ina, error_ina = observed(
+        (
+            df_ina,
+            error_ina,
+        ) = observed(
             inicio,
             fin,
         )
@@ -1375,13 +1377,11 @@ def actualizar_sistema():
     if df.empty:
 
         raise RuntimeError(
-            "No se obtuvieron observaciones "
-            "válidas del INA."
+            "No se obtuvieron observaciones válidas."
         )
 
     # ========================================================
     # HISTORIAL COMPLETO
-    # PARA MÁXIMOS / MÍNIMOS / ESCENARIOS
     # ========================================================
 
     with st.spinner(
@@ -1390,11 +1390,12 @@ def actualizar_sistema():
 
         try:
 
-            hist_raw, hist_error = (
-                observed(
-                    HISTORY_START,
-                    fin,
-                )
+            (
+                hist_raw,
+                hist_error,
+            ) = observed(
+                HISTORY_START,
+                fin,
             )
 
             df_historico_total = (
@@ -1494,7 +1495,10 @@ def actualizar_sistema():
         "Entrenando modelo y calculando pronóstico..."
     ):
 
-        models, metrics = train(
+        (
+            models,
+            metrics,
+        ) = train(
             df,
             exog_history=
                 exog_history,
@@ -1505,15 +1509,18 @@ def actualizar_sistema():
         forecast30 = predict(
             df=df,
             models=models,
-            days=TREND_DAYS,
+            days=
+                TREND_DAYS,
             exog_future=
                 exog_future,
             upstream_future=
                 None,
         )
 
-    forecast30 = normalizar_fechas(
-        forecast30
+    forecast30 = (
+        normalizar_fechas(
+            forecast30
+        )
     )
 
     forecast = (
@@ -1525,7 +1532,7 @@ def actualizar_sistema():
     )
 
     # ========================================================
-    # SESSION
+    # GUARDAR SESIÓN
     # ========================================================
 
     st.session_state[
@@ -1588,7 +1595,7 @@ if actualizar:
         actualizar_sistema()
 
         st.success(
-            "✅ Datos y pronóstico actualizados correctamente."
+            "✅ Datos y pronóstico actualizados."
         )
 
     except Exception as exc:
@@ -1600,7 +1607,7 @@ if actualizar:
 
 
 # ============================================================
-# PRIMER INGRESO
+# ESTADO INICIAL
 # ============================================================
 
 if (
@@ -1609,8 +1616,7 @@ if (
 ):
 
     st.info(
-        "Presione **Actualizar datos y pronóstico** "
-        "para cargar la información actual."
+        "Presione **Actualizar datos y pronóstico**."
     )
 
 
@@ -1669,19 +1675,14 @@ else:
         )
     )
 
-    upstream_meta = (
+    actualizado = (
         st.session_state.get(
-            "upstream_meta",
-            {},
+            "actualizado"
         )
     )
 
-    actualizado = st.session_state.get(
-        "actualizado"
-    )
-
     # ========================================================
-    # NORMALIZACIÓN
+    # NORMALIZAR
     # ========================================================
 
     df_plot = normalizar_fechas(
@@ -1742,8 +1743,10 @@ else:
         "📊 Situación actual"
     )
 
-    m1, m2, m3, m4 = st.columns(
-        4
+    m1, m2, m3, m4 = (
+        st.columns(
+            4
+        )
     )
 
     m1.metric(
@@ -1752,7 +1755,7 @@ else:
     )
 
     m2.metric(
-        "Fecha medición",
+        "Fecha",
         ultima_fecha.strftime(
             "%d/%m/%Y"
         ),
@@ -1767,92 +1770,6 @@ else:
         "Máximo año",
         f"{df['nivel'].max():.2f} m",
     )
-
-    st.caption(
-        f"Datos del modelo: "
-        f"**{FECHA_INICIO_MODELO.strftime('%d/%m/%Y')} → "
-        f"{FECHA_FIN_MODELO.strftime('%d/%m/%Y')}**"
-    )
-
-    # ========================================================
-    # ESTADO COMPACTO
-    # ========================================================
-
-    estaciones_disponibles = 0
-
-    if isinstance(
-        upstream_history,
-        pd.DataFrame,
-    ):
-
-        estaciones_disponibles = len(
-            [
-                c
-                for c
-                in upstream_history.columns
-                if (
-                    c.startswith(
-                        "nivel_"
-                    )
-                    and upstream_history[
-                        c
-                    ]
-                    .notna()
-                    .any()
-                )
-            ]
-        )
-
-    e1, e2, e3, e4 = st.columns(
-        4
-    )
-
-    e1.caption(
-        "✅ **INA**"
-    )
-
-    e2.caption(
-        (
-            "✅ **Lluvia**"
-            if (
-                isinstance(
-                    exog_future,
-                    pd.DataFrame,
-                )
-                and not exog_future.empty
-            )
-            else
-            "⚠️ **Lluvia**"
-        )
-    )
-
-    e3.caption(
-        (
-            "✅ **Caudal**"
-            if (
-                isinstance(
-                    exog_history,
-                    pd.DataFrame,
-                )
-                and "caudal_m3s"
-                in exog_history.columns
-                and exog_history[
-                    "caudal_m3s"
-                ]
-                .notna()
-                .any()
-            )
-            else
-            "⚠️ **Caudal**"
-        )
-    )
-
-    e4.caption(
-        f"✅ **Aguas arriba:** "
-        f"{estaciones_disponibles}"
-    )
-
-    st.divider()
 
     # ========================================================
     # PRONÓSTICO 15 DÍAS
@@ -1884,11 +1801,6 @@ else:
                     "rgba(120,120,120,0.55)"
                 ),
             ),
-            hovertemplate=(
-                "%{x|%d/%m/%Y}"
-                "<br>Observado: %{y:.2f} m"
-                "<extra></extra>"
-            ),
         )
     )
 
@@ -1916,7 +1828,7 @@ else:
         )
 
     fig15.update_layout(
-        height=520,
+        height=510,
         hovermode="x unified",
         legend=dict(
             orientation="h",
@@ -1926,7 +1838,7 @@ else:
             l=5,
             r=5,
             t=30,
-            b=5,
+            b=25,
         ),
     )
 
@@ -1934,9 +1846,10 @@ else:
         fig15
     )
 
-    aplicar_eje_fecha(
+    aplicar_eje_fecha_corto(
         fig15,
         intervalo_dias=2,
+        formato="%d/%m",
     )
 
     st.plotly_chart(
@@ -1967,7 +1880,7 @@ else:
             )
 
     # ========================================================
-    # TABLA DIARIA
+    # TABLA 15 DÍAS
     # ========================================================
 
     if not forecast.empty:
@@ -2101,8 +2014,10 @@ else:
         )
     )
 
-    t1, t2, t3, t4 = st.columns(
-        4
+    t1, t2, t3, t4 = (
+        st.columns(
+            4
+        )
     )
 
     t1.metric(
@@ -2189,10 +2104,10 @@ else:
                 mode="lines",
                 name="Observado",
                 line=dict(
+                    width=2,
                     color=(
                         "rgba(120,120,120,0.50)"
                     ),
-                    width=2,
                 ),
             )
         )
@@ -2234,7 +2149,7 @@ else:
             )
 
         fig30.update_layout(
-            height=450,
+            height=445,
             hovermode="x unified",
             legend=dict(
                 orientation="h",
@@ -2244,7 +2159,7 @@ else:
                 l=5,
                 r=5,
                 t=30,
-                b=5,
+                b=25,
             ),
         )
 
@@ -2252,9 +2167,10 @@ else:
             fig30
         )
 
-        aplicar_eje_fecha(
+        aplicar_eje_fecha_corto(
             fig30,
             intervalo_dias=3,
+            formato="%d/%m",
         )
 
         st.plotly_chart(
@@ -2378,7 +2294,7 @@ else:
         )
 
         fig_hist.update_layout(
-            height=430,
+            height=425,
             hovermode="x unified",
             legend=dict(
                 orientation="h",
@@ -2388,7 +2304,7 @@ else:
                 l=5,
                 r=5,
                 t=30,
-                b=5,
+                b=25,
             ),
         )
 
@@ -2396,9 +2312,10 @@ else:
             fig_hist
         )
 
-        aplicar_eje_fecha(
+        aplicar_eje_fecha_corto(
             fig_hist,
             intervalo_dias=3,
+            formato="%d/%m",
         )
 
         st.plotly_chart(
@@ -2407,7 +2324,7 @@ else:
         )
 
     # ========================================================
-    # ESCENARIOS HISTÓRICOS 60 DÍAS
+    # ESCENARIO 60 DÍAS
     # ========================================================
 
     render_stress_scenario(
@@ -2458,8 +2375,10 @@ else:
             )
         )
 
-        r1, r2, r3 = st.columns(
-            3
+        r1, r2, r3 = (
+            st.columns(
+                3
+            )
         )
 
         r1.metric(
@@ -2500,7 +2419,7 @@ else:
         )
 
         rain_fig.update_layout(
-            height=280,
+            height=275,
             yaxis_title=(
                 "Precipitación (mm/día)"
             ),
@@ -2508,13 +2427,14 @@ else:
                 l=5,
                 r=5,
                 t=10,
-                b=5,
+                b=25,
             ),
         )
 
-        aplicar_eje_fecha(
+        aplicar_eje_fecha_corto(
             rain_fig,
             intervalo_dias=2,
+            formato="%d/%m",
         )
 
         st.plotly_chart(
@@ -2561,8 +2481,10 @@ else:
             q_hist
         )
 
-        q1, q2, q3, q4 = st.columns(
-            4
+        q1, q2, q3, q4 = (
+            st.columns(
+                4
+            )
         )
 
         q1.metric(
@@ -2589,17 +2511,23 @@ else:
             ),
         )
 
-        if tq[
-            "delta_7"
-        ] is not None:
+        if (
+            tq[
+                "delta_7"
+            ]
+            is not None
+        ):
 
             texto7 = (
                 f"{tq['delta_7']:+,.0f}"
             )
 
-            if tq[
-                "pct_7"
-            ] is not None:
+            if (
+                tq[
+                    "pct_7"
+                ]
+                is not None
+            ):
 
                 texto7 += (
                     f" ({tq['pct_7']:+.1f}%)"
@@ -2633,6 +2561,14 @@ else:
                 ],
                 mode="lines",
                 name="Caudal histórico",
+                line=dict(
+                    width=2,
+                ),
+                hovertemplate=(
+                    "%{x|%d/%m/%Y}"
+                    "<br>Caudal: %{y:,.0f} m³/s"
+                    "<extra></extra>"
+                ),
             )
         )
 
@@ -2658,13 +2594,22 @@ else:
                     mode="lines+markers",
                     line=dict(
                         dash="dash",
+                        width=2,
+                    ),
+                    marker=dict(
+                        size=5,
                     ),
                     name="Proyección",
+                    hovertemplate=(
+                        "%{x|%d/%m/%Y}"
+                        "<br>Caudal: %{y:,.0f} m³/s"
+                        "<extra></extra>"
+                    ),
                 )
             )
 
         q_fig.update_layout(
-            height=340,
+            height=345,
             hovermode="x unified",
             yaxis_title="Caudal (m³/s)",
             legend=dict(
@@ -2675,13 +2620,19 @@ else:
                 l=5,
                 r=5,
                 t=20,
-                b=5,
+                b=40,
             ),
         )
 
-        aplicar_eje_fecha(
+        # ====================================================
+        # IMPORTANTE V11.8.1
+        # NO UTILIZAMOS DTICK FIJO EN SERIES LARGAS
+        # ====================================================
+
+        aplicar_eje_fecha_largo(
             q_fig,
-            intervalo_dias=7,
+            nticks=9,
+            formato="%d/%m/%Y",
         )
 
         st.plotly_chart(
@@ -2738,7 +2689,7 @@ else:
             )
 
             imp_fig.update_layout(
-                height=480,
+                height=470,
                 xaxis_title="Importancia relativa",
                 margin=dict(
                     l=5,
@@ -2796,7 +2747,7 @@ else:
 
                 {
                     "Parámetro":
-                        "Inicio modelo",
+                        "Inicio",
 
                     "Valor":
                         FECHA_INICIO_MODELO.strftime(
@@ -2856,12 +2807,12 @@ else:
                         "Banda",
 
                     "Valor":
-                        "80% · máximo ±0,35 m",
+                        "80% · máx. ±0,35 m",
                 },
 
                 {
                     "Parámetro":
-                        "Escala",
+                        "Escala nivel",
 
                     "Valor":
                         "0–7 m",
@@ -2885,48 +2836,49 @@ else:
 
         st.markdown(
             f"""
-            **Período automático**
+            **Período automático del modelo**
 
-            El modelo utiliza automáticamente datos desde:
+            {FECHA_INICIO_MODELO.strftime('%d/%m/%Y')}
+            → {FECHA_FIN_MODELO.strftime('%d/%m/%Y')}
 
-            **{FECHA_INICIO_MODELO.strftime('%d/%m/%Y')}**
-
-            hasta:
-
-            **{FECHA_FIN_MODELO.strftime('%d/%m/%Y')}**
-
-            No es necesario seleccionar fechas manualmente.
+            El usuario no necesita seleccionar fechas.
 
             **15 días**
 
-            El cálculo comienza en la última altura real disponible.
-            Para cada nuevo día se consideran lluvia, caudal,
-            evolución del nivel y señales aguas arriba.
+            Parte del último nivel real disponible y calcula la
+            evolución diaria utilizando nivel, lluvia, caudal y
+            señales aguas arriba.
 
             **30 días**
 
-            Continúa la misma simulación. El nivel del día anterior
-            es siempre la base del siguiente.
+            Es la continuación de la misma simulación recursiva.
 
             **60 días**
 
-            Los escenarios extremos utilizan el historial completo
-            disponible y no solamente los datos del año actual.
+            Los escenarios severos utilizan información histórica
+            y no quedan limitados al año actual.
 
-            **Escala**
+            **Escalas**
 
-            Los gráficos de altura se mantienen siempre entre
+            Todos los gráficos de nivel se muestran siempre entre
             **0 y 7 metros**.
+
+            **Fechas**
+
+            Los gráficos de corto plazo muestran marcas cada pocos
+            días. Los históricos y caudales largos utilizan una
+            cantidad automática limitada de fechas para mejorar
+            la lectura en celular.
             """
         )
 
         st.warning(
-            "La aplicación es experimental. "
-            "No reemplaza pronósticos, alertas ni avisos oficiales."
+            "La aplicación es experimental y no reemplaza "
+            "pronósticos, alertas ni avisos oficiales."
         )
 
     # ========================================================
-    # ACTUALIZACIÓN
+    # ÚLTIMA ACTUALIZACIÓN
     # ========================================================
 
     if actualizado:
@@ -2942,8 +2894,10 @@ else:
 
         except Exception:
 
-            texto_actualizado = str(
-                actualizado
+            texto_actualizado = (
+                str(
+                    actualizado
+                )
             )
 
         st.caption(
