@@ -5,7 +5,10 @@ import plotly.graph_objects as go
 
 from datetime import date, timedelta, datetime
 
-from src.ina import observed
+
+from src.ina import (
+    observed,
+)
 
 from src.model import (
     train,
@@ -17,7 +20,7 @@ from src.exogenous import (
 )
 
 from src.upstream import (
-    get_upstream_data,
+    get_upstream_history,
 )
 
 from src.stress_ui import (
@@ -26,36 +29,35 @@ from src.stress_ui import (
 
 
 # ============================================================
-# VERSIÓN
+# PARANÁ · SAN NICOLÁS
+# APP V11.7
 # ============================================================
 
-APP_VERSION = "V11.3"
+APP_VERSION = "V11.7"
 
 
 # ============================================================
-# HORIZONTES
+# CONFIGURACIÓN GENERAL
 # ============================================================
 
 FORECAST_DAYS = 15
+
 TREND_DAYS = 30
+
 STRESS_DAYS = 60
 
-
-# ============================================================
-# HISTÓRICO
-# ============================================================
-
-FULL_HISTORY_START = "1900-01-01"
-
-MODEL_HISTORY_YEARS = 15
+HISTORY_START = "1900-01-01"
 
 
 # ============================================================
-# ESCALA
+# ESCALA HIDROMÉTRICA
+# SIEMPRE 0–7 m
 # ============================================================
 
 Y_MIN = 0.0
+
 Y_MAX = 7.0
+
 Y_STEP = 0.5
 
 
@@ -67,7 +69,6 @@ st.set_page_config(
     page_title="Paraná · San Nicolás",
     page_icon="🌊",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
 
@@ -80,107 +81,37 @@ st.markdown(
     <style>
 
     .block-container {
-        padding-top: 0.65rem;
-        padding-bottom: 2rem;
-        max-width: 1780px;
+        padding-top: 1.5rem;
+        padding-bottom: 3rem;
+        max-width: 1500px;
     }
-
-    div[data-testid="stVerticalBlock"] {
-        gap: 0.45rem;
-    }
-
-    h1 {
-        margin-bottom: 0.05rem;
-    }
-
-    h2,
-    h3 {
-        margin-top: 0.35rem;
-        margin-bottom: 0.30rem;
-    }
-
-    /* ======================================================
-       METRIC GENERAL
-    ====================================================== */
 
     [data-testid="stMetric"] {
-        padding: 0.35rem 0.45rem;
-        border: 1px solid rgba(130, 130, 130, 0.20);
-        border-radius: 8px;
-        min-height: 82px;
-    }
-
-    [data-testid="stMetricLabel"] {
-        font-size: 0.70rem !important;
-        line-height: 0.95rem !important;
-        white-space: normal !important;
-        overflow: visible !important;
-        text-overflow: unset !important;
+        padding: 0.45rem 0.55rem;
     }
 
     [data-testid="stMetricValue"] {
-        font-size: 1.12rem !important;
-        line-height: 1.35rem !important;
-        white-space: nowrap !important;
-        overflow: visible !important;
-        text-overflow: unset !important;
+        font-size: 1.45rem;
     }
 
-    [data-testid="stMetricDelta"] {
-        font-size: 0.68rem !important;
-        white-space: nowrap !important;
+    [data-testid="stMetricLabel"] {
+        font-size: 0.82rem;
     }
 
-    /* ======================================================
-       TARJETAS COMPACTAS
-    ====================================================== */
-
-    .compact-card {
-        border: 1px solid rgba(130, 130, 130, 0.24);
-        border-radius: 9px;
-        padding: 0.55rem 0.65rem;
-        min-height: 82px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        background: rgba(255,255,255,0.01);
+    [data-testid="stCaptionContainer"] {
+        font-size: 0.86rem;
     }
 
-    .compact-label {
-        font-size: 0.72rem;
-        line-height: 0.90rem;
-        opacity: 0.78;
-        margin-bottom: 0.25rem;
-        white-space: normal;
+    h1 {
+        margin-bottom: 0.15rem;
     }
 
-    .compact-value {
-        font-size: 1.22rem;
-        line-height: 1.35rem;
-        font-weight: 650;
-        white-space: nowrap;
+    h2 {
+        margin-top: 1.1rem;
     }
 
-    .compact-unit {
-        font-size: 0.67rem;
-        line-height: 0.85rem;
-        opacity: 0.65;
-        margin-top: 0.15rem;
-        white-space: nowrap;
-    }
-
-    .compact-trend {
-        font-size: 1.05rem;
-        line-height: 1.25rem;
-        font-weight: 650;
-        white-space: nowrap;
-    }
-
-    .status-title {
-        font-size: 0.76rem;
-        font-weight: 700;
-        margin-top: 0.10rem;
-        margin-bottom: 0.05rem;
+    h3 {
+        margin-top: 0.9rem;
     }
 
     </style>
@@ -190,228 +121,33 @@ st.markdown(
 
 
 # ============================================================
-# FORMATOS
-# ============================================================
-
-def formato_numero(
-    valor,
-    decimales=0,
-):
-
-    if valor is None:
-        return "--"
-
-    try:
-
-        if pd.isna(valor):
-            return "--"
-
-    except Exception:
-        pass
-
-    texto = (
-        f"{float(valor):,.{decimales}f}"
-    )
-
-    texto = (
-        texto
-        .replace(",", "X")
-        .replace(".", ",")
-        .replace("X", ".")
-    )
-
-    return texto
-
-
-def formato_nivel(
-    valor,
-):
-
-    if valor is None:
-        return "--"
-
-    try:
-
-        if pd.isna(valor):
-            return "--"
-    except Exception:
-        pass
-
-    return (
-        f"{float(valor):.2f} m"
-    )
-
-
-def formato_caudal(
-    valor,
-):
-
-    return formato_numero(
-        valor,
-        0,
-    )
-
-
-# ============================================================
-# TARJETA COMPACTA
-# ============================================================
-
-def tarjeta_compacta(
-    label,
-    value,
-    unit="",
-    trend=False,
-):
-
-    value_class = (
-        "compact-trend"
-        if trend
-        else "compact-value"
-    )
-
-    unit_html = (
-        f'<div class="compact-unit">{unit}</div>'
-        if unit
-        else ""
-    )
-
-    html = f"""
-    <div class="compact-card">
-        <div class="compact-label">{label}</div>
-        <div class="{value_class}">{value}</div>
-        {unit_html}
-    </div>
-    """
-
-    st.markdown(
-        html,
-        unsafe_allow_html=True,
-    )
-
-
-# ============================================================
 # ENCABEZADO
 # ============================================================
 
-header_left, header_right = st.columns(
-    [
-        5,
-        2,
-    ]
+st.title(
+    "🌊 PARANÁ · SAN NICOLÁS"
 )
-
-
-with header_left:
-
-    st.title(
-        "🌊 PARANÁ · SAN NICOLÁS"
-    )
-
-    st.caption(
-        f"{APP_VERSION} · "
-        "Monitoreo y pronóstico hidrométrico experimental"
-    )
-
-
-with header_right:
-
-    st.caption(
-        "📍 San Nicolás de los Arroyos"
-    )
-
-    st.caption(
-        f"📅 {date.today().strftime('%d/%m/%Y')}"
-    )
-
 
 st.caption(
-    "Nivel INA · lluvia corredor Paraná · caudal · "
-    "estaciones aguas arriba · pronóstico recursivo diario"
+    f"{APP_VERSION} · "
+    "Plataforma pública experimental de monitoreo, "
+    "pronóstico y análisis hidrométrico"
+)
+
+st.markdown(
+    """
+    Seguimiento del río Paraná en **San Nicolás de los Arroyos**.
+
+    El sistema integra:
+
+    **nivel real INA · lluvia prevista · caudal · estaciones aguas arriba ·
+    pronóstico recursivo diario · extremos históricos · escenarios severos**
+    """
 )
 
 
 # ============================================================
-# SIDEBAR
-# ============================================================
-
-st.sidebar.header(
-    "⚙️ Control"
-)
-
-
-fecha_hasta = date.today()
-
-fecha_desde = (
-    fecha_hasta
-    - timedelta(
-        days=120
-    )
-)
-
-
-desde = st.sidebar.date_input(
-    "Desde",
-    value=fecha_desde,
-    format="DD/MM/YYYY",
-)
-
-
-hasta = st.sidebar.date_input(
-    "Hasta",
-    value=fecha_hasta,
-    format="DD/MM/YYYY",
-)
-
-
-actualizar = st.sidebar.button(
-    "🔄 Actualizar modelo",
-    use_container_width=True,
-    type="primary",
-)
-
-
-st.sidebar.divider()
-
-
-st.sidebar.markdown(
-    "**Horizontes**"
-)
-
-st.sidebar.caption(
-    "15 días · Pronóstico principal"
-)
-
-st.sidebar.caption(
-    "30 días · Extensión experimental"
-)
-
-st.sidebar.caption(
-    "60 días · Escenario histórico severo"
-)
-
-
-st.sidebar.divider()
-
-
-st.sidebar.markdown(
-    "**Fuentes**"
-)
-
-st.sidebar.caption(
-    "INA · niveles y caudal"
-)
-
-st.sidebar.caption(
-    "Open-Meteo · precipitación"
-)
-
-st.sidebar.caption(
-    "Random Forest · modelo experimental"
-)
-
-
-# ============================================================
-# PREPARAR DATOS
+# FUNCIONES AUXILIARES
 # ============================================================
 
 def preparar_datos(
@@ -471,15 +207,14 @@ def preparar_datos(
 
         return pd.DataFrame()
 
-    x = x.dropna(
-        subset=[
-            "datetime",
-            "nivel",
-        ]
-    )
-
     x = (
         x
+        .dropna(
+            subset=[
+                "datetime",
+                "nivel",
+            ]
+        )
         .sort_values(
             "datetime"
         )
@@ -498,320 +233,36 @@ def preparar_datos(
 
 
 # ============================================================
-# NIVEL DIARIO
+# FORMATO
 # ============================================================
 
-def nivel_diario(
-    df,
+def formato_numero(
+    value,
+    decimals=0,
 ):
 
-    if (
-        df is None
-        or not isinstance(
-            df,
-            pd.DataFrame,
-        )
-        or df.empty
-    ):
+    try:
 
-        return pd.DataFrame()
+        if pd.isna(
+            value
+        ):
 
-    x = df.copy()
+            return "--"
 
-    x[
-        "datetime"
-    ] = (
-        pd.to_datetime(
-            x[
-                "datetime"
-            ],
-            errors="coerce",
-            utc=True,
-        )
-        .dt
-        .tz_localize(
-            None
-        )
-        .dt
-        .normalize()
-    )
-
-    x[
-        "nivel"
-    ] = pd.to_numeric(
-        x[
-            "nivel"
-        ],
-        errors="coerce",
-    )
-
-    x = x.dropna(
-        subset=[
-            "datetime",
-            "nivel",
-        ]
-    )
-
-    x = (
-        x
-        .groupby(
-            "datetime",
-            as_index=False,
-        )[
-            "nivel"
-        ]
-        .mean()
-        .sort_values(
-            "datetime"
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-    return x
-
-
-# ============================================================
-# ENVOLVENTE HISTÓRICA
-# ============================================================
-
-def calcular_envolvente_historica(
-    df_historico,
-    fechas,
-):
-
-    hist = nivel_diario(
-        df_historico
-    )
-
-    if hist.empty:
-
-        return pd.DataFrame()
-
-    hist[
-        "mes"
-    ] = hist[
-        "datetime"
-    ].dt.month
-
-    hist[
-        "dia"
-    ] = hist[
-        "datetime"
-    ].dt.day
-
-
-    resumen = (
-        hist
-        .groupby(
-            [
-                "mes",
-                "dia",
-            ],
-            as_index=False,
-        )
-        .agg(
-
-            nivel_min_historico=(
-                "nivel",
-                "min",
-            ),
-
-            nivel_max_historico=(
-                "nivel",
-                "max",
-            ),
-
-            nivel_promedio_historico=(
-                "nivel",
-                "mean",
-            ),
-
-            registros=(
-                "nivel",
-                "count",
-            ),
-        )
-    )
-
-
-    futuro = pd.DataFrame(
-        {
-            "datetime":
-                pd.to_datetime(
-                    fechas,
-                    errors="coerce",
-                )
-        }
-    )
-
-
-    futuro[
-        "mes"
-    ] = futuro[
-        "datetime"
-    ].dt.month
-
-    futuro[
-        "dia"
-    ] = futuro[
-        "datetime"
-    ].dt.day
-
-
-    futuro = futuro.merge(
-        resumen,
-        on=[
-            "mes",
-            "dia",
-        ],
-        how="left",
-    )
-
-
-    return futuro
-
-
-# ============================================================
-# POSICIÓN HISTÓRICA
-# ============================================================
-
-def calcular_posicion_historica(
-    df_historico,
-    fecha_actual,
-    nivel_actual,
-):
-
-    resultado = {
-
-        "min":
-            None,
-
-        "max":
-            None,
-
-        "prom":
-            None,
-
-        "posicion":
-            None,
-
-        "registros":
-            0,
-    }
-
-
-    hist = nivel_diario(
-        df_historico
-    )
-
-
-    if hist.empty:
-
-        return resultado
-
-
-    fecha_actual = pd.to_datetime(
-        fecha_actual,
-        errors="coerce",
-    )
-
-
-    if pd.isna(
-        fecha_actual
-    ):
-
-        return resultado
-
-
-    mismo_dia = hist[
-        (
-            hist[
-                "datetime"
-            ].dt.month
-            == fecha_actual.month
-        )
-        &
-        (
-            hist[
-                "datetime"
-            ].dt.day
-            == fecha_actual.day
-        )
-    ]
-
-
-    if mismo_dia.empty:
-
-        return resultado
-
-
-    minimo = float(
-        mismo_dia[
-            "nivel"
-        ].min()
-    )
-
-    maximo = float(
-        mismo_dia[
-            "nivel"
-        ].max()
-    )
-
-    promedio = float(
-        mismo_dia[
-            "nivel"
-        ].mean()
-    )
-
-
-    resultado[
-        "min"
-    ] = minimo
-
-    resultado[
-        "max"
-    ] = maximo
-
-    resultado[
-        "prom"
-    ] = promedio
-
-    resultado[
-        "registros"
-    ] = len(
-        mismo_dia
-    )
-
-
-    if maximo > minimo:
-
-        posicion = (
-            (
-                nivel_actual
-                - minimo
-            )
-            /
-            (
-                maximo
-                - minimo
-            )
-            * 100
+        text = (
+            f"{float(value):,.{decimals}f}"
         )
 
-        resultado[
-            "posicion"
-        ] = float(
-            np.clip(
-                posicion,
-                0,
-                100,
-            )
+        return (
+            text
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", ".")
         )
 
+    except Exception:
 
-    return resultado
+        return "--"
 
 
 # ============================================================
@@ -836,10 +287,12 @@ def calcular_tendencia_caudal(
         "pct_7":
             None,
 
+        "pendiente":
+            None,
+
         "estado":
             "Sin datos",
     }
-
 
     if (
         df_caudal is None
@@ -854,27 +307,38 @@ def calcular_tendencia_caudal(
 
         return resultado
 
+    q = (
+        df_caudal
+        .copy()
+    )
+
+    q[
+        "caudal_m3s"
+    ] = pd.to_numeric(
+        q[
+            "caudal_m3s"
+        ],
+        errors="coerce",
+    )
+
+    q = q.dropna(
+        subset=[
+            "caudal_m3s"
+        ]
+    )
+
+    if q.empty:
+
+        return resultado
 
     valores = (
-        pd.to_numeric(
-            df_caudal[
-                "caudal_m3s"
-            ],
-            errors="coerce",
-        )
-        .dropna()
+        q[
+            "caudal_m3s"
+        ]
         .to_numpy(
             dtype=float
         )
     )
-
-
-    if len(
-        valores
-    ) == 0:
-
-        return resultado
-
 
     actual = float(
         valores[
@@ -882,11 +346,14 @@ def calcular_tendencia_caudal(
         ]
     )
 
-
     resultado[
         "actual"
     ] = actual
 
+
+    # --------------------------------------------------------
+    # 3 DÍAS
+    # --------------------------------------------------------
 
     if len(
         valores
@@ -904,11 +371,15 @@ def calcular_tendencia_caudal(
         )
 
 
+    # --------------------------------------------------------
+    # 7 DÍAS
+    # --------------------------------------------------------
+
     if len(
         valores
     ) >= 8:
 
-        base7 = float(
+        q7 = float(
             valores[
                 -8
             ]
@@ -916,27 +387,29 @@ def calcular_tendencia_caudal(
 
         delta7 = (
             actual
-            - base7
+            - q7
         )
-
 
         resultado[
             "delta_7"
         ] = delta7
 
-
-        if base7 != 0:
+        if q7 != 0:
 
             resultado[
                 "pct_7"
             ] = (
                 delta7
-                / base7
-                * 100
+                / q7
+                * 100.0
             )
 
 
-    recientes = valores[
+    # --------------------------------------------------------
+    # PENDIENTE
+    # --------------------------------------------------------
+
+    ultimos = valores[
         -min(
             7,
             len(
@@ -945,27 +418,43 @@ def calcular_tendencia_caudal(
         ):
     ]
 
-
     if len(
-        recientes
+        ultimos
     ) >= 3:
 
-        pendiente = float(
-            np.polyfit(
-                np.arange(
-                    len(
-                        recientes
-                    )
-                ),
-                recientes,
-                1,
-            )[0]
+        x = np.arange(
+            len(
+                ultimos
+            ),
+            dtype=float,
         )
+
+        try:
+
+            pendiente = float(
+                np.polyfit(
+                    x,
+                    ultimos,
+                    1,
+                )[0]
+            )
+
+        except Exception:
+
+            pendiente = 0.0
 
     else:
 
         pendiente = 0.0
 
+    resultado[
+        "pendiente"
+    ] = pendiente
+
+
+    # --------------------------------------------------------
+    # ESTADO
+    # --------------------------------------------------------
 
     umbral = max(
         abs(
@@ -975,77 +464,923 @@ def calcular_tendencia_caudal(
         1.0,
     )
 
-
     if pendiente > umbral:
 
         resultado[
             "estado"
-        ] = "Creciente ↑"
+        ] = "Creciente"
 
     elif pendiente < -umbral:
 
         resultado[
             "estado"
-        ] = "Bajante ↓"
+        ] = "Bajante"
 
     else:
 
         resultado[
             "estado"
-        ] = "Estable →"
-
+        ] = "Estable"
 
     return resultado
 
 
 # ============================================================
-# TENDENCIA ESTACIÓN
+# TENDENCIA 30 DÍAS
 # ============================================================
 
-def tendencia_estacion(
-    info,
+def calcular_tendencia_30_dias(
+    df,
+    forecast30,
 ):
 
+    resultado = {
+
+        "estado":
+            "Sin datos",
+
+        "nivel_actual":
+            None,
+
+        "nivel_dia_15":
+            None,
+
+        "nivel_dia_30":
+            None,
+
+        "cambio_30":
+            None,
+
+        "cambio_pct":
+            None,
+
+        "pendiente":
+            None,
+    }
+
+    if (
+        df is None
+        or not isinstance(
+            df,
+            pd.DataFrame,
+        )
+        or df.empty
+        or "nivel"
+        not in df.columns
+    ):
+
+        return resultado
+
+    niveles = (
+        pd.to_numeric(
+            df[
+                "nivel"
+            ],
+            errors="coerce",
+        )
+        .dropna()
+    )
+
+    if niveles.empty:
+
+        return resultado
+
+    nivel_actual = float(
+        niveles.iloc[
+            -1
+        ]
+    )
+
+    resultado[
+        "nivel_actual"
+    ] = nivel_actual
+
+    if (
+        forecast30 is None
+        or not isinstance(
+            forecast30,
+            pd.DataFrame,
+        )
+        or forecast30.empty
+        or "prediction"
+        not in forecast30.columns
+    ):
+
+        return resultado
+
+    serie = (
+        forecast30
+        .copy()
+    )
+
+    serie[
+        "prediction"
+    ] = pd.to_numeric(
+        serie[
+            "prediction"
+        ],
+        errors="coerce",
+    )
+
+    serie = serie.dropna(
+        subset=[
+            "prediction"
+        ]
+    )
+
+    if serie.empty:
+
+        return resultado
+
+    if len(
+        serie
+    ) >= 15:
+
+        nivel15 = float(
+            serie[
+                "prediction"
+            ].iloc[
+                14
+            ]
+        )
+
+    else:
+
+        nivel15 = float(
+            serie[
+                "prediction"
+            ].iloc[
+                -1
+            ]
+        )
+
+    nivel30 = float(
+        serie[
+            "prediction"
+        ].iloc[
+            -1
+        ]
+    )
+
+    cambio30 = (
+        nivel30
+        - nivel_actual
+    )
+
+    resultado[
+        "nivel_dia_15"
+    ] = nivel15
+
+    resultado[
+        "nivel_dia_30"
+    ] = nivel30
+
+    resultado[
+        "cambio_30"
+    ] = cambio30
+
+    if nivel_actual != 0:
+
+        resultado[
+            "cambio_pct"
+        ] = (
+            cambio30
+            / nivel_actual
+            * 100.0
+        )
+
+    if len(
+        serie
+    ) >= 3:
+
+        try:
+
+            pendiente = float(
+                np.polyfit(
+                    np.arange(
+                        len(
+                            serie
+                        )
+                    ),
+                    serie[
+                        "prediction"
+                    ].to_numpy(
+                        dtype=float
+                    ),
+                    1,
+                )[0]
+            )
+
+        except Exception:
+
+            pendiente = 0.0
+
+    else:
+
+        pendiente = 0.0
+
+    resultado[
+        "pendiente"
+    ] = pendiente
+
+    if cambio30 >= 0.30:
+
+        resultado[
+            "estado"
+        ] = "Creciente"
+
+    elif cambio30 <= -0.30:
+
+        resultado[
+            "estado"
+        ] = "Bajante"
+
+    else:
+
+        resultado[
+            "estado"
+        ] = "Estable"
+
+    return resultado
+
+
+# ============================================================
+# ENVOLVENTE HISTÓRICA
+# ============================================================
+
+def construir_envolvente_historica(
+    df_historico,
+    fechas_objetivo,
+):
+
+    if (
+        df_historico is None
+        or not isinstance(
+            df_historico,
+            pd.DataFrame,
+        )
+        or df_historico.empty
+        or "datetime"
+        not in df_historico.columns
+        or "nivel"
+        not in df_historico.columns
+    ):
+
+        return pd.DataFrame()
+
+    hist = (
+        df_historico
+        .copy()
+    )
+
+    hist[
+        "datetime"
+    ] = pd.to_datetime(
+        hist[
+            "datetime"
+        ],
+        errors="coerce",
+        utc=True,
+    )
+
+    hist[
+        "nivel"
+    ] = pd.to_numeric(
+        hist[
+            "nivel"
+        ],
+        errors="coerce",
+    )
+
+    hist = hist.dropna(
+        subset=[
+            "datetime",
+            "nivel",
+        ]
+    )
+
+    if hist.empty:
+
+        return pd.DataFrame()
+
+    hist[
+        "mes_dia"
+    ] = (
+        hist[
+            "datetime"
+        ]
+        .dt
+        .strftime(
+            "%m-%d"
+        )
+    )
+
+    resumen = (
+        hist
+        .groupby(
+            "mes_dia"
+        )[
+            "nivel"
+        ]
+        .agg(
+            nivel_min_historico="min",
+            nivel_max_historico="max",
+            nivel_promedio_historico="mean",
+            cantidad="count",
+        )
+        .reset_index()
+    )
+
+    fechas = pd.DataFrame(
+        {
+            "datetime":
+                pd.to_datetime(
+                    fechas_objetivo,
+                    errors="coerce",
+                    utc=True,
+                )
+        }
+    )
+
+    fechas[
+        "mes_dia"
+    ] = (
+        fechas[
+            "datetime"
+        ]
+        .dt
+        .strftime(
+            "%m-%d"
+        )
+    )
+
+    return fechas.merge(
+        resumen,
+        on="mes_dia",
+        how="left",
+    )
+
+
+# ============================================================
+# ESTACIONES AGUAS ARRIBA
+# ============================================================
+
+def resumen_estaciones_upstream(
+    upstream_meta,
+    upstream_history,
+):
+
+    estaciones = []
+
     if not isinstance(
-        info,
+        upstream_meta,
         dict,
     ):
 
-        return "?"
+        return estaciones
 
-    estado = info.get(
-        "estado",
-        "Sin datos",
-    )
+    for estacion, info in upstream_meta.items():
 
-    if estado == "Creciente":
+        series_id = None
 
-        return "↑"
+        proc_name = None
 
-    if estado == "Bajante":
+        disponible = False
 
-        return "↓"
+        if isinstance(
+            info,
+            dict,
+        ):
 
-    if estado == "Estable":
+            series_id = info.get(
+                "series_id"
+            )
 
-        return "→"
+            proc_name = info.get(
+                "proc_name"
+            )
 
-    return "?"
+        nombre = (
+            estacion
+            .lower()
+            .replace(
+                "á",
+                "a",
+            )
+            .replace(
+                "é",
+                "e",
+            )
+            .replace(
+                "í",
+                "i",
+            )
+            .replace(
+                "ó",
+                "o",
+            )
+            .replace(
+                "ú",
+                "u",
+            )
+            .replace(
+                " ",
+                "_",
+            )
+        )
+
+        col = (
+            "nivel_"
+            + nombre
+        )
+
+        if (
+            isinstance(
+                upstream_history,
+                pd.DataFrame,
+            )
+            and col
+            in upstream_history.columns
+        ):
+
+            disponible = bool(
+                upstream_history[
+                    col
+                ]
+                .notna()
+                .any()
+            )
+
+        estaciones.append(
+            {
+                "Estación":
+                    estacion,
+
+                "Disponible":
+                    disponible,
+
+                "seriesId":
+                    series_id,
+
+                "Procedimiento":
+                    proc_name,
+            }
+        )
+
+    return estaciones
 
 
 # ============================================================
-# VALIDACIÓN
+# ESCALA FIJA NIVEL
+# ============================================================
+
+def aplicar_escala_nivel(
+    fig,
+):
+
+    fig.update_yaxes(
+        title_text=(
+            "Nivel hidrométrico (m)"
+        ),
+        range=[
+            Y_MIN,
+            Y_MAX,
+        ],
+        tick0=0,
+        dtick=Y_STEP,
+        autorange=False,
+    )
+
+    return fig
+
+
+# ============================================================
+# INCERTIDUMBRE
+# ============================================================
+
+def obtener_margen_incertidumbre(
+    forecast,
+):
+
+    if (
+        forecast is None
+        or not isinstance(
+            forecast,
+            pd.DataFrame,
+        )
+        or forecast.empty
+    ):
+
+        return pd.Series(
+            dtype=float
+        )
+
+    if (
+        "uncertainty_margin"
+        in forecast.columns
+    ):
+
+        return pd.to_numeric(
+            forecast[
+                "uncertainty_margin"
+            ],
+            errors="coerce",
+        )
+
+    if (
+        "upper"
+        in forecast.columns
+        and "lower"
+        in forecast.columns
+    ):
+
+        upper = pd.to_numeric(
+            forecast[
+                "upper"
+            ],
+            errors="coerce",
+        )
+
+        lower = pd.to_numeric(
+            forecast[
+                "lower"
+            ],
+            errors="coerce",
+        )
+
+        return (
+            upper
+            - lower
+        ) / 2.0
+
+    return pd.Series(
+        np.nan,
+        index=forecast.index,
+        dtype=float,
+    )
+
+
+# ============================================================
+# AGREGAR BANDA DE INCERTIDUMBRE
+# ============================================================
+
+def agregar_banda_incertidumbre(
+    fig,
+    forecast,
+    nombre=(
+        "Banda experimental 80%"
+    ),
+):
+
+    if (
+        forecast is None
+        or not isinstance(
+            forecast,
+            pd.DataFrame,
+        )
+        or forecast.empty
+        or "upper"
+        not in forecast.columns
+        or "lower"
+        not in forecast.columns
+    ):
+
+        return
+
+    f = forecast.copy()
+
+    f[
+        "upper"
+    ] = pd.to_numeric(
+        f[
+            "upper"
+        ],
+        errors="coerce",
+    )
+
+    f[
+        "lower"
+    ] = pd.to_numeric(
+        f[
+            "lower"
+        ],
+        errors="coerce",
+    )
+
+    # --------------------------------------------------------
+    # LÍMITE SUPERIOR
+    # --------------------------------------------------------
+
+    fig.add_trace(
+        go.Scatter(
+            x=f[
+                "datetime"
+            ],
+            y=f[
+                "upper"
+            ],
+            mode="lines",
+            line=dict(
+                width=1,
+                color=(
+                    "rgba(255,165,0,0.28)"
+                ),
+            ),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+
+    # --------------------------------------------------------
+    # LÍMITE INFERIOR + RELLENO
+    # --------------------------------------------------------
+
+    fig.add_trace(
+        go.Scatter(
+            x=f[
+                "datetime"
+            ],
+            y=f[
+                "lower"
+            ],
+            mode="lines",
+            line=dict(
+                width=1,
+                color=(
+                    "rgba(255,165,0,0.28)"
+                ),
+            ),
+            fill="tonexty",
+            fillcolor=(
+                "rgba(255,165,0,0.11)"
+            ),
+            name=nombre,
+            hoverinfo="skip",
+        )
+    )
+
+
+# ============================================================
+# PRONÓSTICO CON HOVER COMPLETO
+# ============================================================
+
+def agregar_pronostico(
+    fig,
+    forecast,
+    nombre,
+    dash=None,
+    width=3,
+    marker_size=6,
+):
+
+    if (
+        forecast is None
+        or not isinstance(
+            forecast,
+            pd.DataFrame,
+        )
+        or forecast.empty
+    ):
+
+        return
+
+    f = (
+        forecast
+        .copy()
+    )
+
+    margen = (
+        obtener_margen_incertidumbre(
+            f
+        )
+    )
+
+    if len(
+        margen
+    ) == len(
+        f
+    ):
+
+        f[
+            "uncertainty_margin"
+        ] = margen
+
+    else:
+
+        f[
+            "uncertainty_margin"
+        ] = np.nan
+
+    for col in [
+        "prediction",
+        "lower",
+        "upper",
+        "nivel_base",
+        "variacion_dia",
+        "uncertainty_margin",
+        "precip_mm",
+        "caudal_m3s",
+    ]:
+
+        if col not in f.columns:
+
+            f[
+                col
+            ] = np.nan
+
+        f[
+            col
+        ] = pd.to_numeric(
+            f[
+                col
+            ],
+            errors="coerce",
+        )
+
+    customdata = np.column_stack(
+        [
+            f[
+                "lower"
+            ].to_numpy(),
+
+            f[
+                "upper"
+            ].to_numpy(),
+
+            f[
+                "uncertainty_margin"
+            ].to_numpy(),
+
+            f[
+                "nivel_base"
+            ].to_numpy(),
+
+            f[
+                "variacion_dia"
+            ].to_numpy(),
+
+            f[
+                "precip_mm"
+            ].to_numpy(),
+
+            f[
+                "caudal_m3s"
+            ].to_numpy(),
+        ]
+    )
+
+    line_dict = {
+        "width":
+            width,
+    }
+
+    if dash:
+
+        line_dict[
+            "dash"
+        ] = dash
+
+    fig.add_trace(
+        go.Scatter(
+            x=f[
+                "datetime"
+            ],
+            y=f[
+                "prediction"
+            ],
+            customdata=
+                customdata,
+            mode=(
+                "lines+markers"
+            ),
+            name=nombre,
+            line=line_dict,
+            marker=dict(
+                size=
+                    marker_size,
+            ),
+            hovertemplate=(
+                "<b>%{x|%d/%m/%Y}</b>"
+                "<br>Nivel estimado: "
+                "%{y:.2f} m"
+                "<br>Banda inferior: "
+                "%{customdata[0]:.2f} m"
+                "<br>Banda superior: "
+                "%{customdata[1]:.2f} m"
+                "<br>Incertidumbre: "
+                "±%{customdata[2]:.2f} m"
+                "<br>Nivel base: "
+                "%{customdata[3]:.2f} m"
+                "<br>Variación diaria: "
+                "%{customdata[4]:+.3f} m"
+                "<br>Lluvia: "
+                "%{customdata[5]:.1f} mm"
+                "<br>Caudal: "
+                "%{customdata[6]:,.0f} m³/s"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.header(
+    "Consulta"
+)
+
+fecha_hasta = date.today()
+
+fecha_desde = (
+    fecha_hasta
+    - timedelta(
+        days=120
+    )
+)
+
+desde = st.sidebar.date_input(
+    "Desde",
+    value=fecha_desde,
+    format="DD/MM/YYYY",
+)
+
+hasta = st.sidebar.date_input(
+    "Hasta",
+    value=fecha_hasta,
+    format="DD/MM/YYYY",
+)
+
+actualizar = st.sidebar.button(
+    "🔄 Actualizar modelo",
+    use_container_width=True,
+    type="primary",
+)
+
+st.sidebar.divider()
+
+st.sidebar.subheader(
+    "Ubicación"
+)
+
+st.sidebar.write(
+    "San Nicolás de los Arroyos"
+)
+
+st.sidebar.subheader(
+    "Horizontes"
+)
+
+st.sidebar.write(
+    "Pronóstico principal: **15 días**"
+)
+
+st.sidebar.write(
+    "Extensión recursiva: **30 días**"
+)
+
+st.sidebar.write(
+    "Escenario histórico: **60 días**"
+)
+
+st.sidebar.subheader(
+    "Escala"
+)
+
+st.sidebar.write(
+    "Nivel hidrométrico: **0–7 m**"
+)
+
+st.sidebar.divider()
+
+st.sidebar.caption(
+    "Nivel: Instituto Nacional del Agua"
+)
+
+st.sidebar.caption(
+    "Precipitación: Open-Meteo"
+)
+
+st.sidebar.caption(
+    "Modelo: Random Forest recursivo"
+)
+
+
+# ============================================================
+# VALIDAR FECHAS
 # ============================================================
 
 if desde > hasta:
 
     st.sidebar.error(
-        "La fecha Desde no puede ser posterior a Hasta."
+        "La fecha Desde no puede ser "
+        "posterior a Hasta."
     )
 
 
 # ============================================================
-# ACTUALIZAR
+# ACTUALIZACIÓN
 # ============================================================
 
 if actualizar:
@@ -1053,12 +1388,13 @@ if actualizar:
     if desde > hasta:
 
         st.error(
-            "El período seleccionado no es válido."
+            "El período seleccionado "
+            "no es válido."
         )
 
     else:
 
-        inicio_visual = desde.strftime(
+        inicio = desde.strftime(
             "%Y-%m-%d"
         )
 
@@ -1068,17 +1404,31 @@ if actualizar:
 
 
         # ====================================================
-        # NIVEL
+        # NIVEL INA
         # ====================================================
 
         with st.spinner(
-            "Consultando nivel de San Nicolás..."
+            "Consultando nivel del INA..."
         ):
 
-            df_ina, error_ina = observed(
-                inicio_visual,
-                fin,
-            )
+            try:
+
+                df_ina, error_ina = (
+                    observed(
+                        inicio,
+                        fin,
+                    )
+                )
+
+            except Exception as exc:
+
+                df_ina = (
+                    pd.DataFrame()
+                )
+
+                error_ina = str(
+                    exc
+                )
 
 
         if error_ina:
@@ -1089,26 +1439,27 @@ if actualizar:
 
         else:
 
-            df_visual = preparar_datos(
+            df = preparar_datos(
                 df_ina
             )
 
 
-            if df_visual.empty:
+            if df.empty:
 
                 st.error(
-                    "No se obtuvieron niveles válidos "
-                    "para San Nicolás."
+                    "No se obtuvieron "
+                    "observaciones válidas."
                 )
 
             else:
 
                 # ============================================
-                # HISTÓRICO
+                # HISTORIAL COMPLETO
                 # ============================================
 
                 with st.spinner(
-                    "Consultando histórico de niveles..."
+                    "Consultando historial completo "
+                    "para máximos y mínimos..."
                 ):
 
                     try:
@@ -1117,100 +1468,42 @@ if actualizar:
                             df_hist_raw,
                             error_hist,
                         ) = observed(
-                            FULL_HISTORY_START,
+                            HISTORY_START,
                             fin,
                         )
 
+                        df_historico_total = (
+                            preparar_datos(
+                                df_hist_raw
+                            )
+                        )
 
                         if (
                             error_hist
-                            or df_hist_raw is None
+                            or df_historico_total.empty
                         ):
 
-                            df_historico = (
-                                df_visual.copy()
+                            df_historico_total = (
+                                df.copy()
                             )
 
-                        else:
-
-                            df_historico = preparar_datos(
-                                df_hist_raw
+                            st.warning(
+                                "No fue posible recuperar "
+                                "todo el historial del INA. "
+                                "Se utilizará el período "
+                                "disponible."
                             )
-
-                            if df_historico.empty:
-
-                                df_historico = (
-                                    df_visual.copy()
-                                )
 
                     except Exception:
 
-                        df_historico = (
-                            df_visual.copy()
+                        df_historico_total = (
+                            df.copy()
                         )
 
-
-                # ============================================
-                # PERÍODO MODELO
-                # ============================================
-
-                fecha_modelo_inicio = (
-                    pd.Timestamp(
-                        hasta
-                    )
-                    - pd.DateOffset(
-                        years=MODEL_HISTORY_YEARS
-                    )
-                )
-
-
-                inicio_modelo = (
-                    fecha_modelo_inicio
-                    .strftime(
-                        "%Y-%m-%d"
-                    )
-                )
-
-
-                # ============================================
-                # NIVEL MODELO
-                # ============================================
-
-                try:
-
-                    (
-                        df_model_raw,
-                        error_model,
-                    ) = observed(
-                        inicio_modelo,
-                        fin,
-                    )
-
-
-                    if error_model:
-
-                        df_model = (
-                            df_historico.copy()
+                        st.warning(
+                            "No fue posible recuperar "
+                            "todo el historial del INA."
                         )
-
-                    else:
-
-                        df_model = preparar_datos(
-                            df_model_raw
-                        )
-
-                except Exception:
-
-                    df_model = (
-                        df_historico.copy()
-                    )
-
-
-                if df_model.empty:
-
-                    df_model = (
-                        df_visual.copy()
-                    )
 
 
                 # ============================================
@@ -1228,13 +1521,9 @@ if actualizar:
                             exog_future,
                             exog_meta,
                         ) = get_exogenous_data(
-
-                            inicio_modelo,
-
+                            inicio,
                             fin,
-
-                            forecast_days=
-                                TREND_DAYS,
+                            TREND_DAYS,
                         )
 
                     except Exception as exc:
@@ -1250,59 +1539,29 @@ if actualizar:
                         exog_meta = {}
 
                         st.warning(
-                            "Variables externas incompletas: "
+                            "No fue posible obtener "
+                            "todas las variables externas: "
                             f"{exc}"
                         )
 
 
                 # ============================================
-                # AGUAS ARRIBA
+                # ESTACIONES AGUAS ARRIBA
                 # ============================================
 
                 with st.spinner(
-                    "Consultando estaciones aguas arriba..."
+                    "Consultando estaciones "
+                    "aguas arriba..."
                 ):
 
                     try:
 
-                        fechas_futuras = None
-
-
-                        if (
-                            isinstance(
-                                exog_future,
-                                pd.DataFrame,
-                            )
-                            and not exog_future.empty
-                            and "datetime"
-                            in exog_future.columns
-                        ):
-
-                            fechas_futuras = (
-                                exog_future[
-                                    "datetime"
-                                ]
-                            )
-
-
                         (
                             upstream_history,
-                            upstream_future,
                             upstream_meta,
-                            upstream_projection_meta,
-                        ) = get_upstream_data(
-
-                            start=
-                                inicio_modelo,
-
-                            end=
-                                fin,
-
-                            forecast_days=
-                                TREND_DAYS,
-
-                            future_dates=
-                                fechas_futuras,
+                        ) = get_upstream_history(
+                            inicio,
+                            fin,
                         )
 
                     except Exception as exc:
@@ -1311,40 +1570,74 @@ if actualizar:
                             pd.DataFrame()
                         )
 
-                        upstream_future = (
-                            pd.DataFrame()
-                        )
-
                         upstream_meta = {}
 
-                        upstream_projection_meta = {}
-
                         st.warning(
-                            "Estaciones aguas arriba incompletas: "
-                            f"{exc}"
+                            "No fue posible obtener "
+                            "todas las estaciones "
+                            f"aguas arriba: {exc}"
                         )
 
 
                 # ============================================
-                # MODELO
+                # ENTRENAR
                 # ============================================
 
                 with st.spinner(
-                    "Entrenando modelo..."
+                    "Entrenando modelo V11.7..."
                 ):
 
                     try:
 
                         models, metrics = train(
-
-                            df_model,
-
+                            df,
                             exog_history=
                                 exog_history,
-
                             upstream_history=
                                 upstream_history,
                         )
+
+
+                        # ====================================
+                        # IMPORTANTE
+                        #
+                        # GENERAMOS 30 DÍAS EN UNA SOLA
+                        # EJECUCIÓN RECURSIVA.
+                        # ====================================
+
+                        forecast30 = predict(
+                            df=df,
+                            models=models,
+                            days=
+                                TREND_DAYS,
+                            exog_future=
+                                exog_future,
+                            upstream_future=
+                                None,
+                        )
+
+
+                        if (
+                            forecast30 is None
+                            or not isinstance(
+                                forecast30,
+                                pd.DataFrame,
+                            )
+                        ):
+
+                            forecast30 = (
+                                pd.DataFrame()
+                            )
+
+
+                        forecast = (
+                            forecast30
+                            .head(
+                                FORECAST_DAYS
+                            )
+                            .copy()
+                        )
+
 
                     except Exception as exc:
 
@@ -1352,144 +1645,68 @@ if actualizar:
 
                         metrics = {}
 
+                        forecast = (
+                            pd.DataFrame()
+                        )
+
+                        forecast30 = (
+                            pd.DataFrame()
+                        )
+
                         st.error(
-                            "No fue posible entrenar el modelo: "
+                            "No fue posible generar "
+                            "el pronóstico: "
                             f"{exc}"
                         )
 
 
                 # ============================================
-                # PRONÓSTICO
-                # ============================================
-
-                forecast30 = pd.DataFrame()
-                forecast15 = pd.DataFrame()
-
-
-                if models:
-
-                    with st.spinner(
-                        "Generando pronóstico de 30 días..."
-                    ):
-
-                        try:
-
-                            forecast30 = predict(
-
-                                df=
-                                    df_model,
-
-                                models=
-                                    models,
-
-                                days=
-                                    TREND_DAYS,
-
-                                exog_future=
-                                    exog_future,
-
-                                upstream_future=
-                                    upstream_future,
-                            )
-
-
-                            if (
-                                isinstance(
-                                    forecast30,
-                                    pd.DataFrame,
-                                )
-                                and not forecast30.empty
-                            ):
-
-                                forecast15 = (
-                                    forecast30
-                                    .head(
-                                        FORECAST_DAYS
-                                    )
-                                    .copy()
-                                )
-
-                        except Exception as exc:
-
-                            st.error(
-                                "No fue posible generar "
-                                f"el pronóstico: {exc}"
-                            )
-
-
-                # ============================================
-                # SESIÓN
+                # GUARDAR SESIÓN
                 # ============================================
 
                 st.session_state[
                     "datos"
-                ] = df_visual
-
-
-                st.session_state[
-                    "datos_modelo"
-                ] = df_model
-
-
-                st.session_state[
-                    "datos_historicos"
-                ] = df_historico
-
+                ] = df
 
                 st.session_state[
                     "forecast"
-                ] = forecast15
-
+                ] = forecast
 
                 st.session_state[
                     "forecast30"
                 ] = forecast30
 
+                st.session_state[
+                    "df_historico_total"
+                ] = df_historico_total
 
                 st.session_state[
                     "models"
                 ] = models
 
-
                 st.session_state[
                     "metrics"
                 ] = metrics
-
 
                 st.session_state[
                     "exog_history"
                 ] = exog_history
 
-
                 st.session_state[
                     "exog_future"
                 ] = exog_future
-
 
                 st.session_state[
                     "exog_meta"
                 ] = exog_meta
 
-
                 st.session_state[
                     "upstream_history"
                 ] = upstream_history
 
-
-                st.session_state[
-                    "upstream_future"
-                ] = upstream_future
-
-
                 st.session_state[
                     "upstream_meta"
                 ] = upstream_meta
-
-
-                st.session_state[
-                    "upstream_projection_meta"
-                ] = upstream_projection_meta
-
 
                 st.session_state[
                     "actualizado"
@@ -1497,7 +1714,7 @@ if actualizar:
 
 
                 st.success(
-                    "✅ Modelo actualizado correctamente."
+                    "✅ Datos y modelo actualizados."
                 )
 
 
@@ -1505,10 +1722,13 @@ if actualizar:
 # ESTADO INICIAL
 # ============================================================
 
-if "datos" not in st.session_state:
+if (
+    "datos"
+    not in st.session_state
+):
 
     st.info(
-        "Seleccione el período y presione "
+        "Seleccione un período y presione "
         "**Actualizar modelo**."
     )
 
@@ -1523,89 +1743,91 @@ else:
         "datos"
     ]
 
-
-    df_model = st.session_state.get(
-        "datos_modelo",
-        df,
+    forecast = (
+        st.session_state
+        .get(
+            "forecast",
+            pd.DataFrame(),
+        )
     )
 
-
-    df_historico = st.session_state.get(
-        "datos_historicos",
-        df,
+    forecast30 = (
+        st.session_state
+        .get(
+            "forecast30",
+            pd.DataFrame(),
+        )
     )
 
-
-    forecast = st.session_state.get(
-        "forecast",
-        pd.DataFrame(),
+    df_historico_total = (
+        st.session_state
+        .get(
+            "df_historico_total",
+            df,
+        )
     )
 
-
-    forecast30 = st.session_state.get(
-        "forecast30",
-        pd.DataFrame(),
-    )
-
-
-    models = st.session_state.get(
-        "models",
-        {},
-    )
-
-
-    metrics = st.session_state.get(
-        "metrics",
-        {},
-    )
-
-
-    exog_history = st.session_state.get(
-        "exog_history",
-        pd.DataFrame(),
-    )
-
-
-    exog_future = st.session_state.get(
-        "exog_future",
-        pd.DataFrame(),
-    )
-
-
-    exog_meta = st.session_state.get(
-        "exog_meta",
-        {},
-    )
-
-
-    upstream_history = st.session_state.get(
-        "upstream_history",
-        pd.DataFrame(),
-    )
-
-
-    upstream_future = st.session_state.get(
-        "upstream_future",
-        pd.DataFrame(),
-    )
-
-
-    upstream_meta = st.session_state.get(
-        "upstream_meta",
-        {},
-    )
-
-
-    upstream_projection_meta = (
-        st.session_state.get(
-            "upstream_projection_meta",
+    models = (
+        st.session_state
+        .get(
+            "models",
             {},
         )
     )
 
+    metrics = (
+        st.session_state
+        .get(
+            "metrics",
+            {},
+        )
+    )
 
-    actualizado = st.session_state.get(
-        "actualizado"
+    exog_history = (
+        st.session_state
+        .get(
+            "exog_history",
+            pd.DataFrame(),
+        )
+    )
+
+    exog_future = (
+        st.session_state
+        .get(
+            "exog_future",
+            pd.DataFrame(),
+        )
+    )
+
+    exog_meta = (
+        st.session_state
+        .get(
+            "exog_meta",
+            {},
+        )
+    )
+
+    upstream_history = (
+        st.session_state
+        .get(
+            "upstream_history",
+            pd.DataFrame(),
+        )
+    )
+
+    upstream_meta = (
+        st.session_state
+        .get(
+            "upstream_meta",
+            {},
+        )
+    )
+
+    actualizado = (
+        st.session_state
+        .get(
+            "actualizado"
+        )
     )
 
 
@@ -1613,255 +1835,114 @@ else:
     # NIVEL ACTUAL
     # ========================================================
 
-    ultima_fecha = df[
-        "datetime"
-    ].iloc[
-        -1
-    ]
-
+    ultima_fecha = (
+        df[
+            "datetime"
+        ]
+        .iloc[
+            -1
+        ]
+    )
 
     nivel_actual = float(
         df[
             "nivel"
-        ].iloc[
+        ]
+        .iloc[
             -1
         ]
     )
 
 
     # ========================================================
-    # VARIACIÓN 24 H
+    # SITUACIÓN OBSERVADA
     # ========================================================
 
-    df_daily = nivel_diario(
-        df
+    st.subheader(
+        "📊 Situación observada"
+    )
+
+    c1, c2, c3, c4 = (
+        st.columns(
+            4
+        )
+    )
+
+    c1.metric(
+        "Nivel actual",
+        f"{nivel_actual:.2f} m",
+    )
+
+    c2.metric(
+        "Mínimo período",
+        f"{df['nivel'].min():.2f} m",
+    )
+
+    c3.metric(
+        "Máximo período",
+        f"{df['nivel'].max():.2f} m",
+    )
+
+    c4.metric(
+        "Promedio período",
+        f"{df['nivel'].mean():.2f} m",
     )
 
 
-    delta_24h = None
+    try:
 
+        if getattr(
+            ultima_fecha,
+            "tzinfo",
+            None,
+        ):
 
-    if len(
-        df_daily
-    ) >= 2:
-
-        delta_24h = float(
-            df_daily[
-                "nivel"
-            ].iloc[
-                -1
-            ]
-            - df_daily[
-                "nivel"
-            ].iloc[
-                -2
-            ]
-        )
-
-
-    # ========================================================
-    # NIVELES CLAVE
-    # ========================================================
-
-    nivel_dia3 = None
-    nivel_dia7 = None
-    nivel_dia15 = None
-    nivel_dia30 = None
-
-
-    if (
-        isinstance(
-            forecast30,
-            pd.DataFrame,
-        )
-        and not forecast30.empty
-    ):
-
-        if len(
-            forecast30
-        ) >= 3:
-
-            nivel_dia3 = float(
-                forecast30[
-                    "prediction"
-                ].iloc[
-                    2
-                ]
-            )
-
-
-        if len(
-            forecast30
-        ) >= 7:
-
-            nivel_dia7 = float(
-                forecast30[
-                    "prediction"
-                ].iloc[
-                    6
-                ]
-            )
-
-
-        if len(
-            forecast30
-        ) >= 15:
-
-            nivel_dia15 = float(
-                forecast30[
-                    "prediction"
-                ].iloc[
-                    14
-                ]
-            )
-
-
-        if len(
-            forecast30
-        ) >= 30:
-
-            nivel_dia30 = float(
-                forecast30[
-                    "prediction"
-                ].iloc[
-                    29
-                ]
-            )
-
-
-    # ========================================================
-    # CAUDAL
-    # ========================================================
-
-    tq = calcular_tendencia_caudal(
-        exog_history
-    )
-
-
-    # ========================================================
-    # TENDENCIA GENERAL
-    # ========================================================
-
-    if nivel_dia15 is not None:
-
-        cambio15 = (
-            nivel_dia15
-            - nivel_actual
-        )
-
-
-        if cambio15 >= 0.15:
-
-            tendencia_general = (
-                "Creciente ↑"
-            )
-
-        elif cambio15 <= -0.15:
-
-            tendencia_general = (
-                "Bajante ↓"
+            fecha_obs = (
+                ultima_fecha
+                .tz_convert(
+                    "America/Argentina/Buenos_Aires"
+                )
+                .strftime(
+                    "%d/%m/%Y %H:%M"
+                )
             )
 
         else:
 
-            tendencia_general = (
-                "Estable →"
+            fecha_obs = (
+                ultima_fecha
+                .strftime(
+                    "%d/%m/%Y"
+                )
             )
 
-    else:
+    except Exception:
 
-        tendencia_general = (
-            "Sin datos"
+        fecha_obs = str(
+            ultima_fecha
         )
 
 
-    # ========================================================
-    # RESUMEN OPERATIVO
-    # ========================================================
-
-    st.subheader(
-        "📊 Resumen operativo"
-    )
-
-
-    m1, m2, m3, m4, m5, m6 = st.columns(
-        [
-            1,
-            1,
-            1,
-            1,
-            1.15,
-            1.15,
-        ]
-    )
-
-
-    m1.metric(
-        "Nivel actual",
-        formato_nivel(
-            nivel_actual
-        ),
-    )
-
-
-    m2.metric(
-        "Variación 24 h",
-        (
-            f"{delta_24h:+.2f} m"
-            if delta_24h
-            is not None
-            else "--"
-        ),
-    )
-
-
-    m3.metric(
-        "Día 15",
-        formato_nivel(
-            nivel_dia15
-        ),
-        (
-            f"{nivel_dia15 - nivel_actual:+.2f} m"
-            if nivel_dia15
-            is not None
-            else None
-        ),
-    )
-
-
-    m4.metric(
-        "Día 30",
-        formato_nivel(
-            nivel_dia30
-        ),
-    )
-
-
-    m5.metric(
-        "Caudal actual",
-        (
-            f"{formato_caudal(tq['actual'])}"
-            if tq[
-                "actual"
-            ]
-            is not None
-            else "--"
-        ),
-        help="m³/s",
-    )
-
-
-    m6.metric(
-        "Tendencia",
-        tendencia_general,
+    st.caption(
+        "Última observación INA: "
+        f"**{fecha_obs}** · "
+        f"Registros utilizados: **{len(df)}**"
     )
 
 
     # ========================================================
-    # ESTADO
+    # ESTADO DEL SISTEMA
     # ========================================================
 
-    estado_lluvia = (
+    estado_ina_ok = (
+        isinstance(
+            df,
+            pd.DataFrame,
+        )
+        and not df.empty
+    )
+
+    estado_lluvia_ok = (
         isinstance(
             exog_future,
             pd.DataFrame,
@@ -1871,8 +1952,7 @@ else:
         in exog_future.columns
     )
 
-
-    estado_caudal = (
+    estado_caudal_ok = (
         isinstance(
             exog_history,
             pd.DataFrame,
@@ -1882,12 +1962,13 @@ else:
         in exog_history.columns
         and exog_history[
             "caudal_m3s"
-        ].notna().any()
+        ]
+        .notna()
+        .any()
     )
 
 
     estaciones_disponibles = 0
-
 
     if isinstance(
         upstream_history,
@@ -1905,882 +1986,1109 @@ else:
                     )
                     and upstream_history[
                         c
-                    ].notna().any()
+                    ]
+                    .notna()
+                    .any()
                 )
             ]
         )
 
 
-    rmse = metrics.get(
-        "RMSE"
+    st.caption(
+        "🟢 **Estado del sistema**"
     )
 
-
-    st.markdown(
-        '<div class="status-title">Estado del sistema</div>',
-        unsafe_allow_html=True,
-    )
-
-
-    status_cols = st.columns(
-        [
-            1,
-            1,
-            1,
-            1.2,
-            1,
-            1,
-        ]
-    )
-
-
-    status_cols[
-        0
-    ].caption(
-        "🟢 **INA** · OK"
-    )
-
-
-    status_cols[
-        1
-    ].caption(
-        (
-            "🟢 **Lluvia** · OK"
-            if estado_lluvia
-            else "🟠 **Lluvia** · Sin datos"
-        )
-    )
-
-
-    status_cols[
-        2
-    ].caption(
-        (
-            "🟢 **Caudal** · OK"
-            if estado_caudal
-            else "🟠 **Caudal** · Sin datos"
-        )
-    )
-
-
-    status_cols[
-        3
-    ].caption(
-        f"🟢 **Aguas arriba** · "
-        f"{estaciones_disponibles}/6"
-    )
-
-
-    status_cols[
-        4
-    ].caption(
-        (
-            "🟢 **Modelo** · OK"
-            if models
-            else "🔴 **Modelo** · Error"
-        )
-    )
-
-
-    status_cols[
-        5
-    ].caption(
-        (
-            f"**RMSE** · {float(rmse):.3f} m"
-            if rmse
-            is not None
-            else "**RMSE** · --"
-        )
-    )
-
-
-    # ========================================================
-    # GRÁFICO PRINCIPAL
-    # ========================================================
-
-    grafico_col, resumen_col = st.columns(
-        [
-            3.45,
-            1.05,
-        ]
-    )
-
-
-    with grafico_col:
-
-        st.subheader(
-            "📈 Nivel observado y proyección"
-        )
-
-
-        fig_main = go.Figure()
-
-
-        obs = df.tail(
-            60
-        )
-
-
-        fig_main.add_trace(
-            go.Scatter(
-
-                x=obs[
-                    "datetime"
-                ],
-
-                y=obs[
-                    "nivel"
-                ],
-
-                mode="lines",
-
-                name="Observado",
-
-                line=dict(
-                    color="#bdbdbd",
-                    width=2,
-                ),
-            )
-        )
-
-
-        if (
-            isinstance(
-                forecast30,
-                pd.DataFrame,
-            )
-            and not forecast30.empty
-        ):
-
-            forecast_plot = (
-                forecast30.copy()
-            )
-
-
-            env = calcular_envolvente_historica(
-                df_historico,
-                forecast_plot[
-                    "datetime"
-                ],
-            )
-
-
-            if not env.empty:
-
-                forecast_plot = (
-                    forecast_plot
-                    .merge(
-                        env[
-                            [
-                                "datetime",
-                                "nivel_min_historico",
-                                "nivel_max_historico",
-                                "nivel_promedio_historico",
-                            ]
-                        ],
-                        on="datetime",
-                        how="left",
-                    )
-                )
-
-
-            if (
-                "nivel_max_historico"
-                in forecast_plot.columns
-            ):
-
-                fig_main.add_trace(
-                    go.Scatter(
-
-                        x=forecast_plot[
-                            "datetime"
-                        ],
-
-                        y=forecast_plot[
-                            "nivel_max_historico"
-                        ],
-
-                        mode="lines",
-
-                        name="Máximo histórico",
-
-                        line=dict(
-                            color="#ef553b",
-                            width=2,
-                        ),
-                    )
-                )
-
-
-            if (
-                "nivel_min_historico"
-                in forecast_plot.columns
-            ):
-
-                fig_main.add_trace(
-                    go.Scatter(
-
-                        x=forecast_plot[
-                            "datetime"
-                        ],
-
-                        y=forecast_plot[
-                            "nivel_min_historico"
-                        ],
-
-                        mode="lines",
-
-                        name="Mínimo histórico",
-
-                        line=dict(
-                            color="#00cc96",
-                            width=2,
-                        ),
-                    )
-                )
-
-
-            pron15 = forecast_plot.head(
-                FORECAST_DAYS
-            )
-
-
-            pron30ext = forecast_plot.iloc[
-                FORECAST_DAYS:
+    s1, s2, s3, s4 = (
+        st.columns(
+            [
+                1,
+                1.2,
+                1,
+                1.5,
             ]
-
-
-            fig_main.add_trace(
-                go.Scatter(
-
-                    x=pron15[
-                        "datetime"
-                    ],
-
-                    y=pron15[
-                        "prediction"
-                    ],
-
-                    mode="lines+markers",
-
-                    name="Pronóstico 1–15 días",
-
-                    line=dict(
-                        color="#1f77b4",
-                        width=4,
-                    ),
-
-                    marker=dict(
-                        size=6,
-                    ),
-                )
-            )
-
-
-            if not pron30ext.empty:
-
-                fig_main.add_trace(
-                    go.Scatter(
-
-                        x=pron30ext[
-                            "datetime"
-                        ],
-
-                        y=pron30ext[
-                            "prediction"
-                        ],
-
-                        mode="lines+markers",
-
-                        name="Extensión 16–30 días",
-
-                        line=dict(
-                            color="#636efa",
-                            width=3,
-                            dash="dot",
-                        ),
-
-                        marker=dict(
-                            size=5,
-                        ),
-                    )
-                )
-
-
-            if (
-                "upper"
-                in pron15.columns
-                and "lower"
-                in pron15.columns
-            ):
-
-                fig_main.add_trace(
-                    go.Scatter(
-
-                        x=pron15[
-                            "datetime"
-                        ],
-
-                        y=pron15[
-                            "upper"
-                        ],
-
-                        mode="lines",
-
-                        line=dict(
-                            width=0,
-                        ),
-
-                        showlegend=False,
-
-                        hoverinfo="skip",
-                    )
-                )
-
-
-                fig_main.add_trace(
-                    go.Scatter(
-
-                        x=pron15[
-                            "datetime"
-                        ],
-
-                        y=pron15[
-                            "lower"
-                        ],
-
-                        mode="lines",
-
-                        line=dict(
-                            width=0,
-                        ),
-
-                        fill="tonexty",
-
-                        name="Incertidumbre",
-
-                        hoverinfo="skip",
-                    )
-                )
-
-
-        fig_main.add_hline(
-
-            y=nivel_actual,
-
-            line_dash="dash",
-
-            annotation_text=(
-                f"Actual "
-                f"{nivel_actual:.2f} m"
-            ),
         )
-
-
-        fig_main.update_layout(
-
-            height=480,
-
-            margin=dict(
-                l=10,
-                r=10,
-                t=20,
-                b=10,
-            ),
-
-            hovermode="x unified",
-
-            legend=dict(
-                orientation="h",
-                y=1.11,
-            ),
-        )
-
-
-        fig_main.update_xaxes(
-            tickformat="%d/%m",
-            title_text="Fecha",
-        )
-
-
-        fig_main.update_yaxes(
-
-            title_text="Nivel (m)",
-
-            range=[
-                Y_MIN,
-                Y_MAX,
-            ],
-
-            dtick=
-                Y_STEP,
-        )
-
-
-        st.plotly_chart(
-            fig_main,
-            use_container_width=True,
-        )
-
-
-    # ========================================================
-    # PROYECCIÓN
-    # ========================================================
-
-    with resumen_col:
-
-        st.subheader(
-            "🎯 Proyección"
-        )
-
-
-        if (
-            isinstance(
-                forecast30,
-                pd.DataFrame,
-            )
-            and not forecast30.empty
-        ):
-
-            max_idx = (
-                forecast30[
-                    "prediction"
-                ]
-                .idxmax()
-            )
-
-
-            max_nivel = float(
-                forecast30.loc[
-                    max_idx,
-                    "prediction"
-                ]
-            )
-
-
-            max_fecha = pd.to_datetime(
-                forecast30.loc[
-                    max_idx,
-                    "datetime"
-                ]
-            )
-
-
-            st.metric(
-                "Día 3",
-                formato_nivel(
-                    nivel_dia3
-                ),
-            )
-
-
-            st.metric(
-                "Día 7",
-                formato_nivel(
-                    nivel_dia7
-                ),
-            )
-
-
-            st.metric(
-                "Día 15",
-                formato_nivel(
-                    nivel_dia15
-                ),
-            )
-
-
-            st.metric(
-                "Día 30",
-                formato_nivel(
-                    nivel_dia30
-                ),
-            )
-
-
-            st.metric(
-                "Máximo 30 días",
-                formato_nivel(
-                    max_nivel
-                ),
-                f"{max_nivel - nivel_actual:+.2f} m",
-            )
-
-
-            st.caption(
-                "Fecha máximo: "
-                f"**{max_fecha.strftime('%d/%m/%Y')}**"
-            )
-
-
-    # ========================================================
-    # POSICIÓN HISTÓRICA
-    # ========================================================
-
-    posicion = calcular_posicion_historica(
-        df_historico,
-        ultima_fecha,
-        nivel_actual,
     )
 
+    with s1:
+
+        st.caption(
+            (
+                "**INA** · ✅ Operativo"
+                if estado_ina_ok
+                else
+                "**INA** · ⚠️ Sin datos"
+            )
+        )
+
+    with s2:
+
+        st.caption(
+            (
+                "**Lluvia** · ✅ Disponible"
+                if estado_lluvia_ok
+                else
+                "**Lluvia** · ⚠️ Sin datos"
+            )
+        )
+
+    with s3:
+
+        st.caption(
+            (
+                "**Caudal** · ✅ Disponible"
+                if estado_caudal_ok
+                else
+                "**Caudal** · ⚠️ Sin datos"
+            )
+        )
+
+    with s4:
+
+        st.caption(
+            "**Aguas arriba** · "
+            f"✅ {estaciones_disponibles} estaciones"
+        )
+
+    st.divider()
+
+
+    # ========================================================
+    # PRONÓSTICO 15 DÍAS
+    # ========================================================
 
     st.subheader(
-        "📚 Posición respecto del historial"
+        "📈 Pronóstico experimental · 15 días"
+    )
+
+    st.caption(
+        "Cada jornada se calcula desde el nivel del día anterior "
+        "incorporando lluvia, caudal y señales aguas arriba."
     )
 
 
-    h1, h2, h3, h4, h5 = st.columns(
-        [
-            1,
-            1.25,
-            1.25,
-            1.25,
-            1,
-        ]
+    fig15 = go.Figure()
+
+
+    # --------------------------------------------------------
+    # OBSERVADO RECIENTE
+    # --------------------------------------------------------
+
+    obs = df.tail(
+        45
+    )
+
+    fig15.add_trace(
+        go.Scatter(
+            x=obs[
+                "datetime"
+            ],
+            y=obs[
+                "nivel"
+            ],
+            mode="lines",
+            name="Observado",
+            line=dict(
+                width=2,
+                color=(
+                    "rgba(120,120,120,0.55)"
+                ),
+            ),
+            hovertemplate=(
+                "%{x|%d/%m/%Y}"
+                "<br>Nivel observado: "
+                "%{y:.2f} m"
+                "<extra></extra>"
+            ),
+        )
     )
 
 
-    h1.metric(
-        "Nivel actual",
-        formato_nivel(
-            nivel_actual
+    # --------------------------------------------------------
+    # NIVEL ACTUAL
+    # --------------------------------------------------------
+
+    fig15.add_hline(
+        y=nivel_actual,
+        line_dash="dash",
+        line_width=2,
+        line_color="black",
+        annotation_text=(
+            f"Actual {nivel_actual:.2f} m"
         ),
     )
 
 
-    h2.metric(
-        "Mínimo histórico fecha",
-        formato_nivel(
-            posicion[
-                "min"
-            ]
+    if (
+        isinstance(
+            forecast,
+            pd.DataFrame,
+        )
+        and not forecast.empty
+    ):
+
+        f15 = forecast.copy()
+
+        f15[
+            "datetime"
+        ] = pd.to_datetime(
+            f15[
+                "datetime"
+            ],
+            errors="coerce",
+        )
+
+
+        # ----------------------------------------------------
+        # BANDA 80 %
+        # ----------------------------------------------------
+
+        agregar_banda_incertidumbre(
+            fig15,
+            f15,
+            nombre=(
+                "Banda experimental 80%"
+            ),
+        )
+
+
+        # ----------------------------------------------------
+        # PRONÓSTICO
+        # ----------------------------------------------------
+
+        agregar_pronostico(
+            fig15,
+            f15,
+            nombre=(
+                "Pronóstico 1–15 días"
+            ),
+            width=3,
+            marker_size=6,
+        )
+
+
+    fig15.update_layout(
+        height=560,
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            y=1.06,
+        ),
+        margin=dict(
+            l=10,
+            r=10,
+            t=25,
+            b=10,
         ),
     )
 
+    fig15.update_xaxes(
+        title_text="Fecha",
+        type="date",
+        tickformat="%d/%m/%Y",
+    )
 
-    h3.metric(
-        "Promedio histórico fecha",
-        formato_nivel(
-            posicion[
-                "prom"
-            ]
-        ),
+    aplicar_escala_nivel(
+        fig15
+    )
+
+    st.plotly_chart(
+        fig15,
+        use_container_width=True,
     )
 
 
-    h4.metric(
-        "Máximo histórico fecha",
-        formato_nivel(
-            posicion[
-                "max"
-            ]
-        ),
+    # ========================================================
+    # INFORMACIÓN DE INCERTIDUMBRE
+    # ========================================================
+
+    if (
+        isinstance(
+            forecast,
+            pd.DataFrame,
+        )
+        and not forecast.empty
+    ):
+
+        margen = (
+            obtener_margen_incertidumbre(
+                forecast
+            )
+        )
+
+        margen = (
+            pd.to_numeric(
+                margen,
+                errors="coerce",
+            )
+            .dropna()
+        )
+
+        if not margen.empty:
+
+            st.caption(
+                "Banda experimental 80% · "
+                f"Día 1: **±{margen.iloc[0]:.2f} m** · "
+                f"Día {len(margen)}: "
+                f"**±{margen.iloc[-1]:.2f} m** · "
+                "margen máximo configurado: "
+                "**±0,35 m**."
+            )
+
+
+    # ========================================================
+    # TABLA 15 DÍAS
+    # ========================================================
+
+    if (
+        isinstance(
+            forecast,
+            pd.DataFrame,
+        )
+        and not forecast.empty
+    ):
+
+        with st.expander(
+            "🔎 Pronóstico diario detallado · 15 días"
+        ):
+
+            tabla15 = (
+                forecast
+                .copy()
+            )
+
+            tabla15[
+                "Fecha"
+            ] = (
+                pd.to_datetime(
+                    tabla15[
+                        "datetime"
+                    ]
+                )
+                .dt
+                .strftime(
+                    "%d/%m/%Y"
+                )
+            )
+
+            tabla15[
+                "Nivel base (m)"
+            ] = pd.to_numeric(
+                tabla15[
+                    "nivel_base"
+                ],
+                errors="coerce",
+            ).round(2)
+
+            tabla15[
+                "Variación diaria (m)"
+            ] = pd.to_numeric(
+                tabla15[
+                    "variacion_dia"
+                ],
+                errors="coerce",
+            ).round(3)
+
+            tabla15[
+                "Nivel previsto (m)"
+            ] = pd.to_numeric(
+                tabla15[
+                    "prediction"
+                ],
+                errors="coerce",
+            ).round(2)
+
+            tabla15[
+                "Inferior (m)"
+            ] = pd.to_numeric(
+                tabla15[
+                    "lower"
+                ],
+                errors="coerce",
+            ).round(2)
+
+            tabla15[
+                "Superior (m)"
+            ] = pd.to_numeric(
+                tabla15[
+                    "upper"
+                ],
+                errors="coerce",
+            ).round(2)
+
+            tabla15[
+                "Incertidumbre ±m"
+            ] = (
+                obtener_margen_incertidumbre(
+                    tabla15
+                )
+                .round(2)
+            )
+
+            tabla15[
+                "Lluvia (mm)"
+            ] = pd.to_numeric(
+                tabla15[
+                    "precip_mm"
+                ],
+                errors="coerce",
+            ).round(1)
+
+            tabla15[
+                "Caudal (m³/s)"
+            ] = pd.to_numeric(
+                tabla15[
+                    "caudal_m3s"
+                ],
+                errors="coerce",
+            ).round(0)
+
+
+            st.dataframe(
+                tabla15[
+                    [
+                        "Fecha",
+                        "Nivel base (m)",
+                        "Lluvia (mm)",
+                        "Caudal (m³/s)",
+                        "Variación diaria (m)",
+                        "Nivel previsto (m)",
+                        "Inferior (m)",
+                        "Superior (m)",
+                        "Incertidumbre ±m",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+    # ========================================================
+    # TENDENCIA 30 DÍAS
+    # ========================================================
+
+    st.subheader(
+        "🧭 Tendencia extendida · 30 días"
+    )
+
+    tendencia30 = (
+        calcular_tendencia_30_dias(
+            df,
+            forecast30,
+        )
+    )
+
+    nivel15 = tendencia30.get(
+        "nivel_dia_15"
+    )
+
+    nivel30 = tendencia30.get(
+        "nivel_dia_30"
+    )
+
+    cambio30 = tendencia30.get(
+        "cambio_30"
+    )
+
+    pct30 = tendencia30.get(
+        "cambio_pct"
+    )
+
+    estado30 = tendencia30.get(
+        "estado",
+        "Sin datos",
     )
 
 
-    h5.metric(
-        "Posición rango",
+    t1, t2, t3, t4 = (
+        st.columns(
+            4
+        )
+    )
+
+    t1.metric(
+        "Tendencia 30 días",
+        estado30,
+    )
+
+    t2.metric(
+        "Nivel día 15",
         (
-            f"{posicion['posicion']:.0f}%"
-            if posicion[
-                "posicion"
-            ]
+            f"{nivel15:.2f} m"
+            if nivel15
+            is not None
+            else "--"
+        ),
+    )
+
+    t3.metric(
+        "Nivel día 30",
+        (
+            f"{nivel30:.2f} m"
+            if nivel30
             is not None
             else "--"
         ),
     )
 
 
-    # ========================================================
-    # LLUVIA + CAUDAL
-    # ========================================================
+    if cambio30 is not None:
 
-    lluvia_col, caudal_col = st.columns(
-        [
-            1,
-            1,
-        ]
+        cambio_texto = (
+            f"{cambio30:+.2f} m"
+        )
+
+        if pct30 is not None:
+
+            cambio_texto += (
+                f" ({pct30:+.1f}%)"
+            )
+
+    else:
+
+        cambio_texto = "--"
+
+
+    t4.metric(
+        "Cambio vs. actual",
+        cambio_texto,
     )
 
 
     # ========================================================
-    # LLUVIA
+    # GRÁFICO 30 DÍAS
     # ========================================================
 
-    with lluvia_col:
+    if (
+        isinstance(
+            forecast30,
+            pd.DataFrame,
+        )
+        and not forecast30.empty
+    ):
 
-        st.subheader(
-            "🌧️ Lluvia"
+        fig30 = go.Figure()
+
+        obs30 = df.tail(
+            30
         )
 
 
-        if (
-            isinstance(
-                exog_future,
-                pd.DataFrame,
+        # ----------------------------------------------------
+        # OBSERVADO
+        # ----------------------------------------------------
+
+        fig30.add_trace(
+            go.Scatter(
+                x=obs30[
+                    "datetime"
+                ],
+                y=obs30[
+                    "nivel"
+                ],
+                mode="lines",
+                name="Observado reciente",
+                line=dict(
+                    width=2,
+                    color=(
+                        "rgba(120,120,120,0.50)"
+                    ),
+                ),
             )
-            and not exog_future.empty
-            and "precip_mm"
-            in exog_future.columns
-        ):
-
-            rain = exog_future.copy()
+        )
 
 
-            rain[
-                "precip_mm"
-            ] = (
-                pd.to_numeric(
-                    rain[
-                        "precip_mm"
-                    ],
-                    errors="coerce",
-                )
-                .fillna(
-                    0.0
-                )
-            )
+        # ----------------------------------------------------
+        # ACTUAL
+        # ----------------------------------------------------
+
+        fig30.add_hline(
+            y=nivel_actual,
+            line_dash="dash",
+            line_width=2,
+            line_color="black",
+            annotation_text=(
+                f"Actual {nivel_actual:.2f} m"
+            ),
+        )
 
 
-            rain3 = rain.head(
-                3
-            )
+        # ----------------------------------------------------
+        # BANDA 30 DÍAS
+        # ----------------------------------------------------
 
-            rain7 = rain.head(
-                7
-            )
+        agregar_banda_incertidumbre(
+            fig30,
+            forecast30,
+            nombre=(
+                "Banda experimental 80%"
+            ),
+        )
 
-            rain15 = rain.head(
+
+        # ----------------------------------------------------
+        # 1–15
+        # ----------------------------------------------------
+
+        primeros15 = (
+            forecast30
+            .head(
                 15
             )
+            .copy()
+        )
+
+        agregar_pronostico(
+            fig30,
+            primeros15,
+            nombre=(
+                "Pronóstico 1–15 días"
+            ),
+            width=3,
+            marker_size=5,
+        )
 
 
-            lluvia_cards = st.columns(
-                [
-                    1,
-                    1,
-                    1,
-                    1,
+        # ----------------------------------------------------
+        # 16–30
+        # ----------------------------------------------------
+
+        extension = (
+            forecast30
+            .iloc[
+                15:
+            ]
+            .copy()
+        )
+
+        if not extension.empty:
+
+            # Añadir último punto del día 15
+            # para continuidad visual.
+
+            union = (
+                forecast30
+                .iloc[
+                    14:
                 ]
+                .copy()
             )
 
-
-            with lluvia_cards[
-                0
-            ]:
-
-                tarjeta_compacta(
-                    "3 días",
-                    formato_numero(
-                        rain3[
-                            "precip_mm"
-                        ].sum(),
-                        1,
-                    ),
-                    "mm acumulados",
-                )
-
-
-            with lluvia_cards[
-                1
-            ]:
-
-                tarjeta_compacta(
-                    "7 días",
-                    formato_numero(
-                        rain7[
-                            "precip_mm"
-                        ].sum(),
-                        1,
-                    ),
-                    "mm acumulados",
-                )
-
-
-            with lluvia_cards[
-                2
-            ]:
-
-                tarjeta_compacta(
-                    "15 días",
-                    formato_numero(
-                        rain15[
-                            "precip_mm"
-                        ].sum(),
-                        1,
-                    ),
-                    "mm acumulados",
-                )
-
-
-            with lluvia_cards[
-                3
-            ]:
-
-                tarjeta_compacta(
-                    "Máximo diario",
-                    formato_numero(
-                        rain15[
-                            "precip_mm"
-                        ].max(),
-                        1,
-                    ),
-                    "mm/día",
-                )
-
-
-            rain_fig = go.Figure()
-
-
-            rain_fig.add_trace(
-                go.Bar(
-
-                    x=rain.head(
-                        15
-                    )[
-                        "datetime"
-                    ],
-
-                    y=rain.head(
-                        15
-                    )[
-                        "precip_mm"
-                    ],
-
-                    name="Lluvia",
-                )
-            )
-
-
-            rain_fig.update_layout(
-
-                height=265,
-
-                margin=dict(
-                    l=5,
-                    r=5,
-                    t=5,
-                    b=5,
+            agregar_pronostico(
+                fig30,
+                union,
+                nombre=(
+                    "Extensión 16–30 días"
                 ),
-
-                yaxis_title="mm/día",
-
-                showlegend=False,
+                dash="dot",
+                width=3,
+                marker_size=5,
             )
 
 
-            rain_fig.update_xaxes(
-                tickformat="%d/%m",
+        fig30.update_layout(
+            height=460,
+            hovermode="x unified",
+            legend=dict(
+                orientation="h",
+                y=1.06,
+            ),
+            margin=dict(
+                l=10,
+                r=10,
+                t=25,
+                b=10,
+            ),
+        )
+
+        fig30.update_xaxes(
+            title_text="Fecha",
+            tickformat="%d/%m",
+        )
+
+        aplicar_escala_nivel(
+            fig30
+        )
+
+        st.plotly_chart(
+            fig30,
+            use_container_width=True,
+        )
+
+
+    st.caption(
+        "Los 30 días se calculan en una única simulación recursiva. "
+        "Cada nivel estimado se convierte en la base del día siguiente."
+    )
+
+
+    # ========================================================
+    # NIVEL VS HISTÓRICOS
+    # ========================================================
+
+    st.subheader(
+        "📏 Nivel diario vs. extremos históricos"
+    )
+
+    fechas_env = [
+        ultima_fecha
+    ]
+
+    niveles_env = [
+        nivel_actual
+    ]
+
+
+    if (
+        isinstance(
+            forecast30,
+            pd.DataFrame,
+        )
+        and not forecast30.empty
+    ):
+
+        fechas_env.extend(
+            forecast30[
+                "datetime"
+            ].tolist()
+        )
+
+        niveles_env.extend(
+            pd.to_numeric(
+                forecast30[
+                    "prediction"
+                ],
+                errors="coerce",
             )
+            .tolist()
+        )
 
 
-            st.plotly_chart(
-                rain_fig,
-                use_container_width=True,
+    envolvente = (
+        construir_envolvente_historica(
+            df_historico_total,
+            fechas_env,
+        )
+    )
+
+
+    if not envolvente.empty:
+
+        cantidad = min(
+            len(
+                envolvente
+            ),
+            len(
+                niveles_env
+            ),
+        )
+
+        envolvente = (
+            envolvente
+            .head(
+                cantidad
             )
+            .copy()
+        )
+
+        envolvente[
+            "nivel_dia"
+        ] = niveles_env[
+            :cantidad
+        ]
+
+        fig_hist = go.Figure()
 
 
-        else:
+        # ----------------------------------------------------
+        # MÁXIMO
+        # ----------------------------------------------------
 
-            st.info(
-                "Sin datos de lluvia."
+        fig_hist.add_trace(
+            go.Scatter(
+                x=envolvente[
+                    "datetime"
+                ],
+                y=envolvente[
+                    "nivel_max_historico"
+                ],
+                mode="lines",
+                name=(
+                    "Máximo histórico del día"
+                ),
+                line=dict(
+                    color="crimson",
+                    width=2,
+                ),
             )
+        )
+
+
+        # ----------------------------------------------------
+        # NIVEL ACTUAL / PROYECTADO
+        # ----------------------------------------------------
+
+        fig_hist.add_trace(
+            go.Scatter(
+                x=envolvente[
+                    "datetime"
+                ],
+                y=envolvente[
+                    "nivel_dia"
+                ],
+                mode="lines+markers",
+                name=(
+                    "Nivel actual / proyectado"
+                ),
+                line=dict(
+                    color="royalblue",
+                    width=3,
+                ),
+                marker=dict(
+                    size=5,
+                ),
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # MÍNIMO
+        # ----------------------------------------------------
+
+        fig_hist.add_trace(
+            go.Scatter(
+                x=envolvente[
+                    "datetime"
+                ],
+                y=envolvente[
+                    "nivel_min_historico"
+                ],
+                mode="lines",
+                name=(
+                    "Mínimo histórico del día"
+                ),
+                line=dict(
+                    color="seagreen",
+                    width=2,
+                ),
+            )
+        )
+
+
+        fig_hist.update_layout(
+            height=450,
+            hovermode="x unified",
+            legend=dict(
+                orientation="h",
+                y=1.06,
+            ),
+            margin=dict(
+                l=10,
+                r=10,
+                t=25,
+                b=10,
+            ),
+        )
+
+        fig_hist.update_xaxes(
+            title_text="Fecha",
+            tickformat="%d/%m",
+        )
+
+        aplicar_escala_nivel(
+            fig_hist
+        )
+
+        st.plotly_chart(
+            fig_hist,
+            use_container_width=True,
+        )
+
+        st.caption(
+            "Rojo: máximo histórico para la misma fecha. "
+            "Azul: nivel real y trayectoria calculada. "
+            "Verde: mínimo histórico para esa fecha."
+        )
+
+    else:
+
+        st.info(
+            "No hay historial suficiente "
+            "para calcular la envolvente."
+        )
+
+
+    # ========================================================
+    # ESCENARIOS 60 DÍAS
+    # ========================================================
+
+    render_stress_scenario(
+        df=df,
+        models=models,
+        exog_history=
+            exog_history,
+        upstream_history=
+            upstream_history,
+    )
+
+
+    # ========================================================
+    # PRECIPITACIÓN
+    # ========================================================
+
+    st.subheader(
+        "🌧️ Precipitación prevista · 15 días"
+    )
+
+
+    if (
+        isinstance(
+            exog_future,
+            pd.DataFrame,
+        )
+        and not exog_future.empty
+        and "precip_mm"
+        in exog_future.columns
+    ):
+
+        rain = (
+            exog_future
+            .head(
+                FORECAST_DAYS
+            )
+            .copy()
+        )
+
+        rain[
+            "precip_mm"
+        ] = (
+            pd.to_numeric(
+                rain[
+                    "precip_mm"
+                ],
+                errors="coerce",
+            )
+            .fillna(
+                0.0
+            )
+            .clip(
+                lower=0.0
+            )
+        )
+
+
+        r1, r2, r3 = (
+            st.columns(
+                3
+            )
+        )
+
+        r1.metric(
+            "Acumulado previsto",
+            f"{rain['precip_mm'].sum():.1f} mm",
+        )
+
+        r2.metric(
+            "Máximo diario",
+            f"{rain['precip_mm'].max():.1f} mm",
+        )
+
+        r3.metric(
+            "Días ≥ 1 mm",
+            int(
+                (
+                    rain[
+                        "precip_mm"
+                    ]
+                    >= 1.0
+                )
+                .sum()
+            ),
+        )
+
+
+        rain_fig = go.Figure()
+
+        rain_fig.add_trace(
+            go.Bar(
+                x=rain[
+                    "datetime"
+                ],
+                y=rain[
+                    "precip_mm"
+                ],
+                name=(
+                    "Precipitación prevista"
+                ),
+                hovertemplate=(
+                    "%{x|%d/%m/%Y}"
+                    "<br>Lluvia: "
+                    "%{y:.1f} mm"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+        rain_fig.update_layout(
+            height=310,
+            yaxis_title=(
+                "Precipitación (mm/día)"
+            ),
+            margin=dict(
+                l=10,
+                r=10,
+                t=15,
+                b=10,
+            ),
+        )
+
+        rain_fig.update_xaxes(
+            tickformat="%d/%m"
+        )
+
+        st.plotly_chart(
+            rain_fig,
+            use_container_width=True,
+        )
+
+    else:
+
+        st.info(
+            "No se encuentra disponible "
+            "la precipitación prevista."
+        )
 
 
     # ========================================================
     # CAUDAL
     # ========================================================
 
-    with caudal_col:
+    st.subheader(
+        "💧 Caudal utilizado por el modelo"
+    )
 
-        st.subheader(
-            "💧 Caudal"
+
+    if (
+        isinstance(
+            exog_history,
+            pd.DataFrame,
+        )
+        and not exog_history.empty
+        and "caudal_m3s"
+        in exog_history.columns
+        and exog_history[
+            "caudal_m3s"
+        ]
+        .notna()
+        .any()
+    ):
+
+        q_hist = (
+            exog_history
+            .dropna(
+                subset=[
+                    "caudal_m3s"
+                ]
+            )
+            .copy()
         )
 
 
-        caudal_cards = st.columns(
-            [
-                1.15,
-                1,
-                1,
-                1.15,
+        tq = calcular_tendencia_caudal(
+            q_hist
+        )
+
+
+        q1, q2, q3, q4 = (
+            st.columns(
+                4
+            )
+        )
+
+
+        q1.metric(
+            "Caudal actual",
+            (
+                f"{formato_numero(tq['actual'], 0)} m³/s"
+                if tq[
+                    "actual"
+                ]
+                is not None
+                else "--"
+            ),
+        )
+
+
+        q2.metric(
+            "Δ 3 días",
+            (
+                f"{tq['delta_3']:+,.0f} m³/s"
+                if tq[
+                    "delta_3"
+                ]
+                is not None
+                else "--"
+            ),
+        )
+
+
+        if (
+            tq[
+                "delta_7"
             ]
+            is not None
+        ):
+
+            texto7 = (
+                f"{tq['delta_7']:+,.0f} m³/s"
+            )
+
+            if (
+                tq[
+                    "pct_7"
+                ]
+                is not None
+            ):
+
+                texto7 += (
+                    f" ({tq['pct_7']:+.1f}%)"
+                )
+
+        else:
+
+            texto7 = "--"
+
+
+        q3.metric(
+            "Δ 7 días",
+            texto7,
         )
 
 
-        with caudal_cards[
-            0
-        ]:
-
-            tarjeta_compacta(
-                "Actual",
-                formato_caudal(
-                    tq[
-                        "actual"
-                    ]
-                ),
-                "m³/s",
-            )
+        q4.metric(
+            "Tendencia",
+            tq[
+                "estado"
+            ],
+        )
 
 
-        with caudal_cards[
-            1
-        ]:
-
-            tarjeta_compacta(
-                "Δ 3 días",
-                (
-                    formato_numero(
-                        tq[
-                            "delta_3"
-                        ],
-                        0,
-                    )
-                    if tq[
-                        "delta_3"
-                    ]
-                    is not None
-                    else "--"
-                ),
-                "m³/s",
-            )
+        q_fig = go.Figure()
 
 
-        with caudal_cards[
-            2
-        ]:
-
-            tarjeta_compacta(
-                "Δ 7 días",
-                (
-                    formato_numero(
-                        tq[
-                            "delta_7"
-                        ],
-                        0,
-                    )
-                    if tq[
-                        "delta_7"
-                    ]
-                    is not None
-                    else "--"
-                ),
-                "m³/s",
-            )
-
-
-        with caudal_cards[
-            3
-        ]:
-
-            tarjeta_compacta(
-                "Tendencia",
-                tq[
-                    "estado"
+        q_fig.add_trace(
+            go.Scatter(
+                x=q_hist[
+                    "datetime"
                 ],
-                "",
-                trend=True,
+                y=q_hist[
+                    "caudal_m3s"
+                ],
+                mode="lines",
+                name=(
+                    "Caudal observado"
+                ),
             )
+        )
 
 
         if (
@@ -2791,267 +3099,163 @@ else:
             and not exog_future.empty
             and "caudal_m3s"
             in exog_future.columns
+            and exog_future[
+                "caudal_m3s"
+            ]
+            .notna()
+            .any()
         ):
 
-            qfig = go.Figure()
-
-
-            qfig.add_trace(
+            q_fig.add_trace(
                 go.Scatter(
-
                     x=exog_future[
                         "datetime"
                     ],
-
                     y=exog_future[
                         "caudal_m3s"
                     ],
-
                     mode="lines+markers",
-
-                    name="Caudal",
+                    line=dict(
+                        dash="dash",
+                    ),
+                    name=(
+                        "Proyección experimental"
+                    ),
                 )
             )
 
 
-            qfig.update_layout(
+        q_fig.update_layout(
+            height=370,
+            hovermode="x unified",
+            yaxis_title="Caudal (m³/s)",
+            legend=dict(
+                orientation="h",
+                y=1.05,
+            ),
+            margin=dict(
+                l=10,
+                r=10,
+                t=20,
+                b=10,
+            ),
+        )
 
-                height=265,
+        q_fig.update_xaxes(
+            tickformat="%d/%m"
+        )
 
-                margin=dict(
-                    l=5,
-                    r=5,
-                    t=5,
-                    b=5,
-                ),
-
-                yaxis_title="m³/s",
-
-                showlegend=False,
-            )
+        st.plotly_chart(
+            q_fig,
+            use_container_width=True,
+        )
 
 
-            qfig.update_xaxes(
-                tickformat="%d/%m",
-            )
+        st.caption(
+            "La tendencia del caudal representa únicamente "
+            "la variable de entrada utilizada por el modelo."
+        )
 
+    else:
 
-            st.plotly_chart(
-                qfig,
-                use_container_width=True,
-            )
+        st.info(
+            "No se encuentra disponible "
+            "una serie de caudal utilizable."
+        )
 
 
     # ========================================================
-    # ESTACIONES AGUAS ARRIBA
-    # ========================================================
-
-    st.subheader(
-        "🌊 Estaciones aguas arriba"
-    )
-
-
-    station_rows = []
-
-
-    nombres_map = {
-
-        "nivel_corrientes":
-            "Corrientes",
-
-        "nivel_goya":
-            "Goya",
-
-        "nivel_la_paz":
-            "La Paz",
-
-        "nivel_parana":
-            "Paraná",
-
-        "nivel_rosario":
-            "Rosario",
-
-        "nivel_villa_constitucion":
-            "Villa Constitución",
-    }
-
-
-    for col, nombre in nombres_map.items():
-
-        info = (
-            upstream_projection_meta
-            .get(
-                col,
-                {},
-            )
-        )
-
-
-        actual = info.get(
-            "actual"
-        )
-
-
-        estado = info.get(
-            "estado",
-            "Sin datos",
-        )
-
-
-        station_rows.append(
-            {
-                "Estación":
-                    nombre,
-
-                "Nivel actual":
-                    (
-                        formato_nivel(
-                            actual
-                        )
-                        if actual
-                        is not None
-                        else "--"
-                    ),
-
-                "Tendencia":
-                    estado,
-
-                "Indicador":
-                    tendencia_estacion(
-                        info
-                    ),
-            }
-        )
-
-
-    st.dataframe(
-        pd.DataFrame(
-            station_rows
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-    # ========================================================
-    # DETALLE 15 DÍAS
+    # VARIABLES UTILIZADAS
     # ========================================================
 
     with st.expander(
-        "🔎 Pronóstico diario detallado · 15 días"
+        "🌊 Variables utilizadas por el modelo"
     ):
 
-        if (
-            isinstance(
-                forecast,
-                pd.DataFrame,
+        estaciones = (
+            resumen_estaciones_upstream(
+                upstream_meta,
+                upstream_history,
             )
-            and not forecast.empty
-        ):
+        )
 
-            tabla = forecast.copy()
+        rows = [
+
+            {
+                "Variable":
+                    "San Nicolás",
+
+                "Estado":
+                    "✓ Disponible",
+            },
+
+            {
+                "Variable":
+                    "Precipitación",
+
+                "Estado":
+                    (
+                        "✓ Utilizada"
+                        if models.get(
+                            "uses_rain",
+                            False,
+                        )
+                        else
+                        "✗ No utilizada"
+                    ),
+            },
+
+            {
+                "Variable":
+                    "Caudal",
+
+                "Estado":
+                    (
+                        "✓ Utilizado"
+                        if models.get(
+                            "uses_caudal",
+                            False,
+                        )
+                        else
+                        "✗ No utilizado"
+                    ),
+            },
+        ]
 
 
-            tabla[
-                "Fecha"
-            ] = pd.to_datetime(
-                tabla[
-                    "datetime"
-                ]
-            ).dt.strftime(
-                "%d/%m/%Y"
+        for item in estaciones:
+
+            rows.append(
+                {
+                    "Variable":
+                        item[
+                            "Estación"
+                        ],
+
+                    "Estado":
+                        (
+                            "✓ Disponible"
+                            if item[
+                                "Disponible"
+                            ]
+                            else
+                            "✗ Sin datos"
+                        ),
+                }
             )
 
 
-            tabla[
-                "Nivel base"
-            ] = tabla[
-                "nivel_base"
-            ].round(
-                2
-            )
-
-
-            tabla[
-                "Lluvia mm"
-            ] = tabla[
-                "precip_mm"
-            ].round(
-                1
-            )
-
-
-            tabla[
-                "Caudal m³/s"
-            ] = tabla[
-                "caudal_m3s"
-            ].round(
-                0
-            )
-
-
-            tabla[
-                "Δ nivel"
-            ] = tabla[
-                "variacion_dia"
-            ].round(
-                3
-            )
-
-
-            tabla[
-                "Nivel previsto"
-            ] = tabla[
-                "prediction"
-            ].round(
-                2
-            )
-
-
-            st.dataframe(
-
-                tabla[
-                    [
-                        "Fecha",
-                        "Nivel base",
-                        "Lluvia mm",
-                        "Caudal m³/s",
-                        "Δ nivel",
-                        "Nivel previsto",
-                    ]
-                ],
-
-                use_container_width=True,
-
-                hide_index=True,
-            )
+        st.dataframe(
+            pd.DataFrame(
+                rows
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
     # ========================================================
-    # ESCENARIO 60 DÍAS
-    # ========================================================
-
-    st.divider()
-
-
-    render_stress_scenario(
-
-        df=
-            df_historico,
-
-        models=
-            models,
-
-        exog_history=
-            exog_history,
-
-        upstream_history=
-            upstream_history,
-    )
-
-
-    # ========================================================
-    # IMPORTANCIA
+    # IMPORTANCIA VARIABLES
     # ========================================================
 
     importance = models.get(
@@ -3071,40 +3275,46 @@ else:
             "🧠 Importancia de variables del modelo"
         ):
 
-            top_imp = importance.head(
-                20
+            top_imp = (
+                importance
+                .head(
+                    20
+                )
+                .copy()
             )
-
 
             imp_fig = go.Figure()
 
-
             imp_fig.add_trace(
                 go.Bar(
-
                     x=top_imp[
                         "importance"
                     ],
-
                     y=top_imp[
                         "feature"
                     ],
-
                     orientation="h",
+                    name="Importancia",
                 )
             )
 
-
             imp_fig.update_layout(
                 height=550,
-                xaxis_title="Importancia relativa",
+                xaxis_title=(
+                    "Importancia relativa"
+                ),
+                yaxis_title="Variable",
+                margin=dict(
+                    l=10,
+                    r=10,
+                    t=20,
+                    b=10,
+                ),
             )
-
 
             imp_fig.update_yaxes(
                 autorange="reversed"
             )
-
 
             st.plotly_chart(
                 imp_fig,
@@ -3113,41 +3323,167 @@ else:
 
 
     # ========================================================
+    # DIAGNÓSTICO DEL MODELO
+    # ========================================================
+
+    with st.expander(
+        "🧪 Diagnóstico del modelo"
+    ):
+
+        rmse = metrics.get(
+            "RMSE"
+        )
+
+        limite = models.get(
+            "daily_change_limit"
+        )
+
+        model_version = models.get(
+            "version",
+            "Sin versión",
+        )
+
+        diagnostico = [
+
+            {
+                "Parámetro":
+                    "Modelo",
+
+                "Valor":
+                    model_version,
+            },
+
+            {
+                "Parámetro":
+                    "Observaciones",
+
+                "Valor":
+                    models.get(
+                        "observations",
+                        "--",
+                    ),
+            },
+
+            {
+                "Parámetro":
+                    "Filas entrenamiento",
+
+                "Valor":
+                    models.get(
+                        "training_rows",
+                        "--",
+                    ),
+            },
+
+            {
+                "Parámetro":
+                    "RMSE",
+
+                "Valor":
+                    (
+                        f"{float(rmse):.3f} m"
+                        if rmse
+                        is not None
+                        else "--"
+                    ),
+            },
+
+            {
+                "Parámetro":
+                    "Límite histórico Δ diario",
+
+                "Valor":
+                    (
+                        f"±{float(limite):.3f} m/día"
+                        if limite
+                        is not None
+                        else "--"
+                    ),
+            },
+
+            {
+                "Parámetro":
+                    "Banda experimental",
+
+                "Valor":
+                    "80%",
+            },
+
+            {
+                "Parámetro":
+                    "Margen máximo banda",
+
+                "Valor":
+                    "±0,35 m",
+            },
+
+            {
+                "Parámetro":
+                    "Horizonte recursivo",
+
+                "Valor":
+                    "30 días",
+            },
+        ]
+
+
+        st.dataframe(
+            pd.DataFrame(
+                diagnostico
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+    # ========================================================
     # METODOLOGÍA
     # ========================================================
 
     with st.expander(
-        "ℹ️ Metodología y alcance"
+        "ℹ️ Metodología, calidad y alcance"
     ):
 
         st.markdown(
             """
-            **15 días:** pronóstico recursivo diario.
+            **Pronóstico principal: 15 días**
 
-            Cada nuevo día parte del nivel calculado el día anterior
-            y utiliza lluvia, caudal y niveles aguas arriba.
+            Parte de la última altura real disponible en San Nicolás.
+            El modelo calcula la variación del nivel para el día
+            siguiente utilizando el nivel actual, lluvia, caudal,
+            comportamiento reciente y estaciones aguas arriba.
 
-            **30 días:** aplica el mismo procedimiento recursivo.
+            Cada nivel pronosticado pasa a ser la base del día
+            siguiente.
 
-            **60 días:** escenario de estrés histórico.
+            **Extensión: 30 días**
 
-            Cada actualización vuelve a utilizar la última medición
-            real disponible de San Nicolás como punto de partida.
+            Utiliza la misma simulación recursiva, manteniendo
+            continuidad entre los días 1 y 30.
+
+            **Banda experimental 80%**
+
+            La incertidumbre comienza cerca del error histórico del
+            modelo y aumenta progresivamente con el horizonte. Está
+            limitada a un máximo de ±0,35 m para evitar un abanico
+            visual artificialmente amplio.
+
+            **Escenario 60 días**
+
+            Es una simulación histórica de estrés y no un pronóstico
+            meteorológico convencional.
+
+            **Escala**
+
+            Todos los gráficos que representan nivel hidrométrico
+            utilizan una escala fija de **0 a 7 m**.
             """
         )
 
-
-        if rmse is not None:
-
-            st.write(
-                "**RMSE histórico:** "
-                f"{float(rmse):.3f} m"
-            )
-
-
         st.warning(
-            "Herramienta experimental. "
-            "No reemplaza información oficial."
+            "La plataforma es experimental. "
+            "No reemplaza información, pronósticos, avisos "
+            "ni alertas de organismos oficiales."
         )
 
 
@@ -3158,40 +3494,37 @@ else:
     if actualizado:
 
         st.caption(
-            "Última actualización: "
+            "Última actualización del modelo: "
             f"{actualizado.strftime('%d/%m/%Y %H:%M')}"
         )
 
 
 # ============================================================
-# PIE
+# FUENTES
 # ============================================================
 
 st.divider()
 
+st.markdown(
+    """
+    **Fuentes**
 
-footer1, footer2 = st.columns(
-    2
+    Nivel hidrométrico y caudal: **Instituto Nacional del Agua (INA)**  
+    Precipitación: **Open-Meteo**  
+    Predicción y escenarios: **modelo experimental propio**
+    """
 )
 
-
-with footer1:
-
-    st.caption(
-        "Datos hidrométricos y caudal: "
-        "**Instituto Nacional del Agua (INA)**"
-    )
-
-
-with footer2:
-
-    st.caption(
-        "Precipitación: **Open-Meteo** · "
-        "Modelo: **experimental propio**"
-    )
-
+st.warning(
+    "Los resultados de esta plataforma tienen carácter "
+    "experimental e informativo. Ante situaciones de riesgo "
+    "deben consultarse las comunicaciones oficiales."
+)
 
 st.caption(
     f"Paraná · San Nicolás {APP_VERSION} | "
-    "15 días · 30 días · escenario severo 60 días"
+    "Pronóstico: 15 días | "
+    "Extensión: 30 días | "
+    "Escenarios históricos: 60 días | "
+    "Escala hidrométrica: 0–7 m"
 )
