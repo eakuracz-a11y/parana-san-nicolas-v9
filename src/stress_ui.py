@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 # VERSIÓN
 # ============================================================
 
-STRESS_VERSION = "V11.6"
+STRESS_VERSION = "V11.6.1"
 
 
 # ============================================================
@@ -17,14 +17,12 @@ STRESS_VERSION = "V11.6"
 
 STRESS_DAYS = 60
 
-# Escala visual fija solicitada
+# Escala visual fija
 Y_MIN = 0.0
 Y_MAX = 7.0
 Y_STEP = 0.5
 
-MIN_HISTORY_DAYS = 90
-
-EPS = 1e-9
+MIN_HISTORY_DAYS = 120
 
 
 # ============================================================
@@ -157,7 +155,7 @@ def _upstream_cols(df):
 
 
 # ============================================================
-# NIVEL SAN NICOLÁS
+# PREPARAR NIVEL SAN NICOLÁS
 # ============================================================
 
 def _preparar_nivel(df):
@@ -169,8 +167,7 @@ def _preparar_nivel(df):
             pd.DataFrame,
         )
         or df.empty
-        or "datetime"
-        not in df.columns
+        or "datetime" not in df.columns
     ):
 
         return pd.DataFrame(
@@ -184,22 +181,14 @@ def _preparar_nivel(df):
 
     if "nivel" in x.columns:
 
-        x[
-            "nivel"
-        ] = _numeric(
-            x[
-                "nivel"
-            ]
+        x["nivel"] = _numeric(
+            x["nivel"]
         )
 
     elif "value" in x.columns:
 
-        x[
-            "nivel"
-        ] = _numeric(
-            x[
-                "value"
-            ]
+        x["nivel"] = _numeric(
+            x["value"]
         )
 
     else:
@@ -211,42 +200,78 @@ def _preparar_nivel(df):
             ]
         )
 
-    x[
-        "datetime"
-    ] = _normalizar_datetime(
-        x[
-            "datetime"
+    x["datetime"] = _normalizar_datetime(
+        x["datetime"]
+    )
+
+    x = x.dropna(
+        subset=[
+            "datetime",
+            "nivel",
         ]
     )
 
     x = (
         x
-        .dropna(
-            subset=[
-                "datetime",
-                "nivel",
-            ]
-        )
         .groupby(
             "datetime",
             as_index=False,
-        )[
-            "nivel"
-        ]
+        )["nivel"]
         .mean()
-        .sort_values(
-            "datetime"
-        )
-        .reset_index(
-            drop=True
-        )
+        .sort_values("datetime")
+        .reset_index(drop=True)
     )
 
-    return x
+    # ========================================================
+    # HACER SERIE DIARIA CONTINUA
+    # ========================================================
+
+    if len(x) >= 2:
+
+        fecha_min = x["datetime"].min()
+        fecha_max = x["datetime"].max()
+
+        calendario = pd.DataFrame(
+            {
+                "datetime":
+                    pd.date_range(
+                        fecha_min,
+                        fecha_max,
+                        freq="D",
+                    )
+            }
+        )
+
+        x = calendario.merge(
+            x,
+            on="datetime",
+            how="left",
+        )
+
+        # Sólo completar huecos relativamente cortos.
+        x["nivel"] = (
+            x["nivel"]
+            .interpolate(
+                limit=7,
+                limit_direction="both",
+            )
+        )
+
+    x = x.dropna(
+        subset=[
+            "nivel"
+        ]
+    )
+
+    return (
+        x
+        .sort_values("datetime")
+        .reset_index(drop=True)
+    )
 
 
 # ============================================================
-# LLUVIA + CAUDAL
+# PREPARAR LLUVIA Y CAUDAL
 # ============================================================
 
 def _preparar_exog(
@@ -260,8 +285,7 @@ def _preparar_exog(
             pd.DataFrame,
         )
         or exog_history.empty
-        or "datetime"
-        not in exog_history.columns
+        or "datetime" not in exog_history.columns
     ):
 
         return pd.DataFrame(
@@ -274,84 +298,60 @@ def _preparar_exog(
 
     x = exog_history.copy()
 
-    x[
-        "datetime"
-    ] = _normalizar_datetime(
-        x[
-            "datetime"
-        ]
+    x["datetime"] = _normalizar_datetime(
+        x["datetime"]
     )
 
     if "precip_mm" not in x.columns:
 
-        x[
-            "precip_mm"
-        ] = np.nan
+        x["precip_mm"] = np.nan
 
     if "caudal_m3s" not in x.columns:
 
-        x[
-            "caudal_m3s"
-        ] = np.nan
+        x["caudal_m3s"] = np.nan
 
-    x[
-        "precip_mm"
-    ] = (
+    x["precip_mm"] = (
         _numeric(
-            x[
-                "precip_mm"
-            ]
+            x["precip_mm"]
         )
-        .clip(
-            lower=0.0
-        )
+        .clip(lower=0.0)
     )
 
-    x[
-        "caudal_m3s"
-    ] = _numeric(
-        x[
-            "caudal_m3s"
+    x["caudal_m3s"] = _numeric(
+        x["caudal_m3s"]
+    )
+
+    x = x.dropna(
+        subset=[
+            "datetime"
         ]
     )
 
-    return (
-        x[
-            [
-                "datetime",
-                "precip_mm",
-                "caudal_m3s",
-            ]
-        ]
-        .dropna(
-            subset=[
-                "datetime"
-            ]
-        )
+    x = (
+        x
         .groupby(
             "datetime",
             as_index=False,
         )
         .agg(
-            {
-                "precip_mm":
-                    "mean",
-
-                "caudal_m3s":
-                    "mean",
-            }
+            precip_mm=(
+                "precip_mm",
+                "mean",
+            ),
+            caudal_m3s=(
+                "caudal_m3s",
+                "mean",
+            ),
         )
-        .sort_values(
-            "datetime"
-        )
-        .reset_index(
-            drop=True
-        )
+        .sort_values("datetime")
+        .reset_index(drop=True)
     )
+
+    return x
 
 
 # ============================================================
-# AGUAS ARRIBA
+# PREPARAR AGUAS ARRIBA
 # ============================================================
 
 def _preparar_upstream(
@@ -365,8 +365,7 @@ def _preparar_upstream(
             pd.DataFrame,
         )
         or upstream_history.empty
-        or "datetime"
-        not in upstream_history.columns
+        or "datetime" not in upstream_history.columns
     ):
 
         return pd.DataFrame(
@@ -379,17 +378,11 @@ def _preparar_upstream(
 
     x = upstream_history.copy()
 
-    x[
-        "datetime"
-    ] = _normalizar_datetime(
-        x[
-            "datetime"
-        ]
+    x["datetime"] = _normalizar_datetime(
+        x["datetime"]
     )
 
-    cols = _upstream_cols(
-        x
-    )
+    cols = _upstream_cols(x)
 
     if not cols:
 
@@ -403,53 +396,35 @@ def _preparar_upstream(
 
     for col in cols:
 
-        x[
-            col
-        ] = _numeric(
-            x[
-                col
-            ]
+        x[col] = _numeric(
+            x[col]
         )
 
         if (
-            x[
-                col
-            ]
+            x[col]
             .notna()
             .sum()
             >= 2
         ):
 
-            x[
-                col
-            ] = (
-                x[
-                    col
-                ]
+            x[col] = (
+                x[col]
                 .interpolate(
                     limit=3,
                     limit_direction="both",
                 )
             )
 
-    x[
-        "upstream_mean"
-    ] = (
-        x[
-            cols
-        ]
+    x["upstream_mean"] = (
+        x[cols]
         .mean(
             axis=1,
             skipna=True,
         )
     )
 
-    x[
-        "upstream_max"
-    ] = (
-        x[
-            cols
-        ]
+    x["upstream_max"] = (
+        x[cols]
         .max(
             axis=1,
             skipna=True,
@@ -474,20 +449,17 @@ def _preparar_upstream(
             as_index=False,
         )
         .agg(
-            {
-                "upstream_mean":
-                    "mean",
-
-                "upstream_max":
-                    "max",
-            }
+            upstream_mean=(
+                "upstream_mean",
+                "mean",
+            ),
+            upstream_max=(
+                "upstream_max",
+                "max",
+            ),
         )
-        .sort_values(
-            "datetime"
-        )
-        .reset_index(
-            drop=True
-        )
+        .sort_values("datetime")
+        .reset_index(drop=True)
     )
 
 
@@ -501,9 +473,7 @@ def _armar_historico(
     upstream_history,
 ):
 
-    nivel = _preparar_nivel(
-        df
-    )
+    nivel = _preparar_nivel(df)
 
     if nivel.empty:
 
@@ -544,38 +514,34 @@ def _armar_historico(
 
         if col not in hist.columns:
 
-            hist[
-                col
-            ] = np.nan
+            hist[col] = np.nan
 
-        hist[
-            col
-        ] = _numeric(
-            hist[
-                col
-            ]
+        hist[col] = _numeric(
+            hist[col]
         )
 
+    # ========================================================
+    # CAUDAL
+    # ========================================================
+
     if (
-        hist[
-            "caudal_m3s"
-        ]
+        hist["caudal_m3s"]
         .notna()
         .sum()
         >= 7
     ):
 
-        hist[
-            "caudal_m3s"
-        ] = (
-            hist[
-                "caudal_m3s"
-            ]
+        hist["caudal_m3s"] = (
+            hist["caudal_m3s"]
             .interpolate(
-                limit=5,
+                limit=7,
                 limit_direction="both",
             )
         )
+
+    # ========================================================
+    # AGUAS ARRIBA
+    # ========================================================
 
     for col in [
         "upstream_mean",
@@ -583,45 +549,35 @@ def _armar_historico(
     ]:
 
         if (
-            hist[
-                col
-            ]
+            hist[col]
             .notna()
             .sum()
             >= 7
         ):
 
-            hist[
-                col
-            ] = (
-                hist[
-                    col
-                ]
+            hist[col] = (
+                hist[col]
                 .interpolate(
-                    limit=3,
+                    limit=5,
                     limit_direction="both",
                 )
             )
 
     return (
         hist
-        .sort_values(
-            "datetime"
-        )
+        .sort_values("datetime")
         .drop_duplicates(
             subset=[
                 "datetime"
             ],
             keep="last",
         )
-        .reset_index(
-            drop=True
-        )
+        .reset_index(drop=True)
     )
 
 
 # ============================================================
-# BUSCAR TODAS LAS CRECIDAS DE 60 DÍAS
+# BUSCAR EVENTOS HISTÓRICOS DE 60 DÍAS
 # ============================================================
 
 def _buscar_eventos_crecida(
@@ -632,13 +588,22 @@ def _buscar_eventos_crecida(
     eventos = []
 
     if (
-        hist.empty
+        hist is None
+        or not isinstance(
+            hist,
+            pd.DataFrame,
+        )
+        or hist.empty
         or len(hist) < days
     ):
 
         return eventos
 
-    for start_idx in range(
+    # ========================================================
+    # VENTANAS CONTINUAS
+    # ========================================================
+
+    for inicio in range(
         0,
         len(hist) - days + 1,
     ):
@@ -646,61 +611,94 @@ def _buscar_eventos_crecida(
         block = (
             hist
             .iloc[
-                start_idx:
-                start_idx + days
+                inicio:
+                inicio + days
             ]
             .copy()
-            .reset_index(
-                drop=True
-            )
+            .reset_index(drop=True)
         )
 
-        nivel = (
-            block[
-                "nivel"
-            ]
-            .dropna()
-        )
-
-        if len(
-            nivel
-        ) < 40:
+        if len(block) != days:
 
             continue
 
-        nivel_inicio = float(
-            nivel.iloc[
-                0
-            ]
+        # Verificar que sean realmente 60 días consecutivos.
+        fecha_inicio = block[
+            "datetime"
+        ].iloc[0]
+
+        fecha_fin = block[
+            "datetime"
+        ].iloc[-1]
+
+        diferencia = (
+            fecha_fin
+            - fecha_inicio
+        ).days
+
+        if diferencia != days - 1:
+
+            continue
+
+        niveles = (
+            pd.to_numeric(
+                block["nivel"],
+                errors="coerce",
+            )
         )
 
+        if niveles.notna().sum() < days:
+
+            continue
+
+        valores = niveles.to_numpy(
+            dtype=float
+        )
+
+        if not np.all(
+            np.isfinite(valores)
+        ):
+
+            continue
+
+        nivel_inicial = float(
+            valores[0]
+        )
+
+        # ====================================================
+        # CRECIDA MÁXIMA DESDE EL NIVEL INICIAL
+        # ====================================================
+
         nivel_maximo = float(
-            nivel.max()
+            np.max(valores)
         )
 
         peak_idx = int(
-            block[
-                "nivel"
-            ]
-            .idxmax()
+            np.argmax(valores)
         )
 
         crecimiento = (
             nivel_maximo
-            - nivel_inicio
+            - nivel_inicial
         )
 
-        if crecimiento <= 0:
+        if crecimiento <= 0.05:
+
+            continue
+
+        # Queremos que el pico no esté exactamente en el
+        # primer día porque no representaría una creciente.
+        if peak_idx < 2:
 
             continue
 
         eventos.append(
             {
                 "growth":
-                    crecimiento,
+                    float(crecimiento),
 
                 "initial":
-                    nivel_inicio,
+                    nivel_inicial,
 
                 "max":
                     nivel_maximo,
@@ -708,24 +706,28 @@ def _buscar_eventos_crecida(
                 "peak_idx":
                     peak_idx,
 
+                "start_date":
+                    fecha_inicio,
+
+                "end_date":
+                    fecha_fin,
+
                 "block":
                     block,
             }
         )
 
-    eventos.sort(
-        key=lambda x:
-            x[
-                "growth"
-            ],
-        reverse=True,
+    eventos = sorted(
+        eventos,
+        key=lambda evento:
+            evento["growth"],
     )
 
     return eventos
 
 
 # ============================================================
-# ELEGIR EVENTO POR PERCENTIL
+# ELEGIR EVENTO SEGÚN PERCENTIL
 # ============================================================
 
 def _evento_percentil(
@@ -737,12 +739,18 @@ def _evento_percentil(
 
         return None
 
+    percentile = float(
+        np.clip(
+            percentile,
+            0.0,
+            1.0,
+        )
+    )
+
     growths = np.array(
         [
-            e[
-                "growth"
-            ]
-            for e in eventos
+            evento["growth"]
+            for evento in eventos
         ],
         dtype=float,
     )
@@ -754,167 +762,262 @@ def _evento_percentil(
         )
     )
 
+    diferencias = np.abs(
+        growths - target
+    )
+
     idx = int(
         np.argmin(
-            np.abs(
-                growths
-                - target
-            )
+            diferencias
         )
     )
 
-    return eventos[
-        idx
-    ]
+    return eventos[idx]
 
 
 # ============================================================
-# FORMA COMPLETA DEL EVENTO
+# PEOR EVENTO
+# ============================================================
+
+def _peor_evento(eventos):
+
+    if not eventos:
+
+        return None
+
+    return max(
+        eventos,
+        key=lambda evento:
+            evento["growth"],
+    )
+
+
+# ============================================================
+# CONSTRUIR FORMA DEL EVENTO
 # ============================================================
 
 def _event_shape(
     event,
 ):
 
-    block = (
-        event[
-            "block"
-        ]
-        .copy()
-    )
+    if (
+        event is None
+        or "block" not in event
+    ):
+
+        return np.zeros(
+            STRESS_DAYS,
+            dtype=float,
+        )
+
+    block = event["block"]
 
     niveles = (
-        block[
-            "nivel"
-        ]
+        pd.to_numeric(
+            block["nivel"],
+            errors="coerce",
+        )
         .to_numpy(
             dtype=float
         )
     )
 
-    initial = float(
-        niveles[
-            0
-        ]
-    )
-
-    delta = (
-        niveles
-        - initial
-    )
-
     # ========================================================
-    # FILTRAR RUIDO PEQUEÑO
+    # GARANTIZAR LONGITUD
     # ========================================================
 
-    delta = (
-        pd.Series(
-            delta
-        )
-        .rolling(
-            3,
-            center=True,
-            min_periods=1,
-        )
-        .mean()
-        .to_numpy(
-            dtype=float
-        )
-    )
+    if len(niveles) < STRESS_DAYS:
 
-    peak_idx = int(
-        np.nanargmax(
-            delta
-        )
-    )
+        if len(niveles) == 0:
 
-    # ========================================================
-    # FASE DE CRECIDA
-    # ========================================================
+            return np.zeros(
+                STRESS_DAYS,
+                dtype=float,
+            )
 
-    rising = (
-        delta[
-            :peak_idx + 1
-        ]
-        .copy()
-    )
-
-    # Durante la crecida evitamos bajadas pequeñas
-    rising = np.maximum.accumulate(
-        rising
-    )
-
-    # ========================================================
-    # FASE POST-PICO
-    # ========================================================
-
-    falling = (
-        delta[
-            peak_idx:
-        ]
-        .copy()
-    )
-
-    # Conservamos la bajante real histórica,
-    # pero suavizada.
-
-    falling = (
-        pd.Series(
-            falling
-        )
-        .rolling(
-            5,
-            center=True,
-            min_periods=1,
-        )
-        .mean()
-        .to_numpy(
-            dtype=float
-        )
-    )
-
-    shape = np.concatenate(
-        [
-            rising[:-1],
-            falling,
-        ]
-    )
-
-    if len(shape) < STRESS_DAYS:
-
-        shape = np.pad(
-            shape,
+        niveles = np.pad(
+            niveles,
             (
                 0,
                 STRESS_DAYS
-                - len(shape),
+                - len(niveles),
             ),
             mode="edge",
         )
 
-    return shape[
-        :STRESS_DAYS
-    ]
+    elif len(niveles) > STRESS_DAYS:
+
+        niveles = niveles[
+            :STRESS_DAYS
+        ]
+
+    # ========================================================
+    # COMPLETAR CUALQUIER NAN RESIDUAL
+    # ========================================================
+
+    niveles = (
+        pd.Series(niveles)
+        .interpolate(
+            limit_direction="both"
+        )
+        .ffill()
+        .bfill()
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+    if not np.all(
+        np.isfinite(niveles)
+    ):
+
+        return np.zeros(
+            STRESS_DAYS,
+            dtype=float,
+        )
+
+    nivel_inicial = float(
+        niveles[0]
+    )
+
+    # Diferencia respecto del inicio histórico
+    shape = (
+        niveles
+        - nivel_inicial
+    )
+
+    # ========================================================
+    # SUAVIZACIÓN
+    # ========================================================
+
+    shape = (
+        pd.Series(shape)
+        .rolling(
+            window=3,
+            center=True,
+            min_periods=1,
+        )
+        .mean()
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+    # ========================================================
+    # IDENTIFICAR PICO
+    # ========================================================
+
+    peak_idx = int(
+        np.argmax(shape)
+    )
+
+    # ========================================================
+    # ETAPA DE CRECIDA
+    # ========================================================
+
+    subida = shape[
+        :peak_idx + 1
+    ].copy()
+
+    # Evitar pequeñas oscilaciones negativas antes del pico.
+    subida = np.maximum.accumulate(
+        subida
+    )
+
+    # ========================================================
+    # ETAPA DESPUÉS DEL PICO
+    # ========================================================
+
+    bajada = shape[
+        peak_idx + 1:
+    ].copy()
+
+    if len(bajada) > 0:
+
+        bajada = (
+            pd.Series(bajada)
+            .rolling(
+                window=5,
+                center=True,
+                min_periods=1,
+            )
+            .mean()
+            .to_numpy(
+                dtype=float
+            )
+        )
+
+    # ========================================================
+    # UNIR
+    # ========================================================
+
+    shape_final = np.concatenate(
+        [
+            subida,
+            bajada,
+        ]
+    )
+
+    # ========================================================
+    # EN ESCENARIO SEVERO NO BAJAR POR DEBAJO DEL NIVEL
+    # DE PARTIDA
+    # ========================================================
+
+    shape_final = np.maximum(
+        shape_final,
+        0.0,
+    )
+
+    # ========================================================
+    # LONGITUD EXACTA = 60
+    # ========================================================
+
+    if len(shape_final) < STRESS_DAYS:
+
+        shape_final = np.pad(
+            shape_final,
+            (
+                0,
+                STRESS_DAYS
+                - len(shape_final),
+            ),
+            mode="edge",
+        )
+
+    elif len(shape_final) > STRESS_DAYS:
+
+        shape_final = shape_final[
+            :STRESS_DAYS
+        ]
+
+    return shape_final.astype(
+        float
+    )
 
 
 # ============================================================
-# CREAR ESCENARIO DESDE EVENTO
+# CONSTRUIR ESCENARIO
 # ============================================================
 
 def _crear_escenario(
     hist,
     event,
-    factor=1.0,
 ):
 
-    if event is None:
+    if (
+        hist is None
+        or not isinstance(
+            hist,
+            pd.DataFrame,
+        )
+        or hist.empty
+        or event is None
+    ):
 
         return pd.DataFrame()
 
     nivel_actual = _safe_last(
-        hist[
-            "nivel"
-        ]
+        hist["nivel"]
     )
 
     if pd.isna(
@@ -923,43 +1026,42 @@ def _crear_escenario(
 
         return pd.DataFrame()
 
-    ultima_fecha = (
-        hist[
-            "datetime"
-        ]
-        .max()
+    ultima_fecha = pd.to_datetime(
+        hist["datetime"].max()
     )
 
     future_dates = pd.date_range(
-        ultima_fecha
-        + pd.Timedelta(
-            days=1
+        start=(
+            ultima_fecha
+            + pd.Timedelta(days=1)
         ),
-        periods=
-            STRESS_DAYS,
+        periods=STRESS_DAYS,
         freq="D",
     )
+
+    # ========================================================
+    # FORMA DEL EVENTO
+    # ========================================================
 
     shape = _event_shape(
         event
     )
 
-    shape = (
-        shape
-        * float(
-            factor
-        )
-    )
+    if len(shape) != STRESS_DAYS:
+
+        return pd.DataFrame()
 
     # ========================================================
-    # NO PERMITIR NIVEL NEGATIVO
+    # TRASLADAR EVENTO AL NIVEL ACTUAL
     # ========================================================
 
     levels = (
-        nivel_actual
+        float(nivel_actual)
         + shape
     )
 
+    # Límite técnico.
+    # La visualización queda siempre 0–7 m.
     levels = np.clip(
         levels,
         0.0,
@@ -967,138 +1069,124 @@ def _crear_escenario(
     )
 
     # ========================================================
-    # SUAVIZACIÓN FINAL
+    # ASEGURAR ARRANQUE EXACTO
     # ========================================================
 
-    levels = (
-        pd.Series(
-            levels
-        )
-        .rolling(
-            3,
-            center=True,
-            min_periods=1,
-        )
-        .mean()
-        .to_numpy(
-            dtype=float
-        )
-    )
-
-    # Forzar exactamente el nivel real de partida
-    # en la primera jornada.
-
-    levels[
-        0
-    ] = max(
-        nivel_actual,
-        levels[
-            0
-        ],
+    levels[0] = float(
+        nivel_actual
     )
 
     block = (
-        event[
-            "block"
-        ]
+        event["block"]
         .copy()
-        .reset_index(
-            drop=True
-        )
+        .reset_index(drop=True)
     )
 
-    results = []
+    # ========================================================
+    # CREAR SALIDA
+    # ========================================================
 
-    prev = nivel_actual
+    registros = []
+
+    nivel_anterior = float(
+        nivel_actual
+    )
 
     for i in range(
         STRESS_DAYS
     ):
 
+        nivel = float(
+            levels[i]
+        )
+
         if i < len(block):
 
-            source = block.iloc[
-                i
-            ]
+            source = block.iloc[i]
 
-            rain = _safe_float(
+            lluvia = _safe_float(
                 source.get(
                     "precip_mm",
-                    0.0,
+                    np.nan,
                 ),
-                0.0,
+                default=0.0,
             )
 
-            q = _safe_float(
+            caudal = _safe_float(
                 source.get(
                     "caudal_m3s",
                     np.nan,
-                )
+                ),
+                default=np.nan,
             )
 
-            up = _safe_float(
+            upstream = _safe_float(
                 source.get(
                     "upstream_mean",
                     np.nan,
-                )
+                ),
+                default=np.nan,
             )
 
-            source_date = source[
-                "datetime"
-            ]
+            fecha_origen = source.get(
+                "datetime",
+                pd.NaT,
+            )
 
         else:
 
-            rain = 0.0
-            q = np.nan
-            up = np.nan
-            source_date = pd.NaT
+            lluvia = 0.0
+            caudal = np.nan
+            upstream = np.nan
+            fecha_origen = pd.NaT
 
-        current = float(
-            levels[
-                i
-            ]
-        )
-
-        results.append(
+        registros.append(
             {
                 "datetime":
-                    future_dates[
-                        i
-                    ],
+                    future_dates[i],
 
                 "prediction":
-                    current,
+                    nivel,
 
                 "nivel_base":
-                    prev,
+                    nivel_anterior,
 
                 "variacion_dia":
-                    current - prev,
+                    nivel
+                    - nivel_anterior,
+
+                "crecimiento_desde_actual":
+                    nivel
+                    - nivel_actual,
 
                 "precip_mm":
-                    rain,
+                    max(
+                        lluvia,
+                        0.0,
+                    )
+                    if pd.notna(lluvia)
+                    else 0.0,
 
                 "caudal_m3s":
-                    q,
+                    caudal,
 
                 "upstream_mean":
-                    up,
+                    upstream,
 
                 "source_date":
-                    source_date,
+                    fecha_origen,
             }
         )
 
-        prev = current
+        nivel_anterior = nivel
 
     return pd.DataFrame(
-        results
+        registros
     )
 
 
 # ============================================================
-# ENVOLVENTE HISTÓRICA DIARIA
+# ENVOLVENTE HISTÓRICA
 # ============================================================
 
 def _envolvente_historica_diaria(
@@ -1114,27 +1202,19 @@ def _envolvente_historica_diaria(
 
         return pd.DataFrame()
 
-    nivel[
-        "month"
-    ] = (
-        nivel[
-            "datetime"
-        ]
+    nivel["month"] = (
+        nivel["datetime"]
         .dt
         .month
     )
 
-    nivel[
-        "day"
-    ] = (
-        nivel[
-            "datetime"
-        ]
+    nivel["day"] = (
+        nivel["datetime"]
         .dt
         .day
     )
 
-    env = (
+    resumen = (
         nivel
         .groupby(
             [
@@ -1144,20 +1224,21 @@ def _envolvente_historica_diaria(
             as_index=False,
         )
         .agg(
-
             nivel_min_historico=(
                 "nivel",
                 "min",
             ),
-
             nivel_max_historico=(
                 "nivel",
                 "max",
             ),
-
             nivel_promedio_historico=(
                 "nivel",
                 "mean",
+            ),
+            registros=(
+                "nivel",
+                "count",
             ),
         )
     )
@@ -1172,28 +1253,20 @@ def _envolvente_historica_diaria(
         }
     )
 
-    future[
-        "month"
-    ] = (
-        future[
-            "datetime"
-        ]
+    future["month"] = (
+        future["datetime"]
         .dt
         .month
     )
 
-    future[
-        "day"
-    ] = (
-        future[
-            "datetime"
-        ]
+    future["day"] = (
+        future["datetime"]
         .dt
         .day
     )
 
     return future.merge(
-        env,
+        resumen,
         on=[
             "month",
             "day",
@@ -1211,69 +1284,102 @@ def _scenario_metrics(
     nivel_actual,
 ):
 
-    if scenario.empty:
+    if (
+        scenario is None
+        or not isinstance(
+            scenario,
+            pd.DataFrame,
+        )
+        or scenario.empty
+    ):
 
         return {}
 
-    idx = (
-        scenario[
-            "prediction"
-        ]
-        .idxmax()
+    valores = pd.to_numeric(
+        scenario["prediction"],
+        errors="coerce",
     )
 
-    max_level = float(
+    if valores.notna().sum() == 0:
+
+        return {}
+
+    idx = valores.idxmax()
+
+    maximo = float(
+        valores.loc[idx]
+    )
+
+    fecha = pd.to_datetime(
         scenario.loc[
             idx,
-            "prediction"
+            "datetime",
         ]
     )
 
-    max_date = pd.to_datetime(
-        scenario.loc[
-            idx,
-            "datetime"
-        ]
+    final = float(
+        valores.iloc[-1]
     )
 
-    final_level = float(
-        scenario[
-            "prediction"
-        ]
-        .iloc[
-            -1
-        ]
-    )
-
-    days_to_peak = int(
-        scenario.loc[
-            idx
-        ].name
-        + 1
+    posicion = int(
+        scenario.index.get_loc(idx)
     )
 
     return {
-
         "max":
-            max_level,
+            maximo,
 
         "date":
-            max_date,
+            fecha,
 
         "growth":
-            max_level
+            maximo
             - nivel_actual,
 
         "final":
-            final_level,
+            final,
 
         "days_to_peak":
-            days_to_peak,
+            posicion + 1,
     }
 
 
 # ============================================================
-# RENDER
+# GRÁFICO BASE 0–7 m
+# ============================================================
+
+def _aplicar_escala_nivel(
+    fig,
+    height=520,
+):
+
+    fig.update_layout(
+        height=height,
+        margin=dict(
+            l=10,
+            r=10,
+            t=40,
+            b=10,
+        ),
+        hovermode="x unified",
+    )
+
+    fig.update_yaxes(
+        title_text="Nivel hidrométrico (m)",
+        range=[
+            Y_MIN,
+            Y_MAX,
+        ],
+        dtick=
+            Y_STEP,
+        autorange=False,
+    )
+
+    return fig
+
+
+# ============================================================
+# RENDER PRINCIPAL
 # ============================================================
 
 def render_stress_scenario(
@@ -1289,12 +1395,12 @@ def render_stress_scenario(
 
     st.caption(
         f"{STRESS_VERSION} · "
-        "Simulación histórica desde el nivel real actual. "
-        "Escenarios P90, P95 y peor creciente registrada."
+        "Simulación desde el nivel real actual. "
+        "Escenarios P90, P95 y peor creciente histórica."
     )
 
     # ========================================================
-    # HISTÓRICO
+    # PREPARAR HISTÓRICO
     # ========================================================
 
     hist = _armar_historico(
@@ -1303,25 +1409,26 @@ def render_stress_scenario(
         upstream_history=upstream_history,
     )
 
-    if (
-        hist.empty
-        or len(
-            hist
-        )
-        < MIN_HISTORY_DAYS
-    ):
+    if hist.empty:
 
         st.info(
-            "No hay suficiente historial para calcular "
-            "los escenarios severos."
+            "No existen datos históricos suficientes."
+        )
+
+        return
+
+    if len(hist) < MIN_HISTORY_DAYS:
+
+        st.info(
+            "Se requieren al menos "
+            f"{MIN_HISTORY_DAYS} días históricos. "
+            f"Disponibles: {len(hist)}."
         )
 
         return
 
     nivel_actual = _safe_last(
-        hist[
-            "nivel"
-        ]
+        hist["nivel"]
     )
 
     if pd.isna(
@@ -1335,68 +1442,66 @@ def render_stress_scenario(
         return
 
     # ========================================================
-    # EVENTOS HISTÓRICOS
+    # BUSCAR CRECIDAS HISTÓRICAS
     # ========================================================
 
     eventos = _buscar_eventos_crecida(
-        hist
+        hist,
+        days=STRESS_DAYS,
     )
 
     if not eventos:
 
         st.info(
-            "No se encontraron eventos históricos "
-            "de creciente suficientes."
+            "No fue posible identificar eventos "
+            "históricos continuos de creciente."
         )
 
         return
-
-    peor_evento = eventos[
-        0
-    ]
-
-    evento_p95 = _evento_percentil(
-        eventos,
-        0.95,
-    )
 
     evento_p90 = _evento_percentil(
         eventos,
         0.90,
     )
 
+    evento_p95 = _evento_percentil(
+        eventos,
+        0.95,
+    )
+
+    peor_evento = _peor_evento(
+        eventos
+    )
+
     # ========================================================
-    # ESCENARIOS
+    # CONSTRUIR ESCENARIOS
     # ========================================================
 
-    scenario_worst = _crear_escenario(
+    scenario_p90 = _crear_escenario(
         hist,
-        peor_evento,
-        factor=1.00,
+        evento_p90,
     )
 
     scenario_p95 = _crear_escenario(
         hist,
         evento_p95,
-        factor=1.00,
     )
 
-    scenario_p90 = _crear_escenario(
+    scenario_worst = _crear_escenario(
         hist,
-        evento_p90,
-        factor=1.00,
+        peor_evento,
     )
 
     if scenario_worst.empty:
 
-        st.info(
-            "No fue posible construir el peor escenario."
+        st.error(
+            "No fue posible construir el peor escenario histórico."
         )
 
         return
 
     # ========================================================
-    # ENVOLVENTE
+    # ENVOLVENTE HISTÓRICA
     # ========================================================
 
     envelope = _envolvente_historica_diaria(
@@ -1417,6 +1522,7 @@ def render_stress_scenario(
                         "nivel_min_historico",
                         "nivel_max_historico",
                         "nivel_promedio_historico",
+                        "registros",
                     ]
                 ],
                 on="datetime",
@@ -1428,8 +1534,8 @@ def render_stress_scenario(
     # MÉTRICAS
     # ========================================================
 
-    m_worst = _scenario_metrics(
-        scenario_worst,
+    m90 = _scenario_metrics(
+        scenario_p90,
         nivel_actual,
     )
 
@@ -1438,13 +1544,13 @@ def render_stress_scenario(
         nivel_actual,
     )
 
-    m90 = _scenario_metrics(
-        scenario_p90,
+    mw = _scenario_metrics(
+        scenario_worst,
         nivel_actual,
     )
 
     st.markdown(
-        "**Resumen de riesgo histórico**"
+        "### Resumen de escenarios"
     )
 
     c1, c2, c3, c4 = st.columns(
@@ -1452,42 +1558,42 @@ def render_stress_scenario(
     )
 
     c1.metric(
-        "Nivel actual",
+        "Nivel real actual",
         f"{nivel_actual:.2f} m",
     )
 
     c2.metric(
-        "P90 máximo",
+        "P90 · máximo",
         (
             f"{m90['max']:.2f} m"
             if m90
             else "--"
         ),
         (
-            f"+{m90['growth']:.2f} m"
+            f"{m90['growth']:+.2f} m"
             if m90
             else None
         ),
     )
 
     c3.metric(
-        "P95 máximo",
+        "P95 · máximo",
         (
             f"{m95['max']:.2f} m"
             if m95
             else "--"
         ),
         (
-            f"+{m95['growth']:.2f} m"
+            f"{m95['growth']:+.2f} m"
             if m95
             else None
         ),
     )
 
     c4.metric(
-        "Peor caso",
-        f"{m_worst['max']:.2f} m",
-        f"+{m_worst['growth']:.2f} m",
+        "Peor caso · máximo",
+        f"{mw['max']:.2f} m",
+        f"{mw['growth']:+.2f} m",
     )
 
     # ========================================================
@@ -1500,14 +1606,14 @@ def render_stress_scenario(
 
     d1.metric(
         "Días hasta pico",
-        m_worst[
+        mw[
             "days_to_peak"
         ],
     )
 
     d2.metric(
-        "Fecha pico",
-        m_worst[
+        "Fecha del pico",
+        mw[
             "date"
         ].strftime(
             "%d/%m/%Y"
@@ -1516,19 +1622,13 @@ def render_stress_scenario(
 
     d3.metric(
         "Nivel día 60",
-        f"{m_worst['final']:.2f} m",
-        f"{m_worst['final'] - nivel_actual:+.2f} m",
-    )
-
-    historical_growth = float(
-        peor_evento[
-            "growth"
-        ]
+        f"{mw['final']:.2f} m",
+        f"{mw['final'] - nivel_actual:+.2f} m",
     )
 
     d4.metric(
         "Crecida histórica patrón",
-        f"+{historical_growth:.2f} m",
+        f"{peor_evento['growth']:+.2f} m",
     )
 
     # ========================================================
@@ -1554,13 +1654,9 @@ def render_stress_scenario(
             .max()
         )
 
-    if pd.notna(
-        max_hist_periodo
-    ):
-
         st.caption(
-            "Máximo histórico registrado para las fechas "
-            f"del horizonte: **{max_hist_periodo:.2f} m**."
+            "Máximo histórico para las fechas del horizonte: "
+            f"**{max_hist_periodo:.2f} m**."
         )
 
     # ========================================================
@@ -1569,7 +1665,10 @@ def render_stress_scenario(
 
     fig = go.Figure()
 
-    # Máximo histórico diario
+    # ========================================================
+    # MÁXIMO HISTÓRICO
+    # ========================================================
+
     if (
         "nivel_max_historico"
         in scenario_worst.columns
@@ -1589,10 +1688,19 @@ def render_stress_scenario(
                     color="#d62728",
                     width=2,
                 ),
+                hovertemplate=(
+                    "%{x|%d/%m/%Y}"
+                    "<br>"
+                    "Máximo histórico: %{y:.2f} m"
+                    "<extra></extra>"
+                ),
             )
         )
 
-    # Mínimo histórico diario
+    # ========================================================
+    # MÍNIMO HISTÓRICO
+    # ========================================================
+
     if (
         "nivel_min_historico"
         in scenario_worst.columns
@@ -1612,10 +1720,19 @@ def render_stress_scenario(
                     color="#2ca02c",
                     width=2,
                 ),
+                hovertemplate=(
+                    "%{x|%d/%m/%Y}"
+                    "<br>"
+                    "Mínimo histórico: %{y:.2f} m"
+                    "<extra></extra>"
+                ),
             )
         )
 
+    # ========================================================
     # P90
+    # ========================================================
+
     if not scenario_p90.empty:
 
         fig.add_trace(
@@ -1627,16 +1744,25 @@ def render_stress_scenario(
                     "prediction"
                 ],
                 mode="lines",
-                name="Escenario P90",
+                name="P90",
                 line=dict(
                     color="#17becf",
                     width=2,
                     dash="dot",
                 ),
+                hovertemplate=(
+                    "%{x|%d/%m/%Y}"
+                    "<br>"
+                    "P90: %{y:.2f} m"
+                    "<extra></extra>"
+                ),
             )
         )
 
+    # ========================================================
     # P95
+    # ========================================================
+
     if not scenario_p95.empty:
 
         fig.add_trace(
@@ -1648,16 +1774,25 @@ def render_stress_scenario(
                     "prediction"
                 ],
                 mode="lines",
-                name="Escenario P95",
+                name="P95",
                 line=dict(
                     color="#9467bd",
                     width=3,
                     dash="dash",
                 ),
+                hovertemplate=(
+                    "%{x|%d/%m/%Y}"
+                    "<br>"
+                    "P95: %{y:.2f} m"
+                    "<extra></extra>"
+                ),
             )
         )
 
-    # Peor caso
+    # ========================================================
+    # PEOR CASO
+    # ========================================================
+
     fig.add_trace(
         go.Scatter(
             x=scenario_worst[
@@ -1675,23 +1810,36 @@ def render_stress_scenario(
             marker=dict(
                 size=5,
             ),
+            hovertemplate=(
+                "%{x|%d/%m/%Y}"
+                "<br>"
+                "Peor caso: %{y:.2f} m"
+                "<extra></extra>"
+            ),
         )
     )
 
-    # Nivel actual
+    # ========================================================
+    # NIVEL REAL
+    # ========================================================
+
     fig.add_hline(
         y=nivel_actual,
         line_dash="dash",
         line_width=2,
+        line_color="black",
         annotation_text=(
             f"Nivel real de partida: "
             f"{nivel_actual:.2f} m"
         ),
     )
 
-    # Pico
+    # ========================================================
+    # PICO
+    # ========================================================
+
     fig.add_vline(
-        x=m_worst[
+        x=mw[
             "date"
         ],
         line_dash="dot",
@@ -1699,35 +1847,23 @@ def render_stress_scenario(
     )
 
     fig.add_annotation(
-        x=m_worst[
+        x=mw[
             "date"
         ],
-        y=m_worst[
+        y=mw[
             "max"
         ],
         text=(
             "Pico peor caso"
             "<br>"
-            f"{m_worst['max']:.2f} m"
+            f"{mw['max']:.2f} m"
         ),
         showarrow=True,
         arrowhead=2,
         yshift=25,
     )
 
-    # ========================================================
-    # ESCALA FIJA 0–7 m
-    # ========================================================
-
     fig.update_layout(
-        height=550,
-        margin=dict(
-            l=10,
-            r=10,
-            t=35,
-            b=10,
-        ),
-        hovermode="x unified",
         legend=dict(
             orientation="h",
             y=1.08,
@@ -1739,15 +1875,13 @@ def render_stress_scenario(
         tickformat="%d/%m/%Y",
     )
 
-    fig.update_yaxes(
-        title_text="Nivel hidrométrico (m)",
-        range=[
-            Y_MIN,
-            Y_MAX,
-        ],
-        dtick=
-            Y_STEP,
-        fixedrange=False,
+    # ========================================================
+    # ESCALA SIEMPRE 0–7 m
+    # ========================================================
+
+    _aplicar_escala_nivel(
+        fig,
+        height=550,
     )
 
     st.plotly_chart(
@@ -1759,14 +1893,14 @@ def render_stress_scenario(
     # DÍAS SOBRE MÁXIMO HISTÓRICO
     # ========================================================
 
-    days_above = 0
+    dias_supera = 0
 
     if (
         "nivel_max_historico"
         in scenario_worst.columns
     ):
 
-        comparison = (
+        comparacion = (
             scenario_worst[
                 "prediction"
             ]
@@ -1775,39 +1909,70 @@ def render_stress_scenario(
             ]
         )
 
-        days_above = int(
-            comparison
+        dias_supera = int(
+            comparacion
             .fillna(False)
             .sum()
         )
 
-    if days_above > 0:
+    if dias_supera > 0:
 
         st.warning(
-            f"⚠️ El peor escenario supera el máximo histórico "
-            f"diario de referencia durante **{days_above} días**. "
-            "Debe interpretarse como una simulación extrema y no "
-            "como un pronóstico esperado."
+            "⚠️ El peor escenario supera el máximo histórico "
+            f"diario de referencia durante **{dias_supera} días**."
         )
 
     # ========================================================
-    # GRÁFICO DEL EVENTO HISTÓRICO ORIGEN
+    # EVENTO HISTÓRICO UTILIZADO
     # ========================================================
-
-    st.markdown(
-        "**Evento histórico utilizado como patrón de peor caso**"
-    )
 
     block = (
         peor_evento[
             "block"
         ]
         .copy()
+        .reset_index(drop=True)
     )
 
-    historical_fig = go.Figure()
+    st.markdown(
+        "### 📚 Evento histórico utilizado como patrón"
+    )
 
-    historical_fig.add_trace(
+    e1, e2, e3, e4 = st.columns(
+        4
+    )
+
+    e1.metric(
+        "Inicio histórico",
+        peor_evento[
+            "start_date"
+        ].strftime(
+            "%d/%m/%Y"
+        ),
+    )
+
+    e2.metric(
+        "Nivel inicial histórico",
+        f"{peor_evento['initial']:.2f} m",
+    )
+
+    e3.metric(
+        "Máximo histórico evento",
+        f"{peor_evento['max']:.2f} m",
+    )
+
+    e4.metric(
+        "Crecimiento histórico",
+        f"+{peor_evento['growth']:.2f} m",
+    )
+
+    # ========================================================
+    # GRÁFICO EVENTO HISTÓRICO
+    # ========================================================
+
+    hist_fig = go.Figure()
+
+    hist_fig.add_trace(
         go.Scatter(
             x=block[
                 "datetime"
@@ -1826,134 +1991,129 @@ def render_stress_scenario(
         )
     )
 
-    historical_fig.update_layout(
-        height=320,
-        margin=dict(
-            l=5,
-            r=5,
-            t=10,
-            b=5,
-        ),
-        showlegend=False,
-    )
-
-    historical_fig.update_xaxes(
+    hist_fig.update_xaxes(
         title_text="Fecha histórica",
         tickformat="%d/%m/%Y",
     )
 
     # ========================================================
-    # ESCALA FIJA 0–7 m
+    # ESCALA 0–7 m
     # ========================================================
 
-    historical_fig.update_yaxes(
-        title_text="Nivel hidrométrico (m)",
-        range=[
-            Y_MIN,
-            Y_MAX,
-        ],
-        dtick=
-            Y_STEP,
+    _aplicar_escala_nivel(
+        hist_fig,
+        height=330,
     )
 
     st.plotly_chart(
-        historical_fig,
+        hist_fig,
         use_container_width=True,
     )
 
     # ========================================================
-    # VARIABLES DEL PEOR EVENTO
+    # VARIABLES DEL EVENTO
     # ========================================================
 
-    rain = (
-        block[
-            "precip_mm"
-        ]
+    lluvia = (
+        pd.to_numeric(
+            block[
+                "precip_mm"
+            ],
+            errors="coerce",
+        )
         .fillna(0.0)
     )
 
-    rain_total = float(
-        rain.sum()
+    lluvia_total = float(
+        lluvia.sum()
     )
 
-    rain_max = float(
-        rain.max()
+    lluvia_maxima = float(
+        lluvia.max()
     )
 
-    q_max = (
-        float(
+    caudal_maximo = np.nan
+
+    if (
+        block[
+            "caudal_m3s"
+        ]
+        .notna()
+        .any()
+    ):
+
+        caudal_maximo = float(
             block[
                 "caudal_m3s"
             ]
             .max()
         )
-        if block[
-            "caudal_m3s"
+
+    upstream_maximo = np.nan
+
+    if (
+        block[
+            "upstream_mean"
         ]
         .notna()
         .any()
-        else np.nan
-    )
+    ):
 
-    up_max = (
-        float(
+        upstream_maximo = float(
             block[
                 "upstream_mean"
             ]
             .max()
         )
-        if block[
-            "upstream_mean"
-        ]
-        .notna()
-        .any()
-        else np.nan
-    )
 
     v1, v2, v3, v4 = st.columns(
         4
     )
 
     v1.metric(
-        "Lluvia evento 60 d",
-        f"{_format_number(rain_total, 1)} mm",
+        "Lluvia acumulada",
+        f"{_format_number(lluvia_total, 1)} mm",
     )
 
     v2.metric(
-        "Máxima lluvia diaria",
-        f"{_format_number(rain_max, 1)} mm",
+        "Lluvia máxima diaria",
+        f"{_format_number(lluvia_maxima, 1)} mm",
     )
 
     v3.metric(
         "Caudal máximo",
         (
-            f"{_format_number(q_max, 0)} m³/s"
-            if pd.notna(q_max)
+            f"{_format_number(caudal_maximo, 0)} m³/s"
+            if pd.notna(
+                caudal_maximo
+            )
             else "--"
         ),
     )
 
     v4.metric(
-        "Aguas arriba máx. medio",
+        "Aguas arriba máximo medio",
         (
-            f"{up_max:.2f} m"
-            if pd.notna(up_max)
+            f"{upstream_maximo:.2f} m"
+            if pd.notna(
+                upstream_maximo
+            )
             else "--"
         ),
     )
 
     # ========================================================
-    # LLUVIA / CAUDAL
+    # LLUVIA Y CAUDAL
     # ========================================================
 
-    lluvia_col, caudal_col = st.columns(
+    rain_col, flow_col = st.columns(
         2
     )
 
-    with lluvia_col:
+    with rain_col:
 
         st.markdown(
-            "**🌧️ Lluvia del evento histórico**"
+            "#### 🌧️ Lluvia del evento"
         )
 
         rain_fig = go.Figure()
@@ -1963,9 +2123,8 @@ def render_stress_scenario(
                 x=block[
                     "datetime"
                 ],
-                y=block[
-                    "precip_mm"
-                ],
+                y=lluvia,
+                name="Lluvia",
             )
         )
 
@@ -1974,15 +2133,19 @@ def render_stress_scenario(
             margin=dict(
                 l=5,
                 r=5,
-                t=5,
+                t=10,
                 b=5,
             ),
             showlegend=False,
-            yaxis_title="mm/día",
         )
 
         rain_fig.update_xaxes(
             tickformat="%d/%m",
+        )
+
+        rain_fig.update_yaxes(
+            title_text="Precipitación (mm/día)",
+            rangemode="tozero",
         )
 
         st.plotly_chart(
@@ -1990,10 +2153,10 @@ def render_stress_scenario(
             use_container_width=True,
         )
 
-    with caudal_col:
+    with flow_col:
 
         st.markdown(
-            "**💧 Caudal del evento histórico**"
+            "#### 💧 Caudal del evento"
         )
 
         if (
@@ -2004,9 +2167,9 @@ def render_stress_scenario(
             .any()
         ):
 
-            q_fig = go.Figure()
+            flow_fig = go.Figure()
 
-            q_fig.add_trace(
+            flow_fig.add_trace(
                 go.Scatter(
                     x=block[
                         "datetime"
@@ -2015,53 +2178,58 @@ def render_stress_scenario(
                         "caudal_m3s"
                     ],
                     mode="lines+markers",
+                    name="Caudal",
                 )
             )
 
-            q_fig.update_layout(
+            flow_fig.update_layout(
                 height=280,
                 margin=dict(
                     l=5,
                     r=5,
-                    t=5,
+                    t=10,
                     b=5,
                 ),
                 showlegend=False,
-                yaxis_title="m³/s",
             )
 
-            q_fig.update_xaxes(
+            flow_fig.update_xaxes(
                 tickformat="%d/%m",
             )
 
+            flow_fig.update_yaxes(
+                title_text="Caudal (m³/s)",
+                rangemode="tozero",
+            )
+
             st.plotly_chart(
-                q_fig,
+                flow_fig,
                 use_container_width=True,
             )
 
         else:
 
             st.info(
-                "Sin caudal histórico disponible."
+                "No hay caudal histórico suficiente "
+                "para este evento."
             )
 
     # ========================================================
-    # TABLA DE AUDITORÍA
+    # AUDITORÍA DIARIA
     # ========================================================
 
     with st.expander(
-        "🔎 Auditoría del peor escenario · 60 días"
+        "🔎 Auditoría diaria del peor escenario · 60 días"
     ):
 
-        tabla = scenario_worst.copy()
+        tabla = (
+            scenario_worst
+            .copy()
+        )
 
-        tabla[
-            "Fecha"
-        ] = (
+        tabla["Fecha"] = (
             pd.to_datetime(
-                tabla[
-                    "datetime"
-                ]
+                tabla["datetime"]
             )
             .dt
             .strftime(
@@ -2069,79 +2237,46 @@ def render_stress_scenario(
             )
         )
 
-        tabla[
-            "Nivel base"
-        ] = (
-            tabla[
-                "nivel_base"
-            ]
-            .round(
-                2
-            )
+        tabla["Nivel base"] = (
+            tabla["nivel_base"]
+            .round(2)
         )
 
-        tabla[
-            "Variación diaria"
-        ] = (
-            tabla[
-                "variacion_dia"
-            ]
-            .round(
-                3
-            )
+        tabla["Variación diaria"] = (
+            tabla["variacion_dia"]
+            .round(3)
         )
 
-        tabla[
-            "Nivel escenario"
-        ] = (
+        tabla["Crecimiento acumulado"] = (
             tabla[
-                "prediction"
+                "crecimiento_desde_actual"
             ]
-            .round(
-                2
-            )
+            .round(2)
         )
 
-        tabla[
-            "Lluvia"
-        ] = (
-            tabla[
-                "precip_mm"
-            ]
-            .round(
-                1
-            )
+        tabla["Nivel escenario"] = (
+            tabla["prediction"]
+            .round(2)
         )
 
-        tabla[
-            "Caudal"
-        ] = (
-            tabla[
-                "caudal_m3s"
-            ]
-            .round(
-                0
-            )
+        tabla["Lluvia"] = (
+            tabla["precip_mm"]
+            .round(1)
         )
 
-        tabla[
-            "Aguas arriba"
-        ] = (
-            tabla[
-                "upstream_mean"
-            ]
-            .round(
-                2
-            )
+        tabla["Caudal"] = (
+            tabla["caudal_m3s"]
+            .round(0)
         )
 
-        tabla[
-            "Fecha histórica origen"
-        ] = (
+        tabla["Aguas arriba"] = (
+            tabla["upstream_mean"]
+            .round(2)
+        )
+
+        tabla["Fecha histórica origen"] = (
             pd.to_datetime(
-                tabla[
-                    "source_date"
-                ],
+                tabla["source_date"],
                 errors="coerce",
             )
             .dt
@@ -2157,6 +2292,7 @@ def render_stress_scenario(
             "Caudal",
             "Aguas arriba",
             "Variación diaria",
+            "Crecimiento acumulado",
             "Nivel escenario",
             "Fecha histórica origen",
         ]
@@ -2166,19 +2302,31 @@ def render_stress_scenario(
             in tabla.columns
         ):
 
-            tabla[
-                "Máximo histórico"
-            ] = (
+            tabla["Máximo histórico"] = (
                 tabla[
                     "nivel_max_historico"
                 ]
-                .round(
-                    2
-                )
+                .round(2)
             )
 
             columnas.append(
                 "Máximo histórico"
+            )
+
+        if (
+            "nivel_min_historico"
+            in tabla.columns
+        ):
+
+            tabla["Mínimo histórico"] = (
+                tabla[
+                    "nivel_min_historico"
+                ]
+                .round(2)
+            )
+
+            columnas.append(
+                "Mínimo histórico"
             )
 
         st.dataframe(
@@ -2190,44 +2338,60 @@ def render_stress_scenario(
         )
 
     # ========================================================
-    # EXPLICACIÓN
+    # INTERPRETACIÓN
     # ========================================================
 
     with st.expander(
-        "ℹ️ Interpretación de P90, P95 y peor caso"
+        "ℹ️ Cómo interpretar P90, P95 y peor caso"
     ):
 
         st.markdown(
             f"""
-            Todos los escenarios parten del nivel real disponible:
+            Los tres escenarios parten exactamente del último
+            nivel disponible de San Nicolás:
 
             **{nivel_actual:.2f} m**
 
-            **P90** representa una creciente ubicada aproximadamente
-            en el percentil 90 de las crecientes históricas de
+            **P90**
+
+            Representa aproximadamente una creciente ubicada en
+            el percentil 90 de las crecientes históricas de
             60 días encontradas.
 
-            **P95** representa una creciente todavía más severa.
+            **P95**
 
-            **Peor caso histórico** reproduce la forma completa de
-            la mayor creciente histórica encontrada en el historial,
-            trasladándola al nivel actual.
+            Representa una condición histórica todavía más severa.
 
-            A diferencia de la versión anterior, después del pico
-            el escenario puede **estabilizarse o comenzar una bajante**
-            siguiendo el comportamiento observado históricamente.
+            **Peor caso histórico**
 
-            Las líneas roja y verde corresponden al máximo y mínimo
-            histórico para cada fecha del calendario.
+            Selecciona la ventana continua de 60 días que produjo
+            la mayor suba de nivel observada dentro del historial.
 
-            Todos los gráficos de nivel hidrométrico están fijados
-            en una escala de **0 a 7 metros** para facilitar la
-            comparación visual entre paneles.
+            La trayectoria histórica completa se traslada al nivel
+            actual. Por eso conserva las tres etapas:
+
+            **crecida → pico → estabilización o bajante**.
+
+            Después del pico se permite una disminución del nivel
+            siguiendo la forma del episodio histórico.
+
+            Sin embargo, como este módulo representa específicamente
+            una condición severa de creciente, la trayectoria no se
+            traslada por debajo del nivel inicial actual.
+
+            Las líneas roja y verde indican respectivamente los
+            máximos y mínimos históricos correspondientes al mismo
+            día y mes del horizonte futuro.
+
+            Todos los gráficos de nivel hidrométrico utilizan
+            exactamente la misma escala:
+
+            **0 a 7 metros**.
             """
         )
 
     st.warning(
-        "Los escenarios P90, P95 y peor caso son simulaciones "
-        "históricas de estrés. No constituyen pronósticos ni alertas "
-        "oficiales."
+        "P90, P95 y peor caso histórico son escenarios "
+        "experimentales de estrés y no constituyen pronósticos "
+        "ni alertas oficiales."
     )
