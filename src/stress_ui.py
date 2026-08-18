@@ -5,13 +5,22 @@ import plotly.graph_objects as go
 
 
 # ============================================================
+# VERSIÓN
+# ============================================================
+
+STRESS_VERSION = "V11.6"
+
+
+# ============================================================
 # CONFIGURACIÓN
 # ============================================================
 
 STRESS_DAYS = 60
 
-LEVEL_MIN = 0.0
-LEVEL_MAX_INTERNAL = 12.0
+# Escala visual fija solicitada
+Y_MIN = 0.0
+Y_MAX = 7.0
+Y_STEP = 0.5
 
 MIN_HISTORY_DAYS = 90
 
@@ -22,9 +31,7 @@ EPS = 1e-9
 # UTILIDADES
 # ============================================================
 
-def _normalizar_datetime(
-    serie,
-):
+def _normalizar_datetime(serie):
 
     return (
         pd.to_datetime(
@@ -39,9 +46,7 @@ def _normalizar_datetime(
     )
 
 
-def _numeric(
-    serie,
-):
+def _numeric(serie):
 
     return pd.to_numeric(
         serie,
@@ -67,6 +72,28 @@ def _safe_float(
         pass
 
     return default
+
+
+def _safe_last(
+    serie,
+    default=np.nan,
+):
+
+    s = (
+        pd.to_numeric(
+            serie,
+            errors="coerce",
+        )
+        .dropna()
+    )
+
+    if s.empty:
+
+        return default
+
+    return float(
+        s.iloc[-1]
+    )
 
 
 def _format_number(
@@ -100,57 +127,7 @@ def _format_number(
     )
 
 
-def _safe_last(
-    serie,
-    default=np.nan,
-):
-
-    s = (
-        pd.to_numeric(
-            serie,
-            errors="coerce",
-        )
-        .dropna()
-    )
-
-    if s.empty:
-
-        return default
-
-    return float(
-        s.iloc[-1]
-    )
-
-
-def _safe_mean(
-    serie,
-    window=7,
-    default=np.nan,
-):
-
-    s = (
-        pd.to_numeric(
-            serie,
-            errors="coerce",
-        )
-        .dropna()
-        .tail(
-            window
-        )
-    )
-
-    if s.empty:
-
-        return default
-
-    return float(
-        s.mean()
-    )
-
-
-def _upstream_cols(
-    df,
-):
+def _upstream_cols(df):
 
     if (
         df is None
@@ -165,8 +142,7 @@ def _upstream_cols(
 
     return [
         c
-        for c
-        in df.columns
+        for c in df.columns
         if (
             c.startswith("nivel_")
             and c != "nivel"
@@ -181,12 +157,10 @@ def _upstream_cols(
 
 
 # ============================================================
-# PREPARAR NIVEL SAN NICOLÁS
+# NIVEL SAN NICOLÁS
 # ============================================================
 
-def _preparar_nivel(
-    df,
-):
+def _preparar_nivel(df):
 
     if (
         df is None
@@ -272,7 +246,7 @@ def _preparar_nivel(
 
 
 # ============================================================
-# PREPARAR LLUVIA Y CAUDAL
+# LLUVIA + CAUDAL
 # ============================================================
 
 def _preparar_exog(
@@ -377,7 +351,7 @@ def _preparar_exog(
 
 
 # ============================================================
-# PREPARAR AGUAS ARRIBA
+# AGUAS ARRIBA
 # ============================================================
 
 def _preparar_upstream(
@@ -535,6 +509,8 @@ def _armar_historico(
 
         return pd.DataFrame()
 
+    hist = nivel.copy()
+
     exog = _preparar_exog(
         exog_history
     )
@@ -542,8 +518,6 @@ def _armar_historico(
     upstream = _preparar_upstream(
         upstream_history
     )
-
-    hist = nivel.copy()
 
     if not exog.empty:
 
@@ -582,10 +556,6 @@ def _armar_historico(
             ]
         )
 
-    # ========================================================
-    # INTERPOLAR CAUDAL
-    # ========================================================
-
     if (
         hist[
             "caudal_m3s"
@@ -606,10 +576,6 @@ def _armar_historico(
                 limit_direction="both",
             )
         )
-
-    # ========================================================
-    # INTERPOLAR AGUAS ARRIBA
-    # ========================================================
 
     for col in [
         "upstream_mean",
@@ -655,23 +621,22 @@ def _armar_historico(
 
 
 # ============================================================
-# BUSCAR VENTANA DE MÁXIMA CRECIDA REAL
+# BUSCAR TODAS LAS CRECIDAS DE 60 DÍAS
 # ============================================================
 
-def _buscar_maxima_crecida(
+def _buscar_eventos_crecida(
     hist,
     days=STRESS_DAYS,
 ):
 
+    eventos = []
+
     if (
-        hist is None
-        or hist.empty
+        hist.empty
         or len(hist) < days
     ):
 
-        return pd.DataFrame()
-
-    best = None
+        return eventos
 
     for start_idx in range(
         0,
@@ -685,9 +650,12 @@ def _buscar_maxima_crecida(
                 start_idx + days
             ]
             .copy()
+            .reset_index(
+                drop=True
+            )
         )
 
-        niveles = (
+        nivel = (
             block[
                 "nivel"
             ]
@@ -695,527 +663,125 @@ def _buscar_maxima_crecida(
         )
 
         if len(
-            niveles
-        ) < max(
-            30,
-            int(
-                days
-                * 0.7
-            ),
-        ):
+            nivel
+        ) < 40:
 
             continue
 
         nivel_inicio = float(
-            niveles.iloc[
+            nivel.iloc[
                 0
             ]
         )
 
-        nivel_max = float(
-            niveles.max()
+        nivel_maximo = float(
+            nivel.max()
         )
 
-        idx_local_max = (
+        peak_idx = int(
             block[
                 "nivel"
             ]
             .idxmax()
         )
 
-        pos_max = (
-            block.index
-            .get_loc(
-                idx_local_max
-            )
-        )
-
         crecimiento = (
-            nivel_max
+            nivel_maximo
             - nivel_inicio
         )
 
-        # ====================================================
-        # VARIABLES DEL EVENTO
-        # ====================================================
+        if crecimiento <= 0:
 
-        lluvia_60 = float(
-            block[
-                "precip_mm"
-            ]
-            .fillna(0.0)
-            .sum()
+            continue
+
+        eventos.append(
+            {
+                "growth":
+                    crecimiento,
+
+                "initial":
+                    nivel_inicio,
+
+                "max":
+                    nivel_maximo,
+
+                "peak_idx":
+                    peak_idx,
+
+                "block":
+                    block,
+            }
         )
 
-        lluvia_15_max = float(
-            block[
-                "precip_mm"
+    eventos.sort(
+        key=lambda x:
+            x[
+                "growth"
+            ],
+        reverse=True,
+    )
+
+    return eventos
+
+
+# ============================================================
+# ELEGIR EVENTO POR PERCENTIL
+# ============================================================
+
+def _evento_percentil(
+    eventos,
+    percentile,
+):
+
+    if not eventos:
+
+        return None
+
+    growths = np.array(
+        [
+            e[
+                "growth"
             ]
-            .fillna(0.0)
-            .rolling(
-                15,
-                min_periods=1,
-            )
-            .sum()
-            .max()
+            for e in eventos
+        ],
+        dtype=float,
+    )
+
+    target = float(
+        np.quantile(
+            growths,
+            percentile,
         )
+    )
 
-        if (
-            block[
-                "caudal_m3s"
-            ]
-            .notna()
-            .any()
-        ):
-
-            caudal_max = float(
-                block[
-                    "caudal_m3s"
-                ]
-                .max()
+    idx = int(
+        np.argmin(
+            np.abs(
+                growths
+                - target
             )
-
-            caudal_mean = float(
-                block[
-                    "caudal_m3s"
-                ]
-                .mean()
-            )
-
-        else:
-
-            caudal_max = np.nan
-            caudal_mean = np.nan
-
-        if (
-            block[
-                "upstream_mean"
-            ]
-            .notna()
-            .any()
-        ):
-
-            upstream_max = float(
-                block[
-                    "upstream_mean"
-                ]
-                .max()
-            )
-
-        else:
-
-            upstream_max = np.nan
-
-        # ====================================================
-        # SCORE
-        # ====================================================
-
-        # La variable principal es la CRECIDA REAL.
-        # Los drivers sólo sirven como desempate.
-
-        score = (
-            crecimiento
-            * 100.0
         )
+    )
 
-        score += (
-            min(
-                lluvia_60,
-                1000.0,
-            )
-            * 0.002
-        )
+    return eventos[
+        idx
+    ]
 
-        score += (
-            min(
-                lluvia_15_max,
-                500.0,
-            )
-            * 0.004
-        )
 
-        if pd.notna(
-            caudal_max
-        ):
+# ============================================================
+# FORMA COMPLETA DEL EVENTO
+# ============================================================
 
-            score += (
-                caudal_max
-                / 100000.0
-            )
-
-        if pd.notna(
-            upstream_max
-        ):
-
-            score += (
-                upstream_max
-                * 0.02
-            )
-
-        candidate = {
-
-            "score":
-                score,
-
-            "growth":
-                crecimiento,
-
-            "nivel_inicio":
-                nivel_inicio,
-
-            "nivel_max":
-                nivel_max,
-
-            "peak_position":
-                pos_max,
-
-            "rain_60":
-                lluvia_60,
-
-            "rain_15_max":
-                lluvia_15_max,
-
-            "q_max":
-                caudal_max,
-
-            "q_mean":
-                caudal_mean,
-
-            "up_max":
-                upstream_max,
-
-            "block":
-                block,
-        }
-
-        if (
-            best is None
-            or candidate[
-                "score"
-            ]
-            > best[
-                "score"
-            ]
-        ):
-
-            best = candidate
-
-    if best is None:
-
-        return pd.DataFrame()
+def _event_shape(
+    event,
+):
 
     block = (
-        best[
+        event[
             "block"
         ]
         .copy()
-        .reset_index(
-            drop=True
-        )
     )
-
-    block.attrs[
-        "growth"
-    ] = best[
-        "growth"
-    ]
-
-    block.attrs[
-        "nivel_inicio"
-    ] = best[
-        "nivel_inicio"
-    ]
-
-    block.attrs[
-        "nivel_max"
-    ] = best[
-        "nivel_max"
-    ]
-
-    block.attrs[
-        "peak_position"
-    ] = best[
-        "peak_position"
-    ]
-
-    block.attrs[
-        "rain_60"
-    ] = best[
-        "rain_60"
-    ]
-
-    block.attrs[
-        "rain_15_max"
-    ] = best[
-        "rain_15_max"
-    ]
-
-    block.attrs[
-        "q_max"
-    ] = best[
-        "q_max"
-    ]
-
-    block.attrs[
-        "q_mean"
-    ] = best[
-        "q_mean"
-    ]
-
-    block.attrs[
-        "up_max"
-    ] = best[
-        "up_max"
-    ]
-
-    return block
-
-
-# ============================================================
-# PERCENTILES HISTÓRICOS ALTOS
-# ============================================================
-
-def _historical_thresholds(
-    hist,
-):
-
-    thresholds = {}
-
-    # ========================================================
-    # LLUVIA
-    # ========================================================
-
-    rain = (
-        hist[
-            "precip_mm"
-        ]
-        .dropna()
-    )
-
-    if not rain.empty:
-
-        thresholds[
-            "rain_p90"
-        ] = float(
-            rain.quantile(
-                0.90
-            )
-        )
-
-        thresholds[
-            "rain_p95"
-        ] = float(
-            rain.quantile(
-                0.95
-            )
-        )
-
-        thresholds[
-            "rain_p99"
-        ] = float(
-            rain.quantile(
-                0.99
-            )
-        )
-
-        thresholds[
-            "rain_max"
-        ] = float(
-            rain.max()
-        )
-
-    else:
-
-        thresholds[
-            "rain_p90"
-        ] = 0.0
-
-        thresholds[
-            "rain_p95"
-        ] = 0.0
-
-        thresholds[
-            "rain_p99"
-        ] = 0.0
-
-        thresholds[
-            "rain_max"
-        ] = 0.0
-
-    # ========================================================
-    # CAUDAL
-    # ========================================================
-
-    q = (
-        hist[
-            "caudal_m3s"
-        ]
-        .dropna()
-    )
-
-    if not q.empty:
-
-        thresholds[
-            "q_p90"
-        ] = float(
-            q.quantile(
-                0.90
-            )
-        )
-
-        thresholds[
-            "q_p95"
-        ] = float(
-            q.quantile(
-                0.95
-            )
-        )
-
-        thresholds[
-            "q_p99"
-        ] = float(
-            q.quantile(
-                0.99
-            )
-        )
-
-        thresholds[
-            "q_max"
-        ] = float(
-            q.max()
-        )
-
-    else:
-
-        thresholds[
-            "q_p90"
-        ] = np.nan
-
-        thresholds[
-            "q_p95"
-        ] = np.nan
-
-        thresholds[
-            "q_p99"
-        ] = np.nan
-
-        thresholds[
-            "q_max"
-        ] = np.nan
-
-    # ========================================================
-    # AGUAS ARRIBA
-    # ========================================================
-
-    up = (
-        hist[
-            "upstream_mean"
-        ]
-        .dropna()
-    )
-
-    if not up.empty:
-
-        thresholds[
-            "up_p90"
-        ] = float(
-            up.quantile(
-                0.90
-            )
-        )
-
-        thresholds[
-            "up_p95"
-        ] = float(
-            up.quantile(
-                0.95
-            )
-        )
-
-        thresholds[
-            "up_p99"
-        ] = float(
-            up.quantile(
-                0.99
-            )
-        )
-
-        thresholds[
-            "up_max"
-        ] = float(
-            up.max()
-        )
-
-    else:
-
-        thresholds[
-            "up_p90"
-        ] = np.nan
-
-        thresholds[
-            "up_p95"
-        ] = np.nan
-
-        thresholds[
-            "up_p99"
-        ] = np.nan
-
-        thresholds[
-            "up_max"
-        ] = np.nan
-
-    return thresholds
-
-
-# ============================================================
-# LÍMITE HISTÓRICO DE VARIACIÓN DIARIA
-# ============================================================
-
-def _daily_change_limit(
-    hist,
-):
-
-    delta = (
-        hist[
-            "nivel"
-        ]
-        .diff()
-        .abs()
-        .dropna()
-    )
-
-    if delta.empty:
-
-        return 0.25
-
-    p995 = float(
-        delta.quantile(
-            0.995
-        )
-    )
-
-    return float(
-        np.clip(
-            p995,
-            0.08,
-            0.60,
-        )
-    )
-
-
-# ============================================================
-# CURVA HISTÓRICA DE CRECIDA NORMALIZADA
-# ============================================================
-
-def _historical_growth_shape(
-    block,
-):
-
-    if block.empty:
-
-        return np.zeros(
-            STRESS_DAYS
-        )
 
     niveles = (
         block[
@@ -1226,447 +792,122 @@ def _historical_growth_shape(
         )
     )
 
-    initial = niveles[
-        0
-    ]
+    initial = float(
+        niveles[
+            0
+        ]
+    )
 
-    growth = (
+    delta = (
         niveles
         - initial
     )
 
     # ========================================================
-    # IMPORTANTE
-    #
-    # Para un escenario de PEOR CRECIDA no usamos las
-    # bajantes históricas posteriores como crecimiento negativo.
-    #
-    # Conservamos el máximo crecimiento alcanzado hasta cada día.
+    # FILTRAR RUIDO PEQUEÑO
     # ========================================================
 
-    growth = np.maximum.accumulate(
-        growth
+    delta = (
+        pd.Series(
+            delta
+        )
+        .rolling(
+            3,
+            center=True,
+            min_periods=1,
+        )
+        .mean()
+        .to_numpy(
+            dtype=float
+        )
     )
 
-    growth = np.maximum(
-        growth,
-        0.0,
+    peak_idx = int(
+        np.nanargmax(
+            delta
+        )
     )
 
-    if len(
-        growth
-    ) < STRESS_DAYS:
+    # ========================================================
+    # FASE DE CRECIDA
+    # ========================================================
 
-        growth = np.pad(
-            growth,
+    rising = (
+        delta[
+            :peak_idx + 1
+        ]
+        .copy()
+    )
+
+    # Durante la crecida evitamos bajadas pequeñas
+    rising = np.maximum.accumulate(
+        rising
+    )
+
+    # ========================================================
+    # FASE POST-PICO
+    # ========================================================
+
+    falling = (
+        delta[
+            peak_idx:
+        ]
+        .copy()
+    )
+
+    # Conservamos la bajante real histórica,
+    # pero suavizada.
+
+    falling = (
+        pd.Series(
+            falling
+        )
+        .rolling(
+            5,
+            center=True,
+            min_periods=1,
+        )
+        .mean()
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+    shape = np.concatenate(
+        [
+            rising[:-1],
+            falling,
+        ]
+    )
+
+    if len(shape) < STRESS_DAYS:
+
+        shape = np.pad(
+            shape,
             (
                 0,
                 STRESS_DAYS
-                - len(
-                    growth
-                ),
+                - len(shape),
             ),
             mode="edge",
         )
 
-    return growth[
+    return shape[
         :STRESS_DAYS
     ]
 
 
 # ============================================================
-# CREAR DRIVERS SEVEROS
+# CREAR ESCENARIO DESDE EVENTO
 # ============================================================
 
-def _crear_drivers_severos(
+def _crear_escenario(
     hist,
-    block,
+    event,
+    factor=1.0,
 ):
 
-    thresholds = (
-        _historical_thresholds(
-            hist
-        )
-    )
-
-    source = (
-        block
-        .copy()
-        .reset_index(
-            drop=True
-        )
-    )
-
-    if len(
-        source
-    ) < STRESS_DAYS:
-
-        repetitions = int(
-            np.ceil(
-                STRESS_DAYS
-                / len(source)
-            )
-        )
-
-        source = pd.concat(
-            [
-                source
-            ]
-            * repetitions,
-            ignore_index=True,
-        )
-
-    source = (
-        source
-        .head(
-            STRESS_DAYS
-        )
-        .copy()
-    )
-
-    output = []
-
-    for i, row in source.iterrows():
-
-        # ====================================================
-        # LLUVIA
-        # ====================================================
-
-        rain_hist = _safe_float(
-            row.get(
-                "precip_mm",
-                np.nan,
-            )
-        )
-
-        if pd.isna(
-            rain_hist
-        ):
-
-            rain = thresholds[
-                "rain_p95"
-            ]
-
-        elif rain_hist > 0:
-
-            # Llevar los días lluviosos del evento hacia
-            # condiciones severas sin convertir todos en el máximo.
-
-            rain = max(
-                rain_hist,
-                thresholds[
-                    "rain_p90"
-                ],
-            )
-
-            rain = min(
-                rain,
-                thresholds[
-                    "rain_max"
-                ],
-            )
-
-        else:
-
-            rain = 0.0
-
-        # ====================================================
-        # CAUDAL
-        # ====================================================
-
-        q_hist = _safe_float(
-            row.get(
-                "caudal_m3s",
-                np.nan,
-            )
-        )
-
-        if pd.isna(
-            q_hist
-        ):
-
-            q = thresholds[
-                "q_p95"
-            ]
-
-        else:
-
-            q = q_hist
-
-            if pd.notna(
-                thresholds[
-                    "q_p90"
-                ]
-            ):
-
-                q = max(
-                    q,
-                    thresholds[
-                        "q_p90"
-                    ],
-                )
-
-            if pd.notna(
-                thresholds[
-                    "q_max"
-                ]
-            ):
-
-                q = min(
-                    q,
-                    thresholds[
-                        "q_max"
-                    ],
-                )
-
-        # ====================================================
-        # AGUAS ARRIBA
-        # ====================================================
-
-        up_hist = _safe_float(
-            row.get(
-                "upstream_mean",
-                np.nan,
-            )
-        )
-
-        if pd.isna(
-            up_hist
-        ):
-
-            up = thresholds[
-                "up_p95"
-            ]
-
-        else:
-
-            up = up_hist
-
-            if pd.notna(
-                thresholds[
-                    "up_p90"
-                ]
-            ):
-
-                up = max(
-                    up,
-                    thresholds[
-                        "up_p90"
-                    ],
-                )
-
-            if pd.notna(
-                thresholds[
-                    "up_max"
-                ]
-            ):
-
-                up = min(
-                    up,
-                    thresholds[
-                        "up_max"
-                    ],
-                )
-
-        output.append(
-            {
-                "source_date":
-                    row[
-                        "datetime"
-                    ],
-
-                "precip_mm":
-                    float(
-                        rain
-                        if pd.notna(rain)
-                        else 0.0
-                    ),
-
-                "caudal_m3s":
-                    (
-                        float(q)
-                        if pd.notna(q)
-                        else np.nan
-                    ),
-
-                "upstream_mean":
-                    (
-                        float(up)
-                        if pd.notna(up)
-                        else np.nan
-                    ),
-            }
-        )
-
-    return pd.DataFrame(
-        output
-    )
-
-
-# ============================================================
-# CALCULAR FUERZA DE LOS DRIVERS
-# ============================================================
-
-def _driver_strength(
-    drivers,
-    hist,
-):
-
-    thresholds = (
-        _historical_thresholds(
-            hist
-        )
-    )
-
-    score = []
-
-    rain_buffer = []
-
-    for _, row in drivers.iterrows():
-
-        rain = _safe_float(
-            row[
-                "precip_mm"
-            ],
-            0.0,
-        )
-
-        q = _safe_float(
-            row[
-                "caudal_m3s"
-            ],
-            np.nan,
-        )
-
-        up = _safe_float(
-            row[
-                "upstream_mean"
-            ],
-            np.nan,
-        )
-
-        rain_buffer.append(
-            max(
-                rain,
-                0.0,
-            )
-        )
-
-        rain7 = sum(
-            rain_buffer[
-                -7:
-            ]
-        )
-
-        components = []
-
-        # ====================================================
-        # LLUVIA
-        # ====================================================
-
-        rain_reference = max(
-            thresholds[
-                "rain_p95"
-            ]
-            * 3.0,
-            1.0,
-        )
-
-        components.append(
-            min(
-                rain7
-                / rain_reference,
-                2.0,
-            )
-        )
-
-        # ====================================================
-        # CAUDAL
-        # ====================================================
-
-        if (
-            pd.notna(q)
-            and pd.notna(
-                thresholds[
-                    "q_p95"
-                ]
-            )
-            and thresholds[
-                "q_p95"
-            ] > 0
-        ):
-
-            components.append(
-                min(
-                    q
-                    / thresholds[
-                        "q_p95"
-                    ],
-                    1.5,
-                )
-            )
-
-        # ====================================================
-        # UPSTREAM
-        # ====================================================
-
-        if (
-            pd.notna(up)
-            and pd.notna(
-                thresholds[
-                    "up_p95"
-                ]
-            )
-            and thresholds[
-                "up_p95"
-            ] > 0
-        ):
-
-            components.append(
-                min(
-                    up
-                    / thresholds[
-                        "up_p95"
-                    ],
-                    1.5,
-                )
-            )
-
-        if components:
-
-            value = float(
-                np.mean(
-                    components
-                )
-            )
-
-        else:
-
-            value = 1.0
-
-        score.append(
-            value
-        )
-
-    return np.array(
-        score,
-        dtype=float,
-    )
-
-
-# ============================================================
-# CREAR ESCENARIO 60 DÍAS
-# ============================================================
-
-def _crear_escenario_60_dias(
-    hist,
-    block,
-):
-
-    if (
-        hist.empty
-        or block.empty
-    ):
+    if event is None:
 
         return pd.DataFrame()
 
@@ -1699,50 +940,43 @@ def _crear_escenario_60_dias(
         freq="D",
     )
 
-    # ========================================================
-    # FORMA REAL DE LA PEOR CRECIDA
-    # ========================================================
-
-    growth_shape = (
-        _historical_growth_shape(
-            block
-        )
+    shape = _event_shape(
+        event
     )
 
-    historical_growth_max = float(
-        np.nanmax(
-            growth_shape
+    shape = (
+        shape
+        * float(
+            factor
         )
     )
 
     # ========================================================
-    # DRIVERS EXTREMOS
+    # NO PERMITIR NIVEL NEGATIVO
     # ========================================================
 
-    drivers = (
-        _crear_drivers_severos(
-            hist,
-            block,
-        )
+    levels = (
+        nivel_actual
+        + shape
     )
 
-    strengths = (
-        _driver_strength(
-            drivers,
-            hist,
-        )
+    levels = np.clip(
+        levels,
+        0.0,
+        12.0,
     )
 
     # ========================================================
-    # FACTOR DE SEVERIDAD
+    # SUAVIZACIÓN FINAL
     # ========================================================
 
-    strength_smoothed = (
+    levels = (
         pd.Series(
-            strengths
+            levels
         )
         .rolling(
-            5,
+            3,
+            center=True,
             min_periods=1,
         )
         .mean()
@@ -1751,160 +985,79 @@ def _crear_escenario_60_dias(
         )
     )
 
-    # Condición severa:
-    # factor mínimo 0.85 y máximo 1.30.
+    # Forzar exactamente el nivel real de partida
+    # en la primera jornada.
 
-    severity_factor = np.clip(
-        strength_smoothed,
-        0.85,
-        1.30,
+    levels[
+        0
+    ] = max(
+        nivel_actual,
+        levels[
+            0
+        ],
     )
 
-    # ========================================================
-    # CRECIMIENTO OBJETIVO
-    # ========================================================
-
-    target_growth = (
-        growth_shape
-        * severity_factor
-    )
-
-    # ========================================================
-    # GARANTIZAR QUE LA PEOR CONDICIÓN NO SEA UNA BAJANTE
-    # ========================================================
-
-    target_growth = np.maximum.accumulate(
-        target_growth
-    )
-
-    target_growth = np.maximum(
-        target_growth,
-        0.0,
-    )
-
-    # ========================================================
-    # EVITAR SOBREPASAR UNA CRECIDA IMPOSIBLE
-    # ========================================================
-
-    max_hist_growth = (
-        hist[
-            "nivel"
+    block = (
+        event[
+            "block"
         ]
-        .rolling(
-            STRESS_DAYS,
-            min_periods=
-                STRESS_DAYS,
-        )
-        .max()
-        - hist[
-            "nivel"
-        ]
-        .rolling(
-            STRESS_DAYS,
-            min_periods=
-                STRESS_DAYS,
-        )
-        .min()
-    )
-
-    max_hist_growth = (
-        max_hist_growth
-        .dropna()
-    )
-
-    if not max_hist_growth.empty:
-
-        historical_growth_cap = float(
-            max_hist_growth.quantile(
-                0.995
-            )
-        )
-
-    else:
-
-        historical_growth_cap = (
-            historical_growth_max
-        )
-
-    historical_growth_cap = max(
-        historical_growth_cap,
-        historical_growth_max,
-    )
-
-    historical_growth_cap *= 1.10
-
-    target_growth = np.minimum(
-        target_growth,
-        historical_growth_cap,
-    )
-
-    # ========================================================
-    # CONSTRUIR NIVEL DÍA A DÍA
-    # ========================================================
-
-    daily_limit = (
-        _daily_change_limit(
-            hist
+        .copy()
+        .reset_index(
+            drop=True
         )
     )
 
     results = []
 
-    nivel = float(
-        nivel_actual
-    )
-
-    growth_prev = 0.0
+    prev = nivel_actual
 
     for i in range(
         STRESS_DAYS
     ):
 
-        desired_growth = float(
-            target_growth[
+        if i < len(block):
+
+            source = block.iloc[
                 i
             ]
-        )
 
-        desired_delta = (
-            desired_growth
-            - growth_prev
-        )
-
-        desired_delta = float(
-            np.clip(
-                desired_delta,
+            rain = _safe_float(
+                source.get(
+                    "precip_mm",
+                    0.0,
+                ),
                 0.0,
-                daily_limit,
             )
-        )
 
-        # ====================================================
-        # IMPORTANTE
-        #
-        # Este escenario representa deliberadamente una
-        # PEOR CONDICIÓN DE CRECIDA.
-        #
-        # Por eso no permitimos variación negativa mientras
-        # los drivers son severos.
-        # ====================================================
-
-        delta = desired_delta
-
-        nivel_base = nivel
-
-        nivel = float(
-            np.clip(
-                nivel
-                + delta,
-                LEVEL_MIN,
-                LEVEL_MAX_INTERNAL,
+            q = _safe_float(
+                source.get(
+                    "caudal_m3s",
+                    np.nan,
+                )
             )
-        )
 
-        growth_prev = (
-            nivel
-            - nivel_actual
+            up = _safe_float(
+                source.get(
+                    "upstream_mean",
+                    np.nan,
+                )
+            )
+
+            source_date = source[
+                "datetime"
+            ]
+
+        else:
+
+            rain = 0.0
+            q = np.nan
+            up = np.nan
+            source_date = pd.NaT
+
+        current = float(
+            levels[
+                i
+            ]
         )
 
         results.append(
@@ -1915,51 +1068,29 @@ def _crear_escenario_60_dias(
                     ],
 
                 "prediction":
-                    nivel,
+                    current,
 
                 "nivel_base":
-                    nivel_base,
+                    prev,
 
                 "variacion_dia":
-                    delta,
-
-                "crecimiento_acumulado":
-                    growth_prev,
+                    current - prev,
 
                 "precip_mm":
-                    float(
-                        drivers.loc[
-                            i,
-                            "precip_mm"
-                        ]
-                    ),
+                    rain,
 
                 "caudal_m3s":
-                    drivers.loc[
-                        i,
-                        "caudal_m3s"
-                    ],
+                    q,
 
                 "upstream_mean":
-                    drivers.loc[
-                        i,
-                        "upstream_mean"
-                    ],
-
-                "driver_strength":
-                    float(
-                        strengths[
-                            i
-                        ]
-                    ),
+                    up,
 
                 "source_date":
-                    drivers.loc[
-                        i,
-                        "source_date"
-                    ],
+                    source_date,
             }
         )
+
+        prev = current
 
     return pd.DataFrame(
         results
@@ -1967,7 +1098,7 @@ def _crear_escenario_60_dias(
 
 
 # ============================================================
-# ENVOLVENTE HISTÓRICA POR FECHA
+# ENVOLVENTE HISTÓRICA DIARIA
 # ============================================================
 
 def _envolvente_historica_diaria(
@@ -2028,11 +1159,6 @@ def _envolvente_historica_diaria(
                 "nivel",
                 "mean",
             ),
-
-            registros=(
-                "nivel",
-                "count",
-            ),
         )
     )
 
@@ -2077,6 +1203,76 @@ def _envolvente_historica_diaria(
 
 
 # ============================================================
+# MÉTRICAS ESCENARIO
+# ============================================================
+
+def _scenario_metrics(
+    scenario,
+    nivel_actual,
+):
+
+    if scenario.empty:
+
+        return {}
+
+    idx = (
+        scenario[
+            "prediction"
+        ]
+        .idxmax()
+    )
+
+    max_level = float(
+        scenario.loc[
+            idx,
+            "prediction"
+        ]
+    )
+
+    max_date = pd.to_datetime(
+        scenario.loc[
+            idx,
+            "datetime"
+        ]
+    )
+
+    final_level = float(
+        scenario[
+            "prediction"
+        ]
+        .iloc[
+            -1
+        ]
+    )
+
+    days_to_peak = int(
+        scenario.loc[
+            idx
+        ].name
+        + 1
+    )
+
+    return {
+
+        "max":
+            max_level,
+
+        "date":
+            max_date,
+
+        "growth":
+            max_level
+            - nivel_actual,
+
+        "final":
+            final_level,
+
+        "days_to_peak":
+            days_to_peak,
+    }
+
+
+# ============================================================
 # RENDER
 # ============================================================
 
@@ -2088,13 +1284,13 @@ def render_stress_scenario(
 ):
 
     st.subheader(
-        "⚠️ Peor escenario histórico de creciente · 60 días"
+        "⚠️ Escenarios históricos severos · 60 días"
     )
 
     st.caption(
-        "Simulación experimental que parte del nivel real actual "
-        "y aplica la forma de la mayor creciente histórica de 60 días, "
-        "reforzada con lluvia, caudal y niveles aguas arriba elevados."
+        f"{STRESS_VERSION} · "
+        "Simulación histórica desde el nivel real actual. "
+        "Escenarios P90, P95 y peor creciente registrada."
     )
 
     # ========================================================
@@ -2109,207 +1305,146 @@ def render_stress_scenario(
 
     if (
         hist.empty
-        or len(hist)
+        or len(
+            hist
+        )
         < MIN_HISTORY_DAYS
     ):
 
         st.info(
             "No hay suficiente historial para calcular "
-            "el escenario severo de 60 días."
+            "los escenarios severos."
+        )
+
+        return
+
+    nivel_actual = _safe_last(
+        hist[
+            "nivel"
+        ]
+    )
+
+    if pd.isna(
+        nivel_actual
+    ):
+
+        st.info(
+            "No existe un nivel actual válido."
         )
 
         return
 
     # ========================================================
-    # BUSCAR MAYOR CRECIDA
+    # EVENTOS HISTÓRICOS
     # ========================================================
 
-    block = _buscar_maxima_crecida(
+    eventos = _buscar_eventos_crecida(
+        hist
+    )
+
+    if not eventos:
+
+        st.info(
+            "No se encontraron eventos históricos "
+            "de creciente suficientes."
+        )
+
+        return
+
+    peor_evento = eventos[
+        0
+    ]
+
+    evento_p95 = _evento_percentil(
+        eventos,
+        0.95,
+    )
+
+    evento_p90 = _evento_percentil(
+        eventos,
+        0.90,
+    )
+
+    # ========================================================
+    # ESCENARIOS
+    # ========================================================
+
+    scenario_worst = _crear_escenario(
         hist,
-        days=STRESS_DAYS,
+        peor_evento,
+        factor=1.00,
     )
 
-    if block.empty:
+    scenario_p95 = _crear_escenario(
+        hist,
+        evento_p95,
+        factor=1.00,
+    )
+
+    scenario_p90 = _crear_escenario(
+        hist,
+        evento_p90,
+        factor=1.00,
+    )
+
+    if scenario_worst.empty:
 
         st.info(
-            "No fue posible identificar una creciente histórica "
-            "continua de 60 días."
+            "No fue posible construir el peor escenario."
         )
 
         return
 
     # ========================================================
-    # ESCENARIO
+    # ENVOLVENTE
     # ========================================================
 
-    scenario = (
-        _crear_escenario_60_dias(
-            hist,
-            block,
-        )
-    )
-
-    if scenario.empty:
-
-        st.info(
-            "No fue posible calcular el escenario de 60 días."
-        )
-
-        return
-
-    envelope = (
-        _envolvente_historica_diaria(
-            df,
-            scenario[
-                "datetime"
-            ],
-        )
+    envelope = _envolvente_historica_diaria(
+        df,
+        scenario_worst[
+            "datetime"
+        ],
     )
 
     if not envelope.empty:
 
-        scenario = scenario.merge(
-            envelope[
-                [
-                    "datetime",
-                    "nivel_min_historico",
-                    "nivel_max_historico",
-                    "nivel_promedio_historico",
-                    "registros",
-                ]
-            ],
-            on="datetime",
-            how="left",
+        scenario_worst = (
+            scenario_worst
+            .merge(
+                envelope[
+                    [
+                        "datetime",
+                        "nivel_min_historico",
+                        "nivel_max_historico",
+                        "nivel_promedio_historico",
+                    ]
+                ],
+                on="datetime",
+                how="left",
+            )
         )
 
     # ========================================================
     # MÉTRICAS
     # ========================================================
 
-    nivel_actual = float(
-        hist[
-            "nivel"
-        ]
-        .dropna()
-        .iloc[
-            -1
-        ]
+    m_worst = _scenario_metrics(
+        scenario_worst,
+        nivel_actual,
     )
 
-    idx_max = (
-        scenario[
-            "prediction"
-        ]
-        .idxmax()
+    m95 = _scenario_metrics(
+        scenario_p95,
+        nivel_actual,
     )
 
-    nivel_max_escenario = float(
-        scenario.loc[
-            idx_max,
-            "prediction"
-        ]
+    m90 = _scenario_metrics(
+        scenario_p90,
+        nivel_actual,
     )
-
-    fecha_max_escenario = pd.to_datetime(
-        scenario.loc[
-            idx_max,
-            "datetime"
-        ]
-    )
-
-    crecimiento_maximo = (
-        nivel_max_escenario
-        - nivel_actual
-    )
-
-    nivel_final = float(
-        scenario[
-            "prediction"
-        ]
-        .iloc[
-            -1
-        ]
-    )
-
-    max_hist_periodo = np.nan
-
-    if (
-        "nivel_max_historico"
-        in scenario.columns
-        and scenario[
-            "nivel_max_historico"
-        ]
-        .notna()
-        .any()
-    ):
-
-        max_hist_periodo = float(
-            scenario[
-                "nivel_max_historico"
-            ]
-            .max()
-        )
-
-    distancia_max = np.nan
-
-    if pd.notna(
-        max_hist_periodo
-    ):
-
-        distancia_max = (
-            max_hist_periodo
-            - nivel_max_escenario
-        )
-
-    # ========================================================
-    # EVENTO HISTÓRICO ORIGEN
-    # ========================================================
-
-    block_start = pd.to_datetime(
-        block[
-            "datetime"
-        ]
-        .iloc[
-            0
-        ]
-    )
-
-    block_end = pd.to_datetime(
-        block[
-            "datetime"
-        ]
-        .iloc[
-            -1
-        ]
-    )
-
-    historical_growth = float(
-        block.attrs.get(
-            "growth",
-            np.nan,
-        )
-    )
-
-    historical_start = float(
-        block.attrs.get(
-            "nivel_inicio",
-            np.nan,
-        )
-    )
-
-    historical_max = float(
-        block.attrs.get(
-            "nivel_max",
-            np.nan,
-        )
-    )
-
-    # ========================================================
-    # FILA PRINCIPAL
-    # ========================================================
 
     st.markdown(
-        "**Resultado del escenario**"
+        "**Resumen de riesgo histórico**"
     )
 
     c1, c2, c3, c4 = st.columns(
@@ -2317,36 +1452,42 @@ def render_stress_scenario(
     )
 
     c1.metric(
-        "Nivel real inicial",
+        "Nivel actual",
         f"{nivel_actual:.2f} m",
     )
 
     c2.metric(
-        "Máximo escenario",
-        f"{nivel_max_escenario:.2f} m",
-        f"{crecimiento_maximo:+.2f} m",
+        "P90 máximo",
+        (
+            f"{m90['max']:.2f} m"
+            if m90
+            else "--"
+        ),
+        (
+            f"+{m90['growth']:.2f} m"
+            if m90
+            else None
+        ),
     )
 
     c3.metric(
-        "Máximo histórico período",
+        "P95 máximo",
         (
-            f"{max_hist_periodo:.2f} m"
-            if pd.notna(
-                max_hist_periodo
-            )
+            f"{m95['max']:.2f} m"
+            if m95
             else "--"
+        ),
+        (
+            f"+{m95['growth']:.2f} m"
+            if m95
+            else None
         ),
     )
 
     c4.metric(
-        "Distancia al máximo histórico",
-        (
-            f"{distancia_max:.2f} m"
-            if pd.notna(
-                distancia_max
-            )
-            else "--"
-        ),
+        "Peor caso",
+        f"{m_worst['max']:.2f} m",
+        f"+{m_worst['growth']:.2f} m",
     )
 
     # ========================================================
@@ -2358,137 +1499,69 @@ def render_stress_scenario(
     )
 
     d1.metric(
-        "Nivel día 60",
-        f"{nivel_final:.2f} m",
-        f"{nivel_final - nivel_actual:+.2f} m",
+        "Días hasta pico",
+        m_worst[
+            "days_to_peak"
+        ],
     )
 
     d2.metric(
-        "Crecimiento máximo",
-        f"{crecimiento_maximo:+.2f} m",
-    )
-
-    d3.metric(
-        "Fecha del máximo",
-        fecha_max_escenario.strftime(
+        "Fecha pico",
+        m_worst[
+            "date"
+        ].strftime(
             "%d/%m/%Y"
         ),
     )
 
+    d3.metric(
+        "Nivel día 60",
+        f"{m_worst['final']:.2f} m",
+        f"{m_worst['final'] - nivel_actual:+.2f} m",
+    )
+
+    historical_growth = float(
+        peor_evento[
+            "growth"
+        ]
+    )
+
     d4.metric(
-        "Crecida histórica usada",
-        (
-            f"+{historical_growth:.2f} m"
-            if pd.notna(
-                historical_growth
-            )
-            else "--"
-        ),
+        "Crecida histórica patrón",
+        f"+{historical_growth:.2f} m",
     )
 
     # ========================================================
-    # DRIVERS
+    # MÁXIMO HISTÓRICO DEL PERÍODO
     # ========================================================
 
-    lluvia_acum = float(
-        scenario[
-            "precip_mm"
-        ]
-        .fillna(0.0)
-        .sum()
-    )
+    max_hist_periodo = np.nan
 
-    lluvia_max = float(
-        scenario[
-            "precip_mm"
-        ]
-        .fillna(0.0)
-        .max()
-    )
-
-    caudal_max = (
-        float(
-            scenario[
-                "caudal_m3s"
-            ]
-            .max()
-        )
-        if scenario[
-            "caudal_m3s"
+    if (
+        "nivel_max_historico"
+        in scenario_worst.columns
+        and scenario_worst[
+            "nivel_max_historico"
         ]
         .notna()
         .any()
-        else np.nan
-    )
+    ):
 
-    upstream_max = (
-        float(
-            scenario[
-                "upstream_mean"
+        max_hist_periodo = float(
+            scenario_worst[
+                "nivel_max_historico"
             ]
             .max()
         )
-        if scenario[
-            "upstream_mean"
-        ]
-        .notna()
-        .any()
-        else np.nan
-    )
 
-    st.markdown(
-        "**Variables severas utilizadas**"
-    )
+    if pd.notna(
+        max_hist_periodo
+    ):
 
-    v1, v2, v3, v4 = st.columns(
-        4
-    )
-
-    v1.metric(
-        "Lluvia acumulada 60 d",
-        f"{_format_number(lluvia_acum, 1)} mm",
-    )
-
-    v2.metric(
-        "Lluvia máxima diaria",
-        f"{_format_number(lluvia_max, 1)} mm",
-    )
-
-    v3.metric(
-        "Caudal máximo",
-        (
-            f"{_format_number(caudal_max, 0)} m³/s"
-            if pd.notna(
-                caudal_max
-            )
-            else "--"
-        ),
-    )
-
-    v4.metric(
-        "Aguas arriba máximo medio",
-        (
-            f"{upstream_max:.2f} m"
-            if pd.notna(
-                upstream_max
-            )
-            else "--"
-        ),
-    )
-
-    # ========================================================
-    # INFORMACIÓN DEL EVENTO HISTÓRICO
-    # ========================================================
-
-    st.caption(
-        "Evento histórico utilizado como patrón: "
-        f"**{block_start.strftime('%d/%m/%Y')} → "
-        f"{block_end.strftime('%d/%m/%Y')}** · "
-        f"nivel inicial histórico "
-        f"**{historical_start:.2f} m** · "
-        f"máximo histórico del evento "
-        f"**{historical_max:.2f} m**."
-    )
+        st.caption(
+            "Máximo histórico registrado para las fechas "
+            f"del horizonte: **{max_hist_periodo:.2f} m**."
+        )
 
     # ========================================================
     # GRÁFICO PRINCIPAL
@@ -2496,17 +1569,18 @@ def render_stress_scenario(
 
     fig = go.Figure()
 
+    # Máximo histórico diario
     if (
         "nivel_max_historico"
-        in scenario.columns
+        in scenario_worst.columns
     ):
 
         fig.add_trace(
             go.Scatter(
-                x=scenario[
+                x=scenario_worst[
                     "datetime"
                 ],
-                y=scenario[
+                y=scenario_worst[
                     "nivel_max_historico"
                 ],
                 mode="lines",
@@ -2515,26 +1589,21 @@ def render_stress_scenario(
                     color="#d62728",
                     width=2,
                 ),
-                hovertemplate=(
-                    "%{x|%d/%m/%Y}"
-                    "<br>"
-                    "Máximo histórico: %{y:.2f} m"
-                    "<extra></extra>"
-                ),
             )
         )
 
+    # Mínimo histórico diario
     if (
         "nivel_min_historico"
-        in scenario.columns
+        in scenario_worst.columns
     ):
 
         fig.add_trace(
             go.Scatter(
-                x=scenario[
+                x=scenario_worst[
                     "datetime"
                 ],
-                y=scenario[
+                y=scenario_worst[
                     "nivel_min_historico"
                 ],
                 mode="lines",
@@ -2543,25 +1612,62 @@ def render_stress_scenario(
                     color="#2ca02c",
                     width=2,
                 ),
-                hovertemplate=(
-                    "%{x|%d/%m/%Y}"
-                    "<br>"
-                    "Mínimo histórico: %{y:.2f} m"
-                    "<extra></extra>"
+            )
+        )
+
+    # P90
+    if not scenario_p90.empty:
+
+        fig.add_trace(
+            go.Scatter(
+                x=scenario_p90[
+                    "datetime"
+                ],
+                y=scenario_p90[
+                    "prediction"
+                ],
+                mode="lines",
+                name="Escenario P90",
+                line=dict(
+                    color="#17becf",
+                    width=2,
+                    dash="dot",
                 ),
             )
         )
 
+    # P95
+    if not scenario_p95.empty:
+
+        fig.add_trace(
+            go.Scatter(
+                x=scenario_p95[
+                    "datetime"
+                ],
+                y=scenario_p95[
+                    "prediction"
+                ],
+                mode="lines",
+                name="Escenario P95",
+                line=dict(
+                    color="#9467bd",
+                    width=3,
+                    dash="dash",
+                ),
+            )
+        )
+
+    # Peor caso
     fig.add_trace(
         go.Scatter(
-            x=scenario[
+            x=scenario_worst[
                 "datetime"
             ],
-            y=scenario[
+            y=scenario_worst[
                 "prediction"
             ],
             mode="lines+markers",
-            name="Peor escenario de creciente",
+            name="Peor caso histórico",
             line=dict(
                 color="#1f77b4",
                 width=4,
@@ -2569,15 +1675,10 @@ def render_stress_scenario(
             marker=dict(
                 size=5,
             ),
-            hovertemplate=(
-                "%{x|%d/%m/%Y}"
-                "<br>"
-                "Nivel escenario: %{y:.2f} m"
-                "<extra></extra>"
-            ),
         )
     )
 
+    # Nivel actual
     fig.add_hline(
         y=nivel_actual,
         line_dash="dash",
@@ -2588,50 +1689,38 @@ def render_stress_scenario(
         ),
     )
 
+    # Pico
     fig.add_vline(
-        x=fecha_max_escenario,
+        x=m_worst[
+            "date"
+        ],
         line_dash="dot",
         line_width=1,
     )
 
     fig.add_annotation(
-        x=fecha_max_escenario,
-        y=nivel_max_escenario,
+        x=m_worst[
+            "date"
+        ],
+        y=m_worst[
+            "max"
+        ],
         text=(
-            f"Máximo escenario<br>"
-            f"{nivel_max_escenario:.2f} m"
+            "Pico peor caso"
+            "<br>"
+            f"{m_worst['max']:.2f} m"
         ),
         showarrow=True,
         arrowhead=2,
         yshift=25,
     )
 
-    valores_max = [
-        nivel_actual,
-        nivel_max_escenario,
-    ]
-
-    if pd.notna(
-        max_hist_periodo
-    ):
-
-        valores_max.append(
-            max_hist_periodo
-        )
-
-    y_top = min(
-        LEVEL_MAX_INTERNAL,
-        max(
-            7.0,
-            max(
-                valores_max
-            )
-            + 0.5,
-        ),
-    )
+    # ========================================================
+    # ESCALA FIJA 0–7 m
+    # ========================================================
 
     fig.update_layout(
-        height=530,
+        height=550,
         margin=dict(
             l=10,
             r=10,
@@ -2653,10 +1742,12 @@ def render_stress_scenario(
     fig.update_yaxes(
         title_text="Nivel hidrométrico (m)",
         range=[
-            LEVEL_MIN,
-            y_top,
+            Y_MIN,
+            Y_MAX,
         ],
-        dtick=0.5,
+        dtick=
+            Y_STEP,
+        fixedrange=False,
     )
 
     st.plotly_chart(
@@ -2665,21 +1756,67 @@ def render_stress_scenario(
     )
 
     # ========================================================
-    # GRÁFICO DE CRECIMIENTO
+    # DÍAS SOBRE MÁXIMO HISTÓRICO
     # ========================================================
 
-    growth_fig = go.Figure()
+    days_above = 0
 
-    growth_fig.add_trace(
+    if (
+        "nivel_max_historico"
+        in scenario_worst.columns
+    ):
+
+        comparison = (
+            scenario_worst[
+                "prediction"
+            ]
+            > scenario_worst[
+                "nivel_max_historico"
+            ]
+        )
+
+        days_above = int(
+            comparison
+            .fillna(False)
+            .sum()
+        )
+
+    if days_above > 0:
+
+        st.warning(
+            f"⚠️ El peor escenario supera el máximo histórico "
+            f"diario de referencia durante **{days_above} días**. "
+            "Debe interpretarse como una simulación extrema y no "
+            "como un pronóstico esperado."
+        )
+
+    # ========================================================
+    # GRÁFICO DEL EVENTO HISTÓRICO ORIGEN
+    # ========================================================
+
+    st.markdown(
+        "**Evento histórico utilizado como patrón de peor caso**"
+    )
+
+    block = (
+        peor_evento[
+            "block"
+        ]
+        .copy()
+    )
+
+    historical_fig = go.Figure()
+
+    historical_fig.add_trace(
         go.Scatter(
-            x=scenario[
+            x=block[
                 "datetime"
             ],
-            y=scenario[
-                "crecimiento_acumulado"
+            y=block[
+                "nivel"
             ],
             mode="lines+markers",
-            name="Crecimiento desde nivel actual",
+            name="Nivel histórico",
             line=dict(
                 width=3,
             ),
@@ -2689,65 +1826,159 @@ def render_stress_scenario(
         )
     )
 
-    growth_fig.update_layout(
-        height=280,
+    historical_fig.update_layout(
+        height=320,
         margin=dict(
             l=5,
             r=5,
             t=10,
             b=5,
         ),
-        yaxis_title="Crecimiento acumulado (m)",
         showlegend=False,
     )
 
-    growth_fig.update_xaxes(
-        tickformat="%d/%m",
+    historical_fig.update_xaxes(
+        title_text="Fecha histórica",
+        tickformat="%d/%m/%Y",
+    )
+
+    # ========================================================
+    # ESCALA FIJA 0–7 m
+    # ========================================================
+
+    historical_fig.update_yaxes(
+        title_text="Nivel hidrométrico (m)",
+        range=[
+            Y_MIN,
+            Y_MAX,
+        ],
+        dtick=
+            Y_STEP,
     )
 
     st.plotly_chart(
-        growth_fig,
+        historical_fig,
         use_container_width=True,
     )
 
     # ========================================================
-    # LLUVIA + CAUDAL
+    # VARIABLES DEL PEOR EVENTO
     # ========================================================
 
-    rain_col, q_col = st.columns(
+    rain = (
+        block[
+            "precip_mm"
+        ]
+        .fillna(0.0)
+    )
+
+    rain_total = float(
+        rain.sum()
+    )
+
+    rain_max = float(
+        rain.max()
+    )
+
+    q_max = (
+        float(
+            block[
+                "caudal_m3s"
+            ]
+            .max()
+        )
+        if block[
+            "caudal_m3s"
+        ]
+        .notna()
+        .any()
+        else np.nan
+    )
+
+    up_max = (
+        float(
+            block[
+                "upstream_mean"
+            ]
+            .max()
+        )
+        if block[
+            "upstream_mean"
+        ]
+        .notna()
+        .any()
+        else np.nan
+    )
+
+    v1, v2, v3, v4 = st.columns(
+        4
+    )
+
+    v1.metric(
+        "Lluvia evento 60 d",
+        f"{_format_number(rain_total, 1)} mm",
+    )
+
+    v2.metric(
+        "Máxima lluvia diaria",
+        f"{_format_number(rain_max, 1)} mm",
+    )
+
+    v3.metric(
+        "Caudal máximo",
+        (
+            f"{_format_number(q_max, 0)} m³/s"
+            if pd.notna(q_max)
+            else "--"
+        ),
+    )
+
+    v4.metric(
+        "Aguas arriba máx. medio",
+        (
+            f"{up_max:.2f} m"
+            if pd.notna(up_max)
+            else "--"
+        ),
+    )
+
+    # ========================================================
+    # LLUVIA / CAUDAL
+    # ========================================================
+
+    lluvia_col, caudal_col = st.columns(
         2
     )
 
-    with rain_col:
+    with lluvia_col:
 
         st.markdown(
-            "**🌧️ Lluvia severa utilizada**"
+            "**🌧️ Lluvia del evento histórico**"
         )
 
         rain_fig = go.Figure()
 
         rain_fig.add_trace(
             go.Bar(
-                x=scenario[
+                x=block[
                     "datetime"
                 ],
-                y=scenario[
+                y=block[
                     "precip_mm"
                 ],
-                name="Lluvia",
             )
         )
 
         rain_fig.update_layout(
-            height=270,
+            height=280,
             margin=dict(
                 l=5,
                 r=5,
                 t=5,
                 b=5,
             ),
-            yaxis_title="mm/día",
             showlegend=False,
+            yaxis_title="mm/día",
         )
 
         rain_fig.update_xaxes(
@@ -2759,14 +1990,14 @@ def render_stress_scenario(
             use_container_width=True,
         )
 
-    with q_col:
+    with caudal_col:
 
         st.markdown(
-            "**💧 Caudal severo utilizado**"
+            "**💧 Caudal del evento histórico**"
         )
 
         if (
-            scenario[
+            block[
                 "caudal_m3s"
             ]
             .notna()
@@ -2777,27 +2008,26 @@ def render_stress_scenario(
 
             q_fig.add_trace(
                 go.Scatter(
-                    x=scenario[
+                    x=block[
                         "datetime"
                     ],
-                    y=scenario[
+                    y=block[
                         "caudal_m3s"
                     ],
                     mode="lines+markers",
-                    name="Caudal",
                 )
             )
 
             q_fig.update_layout(
-                height=270,
+                height=280,
                 margin=dict(
                     l=5,
                     r=5,
                     t=5,
                     b=5,
                 ),
-                yaxis_title="m³/s",
                 showlegend=False,
+                yaxis_title="m³/s",
             )
 
             q_fig.update_xaxes(
@@ -2812,18 +2042,18 @@ def render_stress_scenario(
         else:
 
             st.info(
-                "Sin caudal histórico suficiente."
+                "Sin caudal histórico disponible."
             )
 
     # ========================================================
-    # TABLA AUDITORÍA
+    # TABLA DE AUDITORÍA
     # ========================================================
 
     with st.expander(
-        "🔎 Auditoría diaria del peor escenario"
+        "🔎 Auditoría del peor escenario · 60 días"
     ):
 
-        tabla = scenario.copy()
+        tabla = scenario_worst.copy()
 
         tabla[
             "Fecha"
@@ -2845,25 +2075,20 @@ def render_stress_scenario(
             tabla[
                 "nivel_base"
             ]
-            .round(2)
+            .round(
+                2
+            )
         )
 
         tabla[
-            "Δ día"
+            "Variación diaria"
         ] = (
             tabla[
                 "variacion_dia"
             ]
-            .round(3)
-        )
-
-        tabla[
-            "Crecimiento"
-        ] = (
-            tabla[
-                "crecimiento_acumulado"
-            ]
-            .round(2)
+            .round(
+                3
+            )
         )
 
         tabla[
@@ -2872,7 +2097,9 @@ def render_stress_scenario(
             tabla[
                 "prediction"
             ]
-            .round(2)
+            .round(
+                2
+            )
         )
 
         tabla[
@@ -2881,7 +2108,9 @@ def render_stress_scenario(
             tabla[
                 "precip_mm"
             ]
-            .round(1)
+            .round(
+                1
+            )
         )
 
         tabla[
@@ -2890,7 +2119,9 @@ def render_stress_scenario(
             tabla[
                 "caudal_m3s"
             ]
-            .round(0)
+            .round(
+                0
+            )
         )
 
         tabla[
@@ -2899,11 +2130,13 @@ def render_stress_scenario(
             tabla[
                 "upstream_mean"
             ]
-            .round(2)
+            .round(
+                2
+            )
         )
 
         tabla[
-            "Fecha origen histórica"
+            "Fecha histórica origen"
         ] = (
             pd.to_datetime(
                 tabla[
@@ -2923,10 +2156,9 @@ def render_stress_scenario(
             "Lluvia",
             "Caudal",
             "Aguas arriba",
-            "Δ día",
-            "Crecimiento",
+            "Variación diaria",
             "Nivel escenario",
-            "Fecha origen histórica",
+            "Fecha histórica origen",
         ]
 
         if (
@@ -2940,7 +2172,9 @@ def render_stress_scenario(
                 tabla[
                     "nivel_max_historico"
                 ]
-                .round(2)
+                .round(
+                    2
+                )
             )
 
             columnas.append(
@@ -2960,47 +2194,40 @@ def render_stress_scenario(
     # ========================================================
 
     with st.expander(
-        "ℹ️ Cómo se construye este escenario"
+        "ℹ️ Interpretación de P90, P95 y peor caso"
     ):
 
         st.markdown(
             f"""
-            Este escenario **no intenta predecir el tiempo de los
-            próximos 60 días**.
+            Todos los escenarios parten del nivel real disponible:
 
-            Su objetivo es responder:
+            **{nivel_actual:.2f} m**
 
-            **¿Qué crecimiento podría producirse si, partiendo del
-            nivel real actual de {nivel_actual:.2f} m, se repitiera
-            una de las peores crecientes históricas observadas?**
+            **P90** representa una creciente ubicada aproximadamente
+            en el percentil 90 de las crecientes históricas de
+            60 días encontradas.
 
-            El sistema busca todas las ventanas históricas continuas
-            de **60 días** y selecciona principalmente la que produjo
-            la **mayor suba real de nivel en San Nicolás**.
+            **P95** representa una creciente todavía más severa.
 
-            El evento seleccionado fue:
+            **Peor caso histórico** reproduce la forma completa de
+            la mayor creciente histórica encontrada en el historial,
+            trasladándola al nivel actual.
 
-            **{block_start.strftime('%d/%m/%Y')} →
-            {block_end.strftime('%d/%m/%Y')}**
+            A diferencia de la versión anterior, después del pico
+            el escenario puede **estabilizarse o comenzar una bajante**
+            siguiendo el comportamiento observado históricamente.
 
-            En esa ventana la altura pasó aproximadamente de
-            **{historical_start:.2f} m** hasta
-            **{historical_max:.2f} m**, una creciente de
-            **{historical_growth:+.2f} m**.
+            Las líneas roja y verde corresponden al máximo y mínimo
+            histórico para cada fecha del calendario.
 
-            La forma de esa creciente se aplica desde el nivel actual,
-            reforzándola cuando lluvia, caudal y niveles aguas arriba
-            están dentro de sus rangos históricos altos.
-
-            En este módulo de **peor escenario de creciente** no se
-            permiten bajantes importantes durante el evento severo,
-            porque el objetivo no es representar el escenario más
-            probable sino una condición histórica desfavorable.
+            Todos los gráficos de nivel hidrométrico están fijados
+            en una escala de **0 a 7 metros** para facilitar la
+            comparación visual entre paneles.
             """
         )
 
     st.warning(
-        "Escenario experimental de estrés histórico. "
-        "No constituye una alerta ni reemplaza pronósticos "
-        "o comunicaciones oficiales."
+        "Los escenarios P90, P95 y peor caso son simulaciones "
+        "históricas de estrés. No constituyen pronósticos ni alertas "
+        "oficiales."
     )
