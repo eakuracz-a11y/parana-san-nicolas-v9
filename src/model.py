@@ -6,6 +6,15 @@ from sklearn.metrics import mean_squared_error
 
 
 # ============================================================
+# MODELO HIDROLÓGICO
+# PARANÁ · SAN NICOLÁS
+# V11.7
+# ============================================================
+
+MODEL_VERSION = "V11.7"
+
+
+# ============================================================
 # CONFIGURACIÓN
 # ============================================================
 
@@ -17,20 +26,36 @@ RANDOM_STATE = 42
 
 
 # ============================================================
-# LÍMITES INTERNOS
+# LÍMITES
 # ============================================================
-
-# El gráfico puede seguir mostrando 0–7 m desde app.py.
-# Este límite es solamente técnico para no cortar un escenario
-# excepcional que eventualmente pudiera superar 7 m.
 
 LEVEL_MIN = 0.0
 
+# Límite interno de seguridad.
+# La escala gráfica continúa siendo 0–7 m.
 LEVEL_MAX_INTERNAL = 12.0
 
 
 # ============================================================
-# RETARDOS
+# INCERTIDUMBRE
+# ============================================================
+
+# Banda experimental equivalente aproximadamente a 80%.
+UNCERTAINTY_Z = 1.28
+
+# Margen mínimo para que la banda siga siendo visible.
+UNCERTAINTY_MIN_MARGIN = 0.08
+
+# Margen máximo permitido.
+# Evita el abanico excesivamente grande.
+UNCERTAINTY_MAX_MARGIN = 0.35
+
+# Incremento progresivo por día.
+UNCERTAINTY_GROWTH_PER_DAY = 0.06
+
+
+# ============================================================
+# RETARDOS DEL NIVEL LOCAL
 # ============================================================
 
 LOCAL_LAGS = [
@@ -45,6 +70,10 @@ LOCAL_LAGS = [
 ]
 
 
+# ============================================================
+# RETARDOS DEL CAUDAL
+# ============================================================
+
 Q_LAGS = [
     1,
     3,
@@ -55,6 +84,10 @@ Q_LAGS = [
     21,
 ]
 
+
+# ============================================================
+# RETARDOS AGUAS ARRIBA
+# ============================================================
 
 UPSTREAM_LAGS = [
     1,
@@ -84,9 +117,7 @@ def _normalizar_datetime(
             utc=True,
         )
         .dt
-        .tz_localize(
-            None
-        )
+        .tz_localize(None)
         .dt
         .normalize()
     )
@@ -119,25 +150,18 @@ def _upstream_cols(
 
     return [
         c
-        for c
-        in df.columns
+        for c in df.columns
         if (
             c.startswith(
                 "nivel_"
             )
             and c != "nivel"
-            and "_lag"
-            not in c
-            and "_diff"
-            not in c
-            and "_trend"
-            not in c
-            and "_mean"
-            not in c
-            and "_actual"
-            not in c
-            and "_next"
-            not in c
+            and "_lag" not in c
+            and "_diff" not in c
+            and "_trend" not in c
+            and "_mean" not in c
+            and "_actual" not in c
+            and "_next" not in c
         )
     ]
 
@@ -213,9 +237,7 @@ def _safe_slope(
         return 0.0
 
     x = np.arange(
-        len(
-            s
-        ),
+        len(s),
         dtype=float,
     )
 
@@ -339,7 +361,7 @@ def preparar_nivel_local(
 
 
 # ============================================================
-# PREPARAR DATASET COMPLETO
+# PREPARAR DATASET
 # ============================================================
 
 def preparar_dataset(
@@ -351,7 +373,6 @@ def preparar_dataset(
     x = preparar_nivel_local(
         df
     )
-
 
     # ========================================================
     # LLUVIA + CAUDAL
@@ -367,7 +388,10 @@ def preparar_dataset(
         in exog_history.columns
     ):
 
-        exog = exog_history.copy()
+        exog = (
+            exog_history
+            .copy()
+        )
 
         exog[
             "datetime"
@@ -379,14 +403,12 @@ def preparar_dataset(
 
         columnas = [
             c
-            for c
-            in [
+            for c in [
                 "datetime",
                 "precip_mm",
                 "caudal_m3s",
             ]
-            if c
-            in exog.columns
+            if c in exog.columns
         ]
 
         exog = (
@@ -411,9 +433,8 @@ def preparar_dataset(
             how="left",
         )
 
-
     # ========================================================
-    # ESTACIONES AGUAS ARRIBA
+    # AGUAS ARRIBA
     # ========================================================
 
     if (
@@ -449,8 +470,7 @@ def preparar_dataset(
             upstream[
                 [
                     c
-                    for c
-                    in keep_cols
+                    for c in keep_cols
                     if c
                     in upstream.columns
                 ]
@@ -473,7 +493,6 @@ def preparar_dataset(
             how="left",
         )
 
-
     # ========================================================
     # COLUMNAS BASE
     # ========================================================
@@ -484,13 +503,11 @@ def preparar_dataset(
             "precip_mm"
         ] = 0.0
 
-
     if "caudal_m3s" not in x.columns:
 
         x[
             "caudal_m3s"
         ] = np.nan
-
 
     x[
         "precip_mm"
@@ -508,7 +525,6 @@ def preparar_dataset(
         )
     )
 
-
     x[
         "caudal_m3s"
     ] = _to_numeric(
@@ -516,7 +532,6 @@ def preparar_dataset(
             "caudal_m3s"
         ]
     )
-
 
     # ========================================================
     # INTERPOLACIÓN CAUDAL
@@ -542,7 +557,6 @@ def preparar_dataset(
                 limit_direction="both",
             )
         )
-
 
     # ========================================================
     # INTERPOLACIÓN AGUAS ARRIBA
@@ -581,7 +595,6 @@ def preparar_dataset(
                 )
             )
 
-
     # ========================================================
     # VALIDACIÓN
     # ========================================================
@@ -595,7 +608,6 @@ def preparar_dataset(
             f"{MIN_OBSERVATIONS} días de datos. "
             f"Disponibles: {len(x)}."
         )
-
 
     return (
         x
@@ -618,7 +630,6 @@ def crear_features(
 
     x = df.copy()
 
-
     # ========================================================
     # NIVEL SAN NICOLÁS
     # ========================================================
@@ -628,7 +639,6 @@ def crear_features(
     ] = x[
         "nivel"
     ]
-
 
     for lag in LOCAL_LAGS:
 
@@ -643,7 +653,6 @@ def crear_features(
             )
         )
 
-
     x[
         "sn_diff1"
     ] = (
@@ -656,7 +665,6 @@ def crear_features(
             1
         )
     )
-
 
     x[
         "sn_diff3"
@@ -671,7 +679,6 @@ def crear_features(
         )
     )
 
-
     x[
         "sn_diff7"
     ] = (
@@ -684,7 +691,6 @@ def crear_features(
             7
         )
     )
-
 
     x[
         "sn_trend3"
@@ -699,7 +705,6 @@ def crear_features(
         )
     ) / 3.0
 
-
     x[
         "sn_trend7"
     ] = (
@@ -713,7 +718,6 @@ def crear_features(
         )
     ) / 7.0
 
-
     x[
         "sn_trend14"
     ] = (
@@ -726,7 +730,6 @@ def crear_features(
             14
         )
     ) / 14.0
-
 
     x[
         "sn_media3"
@@ -743,7 +746,6 @@ def crear_features(
         .mean()
     )
 
-
     x[
         "sn_media7"
     ] = (
@@ -758,7 +760,6 @@ def crear_features(
         )
         .mean()
     )
-
 
     x[
         "sn_media14"
@@ -775,7 +776,6 @@ def crear_features(
         .mean()
     )
 
-
     # ========================================================
     # LLUVIA
     # ========================================================
@@ -785,7 +785,6 @@ def crear_features(
     ] = x[
         "precip_mm"
     ]
-
 
     x[
         "rain_next"
@@ -797,7 +796,6 @@ def crear_features(
             -1
         )
     )
-
 
     x[
         "rain_3d"
@@ -811,7 +809,6 @@ def crear_features(
         .sum()
     )
 
-
     x[
         "rain_7d"
     ] = (
@@ -823,7 +820,6 @@ def crear_features(
         )
         .sum()
     )
-
 
     x[
         "rain_14d"
@@ -837,7 +833,6 @@ def crear_features(
         .sum()
     )
 
-
     x[
         "rain_21d"
     ] = (
@@ -849,7 +844,6 @@ def crear_features(
         )
         .sum()
     )
-
 
     # ========================================================
     # CAUDAL
@@ -872,7 +866,6 @@ def crear_features(
             "caudal_m3s"
         ]
 
-
         x[
             "q_next"
         ] = (
@@ -883,7 +876,6 @@ def crear_features(
                 -1
             )
         )
-
 
         for lag in Q_LAGS:
 
@@ -898,7 +890,6 @@ def crear_features(
                 )
             )
 
-
         x[
             "q_diff1"
         ] = (
@@ -911,7 +902,6 @@ def crear_features(
                 1
             )
         )
-
 
         x[
             "q_diff3"
@@ -926,7 +916,6 @@ def crear_features(
             )
         )
 
-
         x[
             "q_diff7"
         ] = (
@@ -939,7 +928,6 @@ def crear_features(
                 7
             )
         )
-
 
         x[
             "q_trend3"
@@ -954,7 +942,6 @@ def crear_features(
             )
         ) / 3.0
 
-
         x[
             "q_trend7"
         ] = (
@@ -967,7 +954,6 @@ def crear_features(
                 7
             )
         ) / 7.0
-
 
         x[
             "q_trend14"
@@ -982,7 +968,6 @@ def crear_features(
             )
         ) / 14.0
 
-
         x[
             "q_media7"
         ] = (
@@ -994,7 +979,6 @@ def crear_features(
             )
             .mean()
         )
-
 
         x[
             "q_media14"
@@ -1008,7 +992,6 @@ def crear_features(
             .mean()
         )
 
-
     # ========================================================
     # ESTACIONES AGUAS ARRIBA
     # ========================================================
@@ -1017,7 +1000,6 @@ def crear_features(
         x
     )
 
-
     for col in upstream_cols:
 
         x[
@@ -1025,7 +1007,6 @@ def crear_features(
         ] = x[
             col
         ]
-
 
         x[
             f"{col}_next"
@@ -1037,7 +1018,6 @@ def crear_features(
                 -1
             )
         )
-
 
         x[
             f"{col}_diff1"
@@ -1052,7 +1032,6 @@ def crear_features(
             )
         )
 
-
         x[
             f"{col}_trend3"
         ] = (
@@ -1065,7 +1044,6 @@ def crear_features(
                 3
             )
         ) / 3.0
-
 
         x[
             f"{col}_trend7"
@@ -1080,7 +1058,6 @@ def crear_features(
             )
         ) / 7.0
 
-
         x[
             f"{col}_trend14"
         ] = (
@@ -1094,7 +1071,6 @@ def crear_features(
             )
         ) / 14.0
 
-
         x[
             f"{col}_mean7"
         ] = (
@@ -1107,7 +1083,6 @@ def crear_features(
             .mean()
         )
 
-
         x[
             f"{col}_mean14"
         ] = (
@@ -1119,7 +1094,6 @@ def crear_features(
             )
             .mean()
         )
-
 
         for lag in UPSTREAM_LAGS:
 
@@ -1134,9 +1108,8 @@ def crear_features(
                 )
             )
 
-
     # ========================================================
-    # PRESIÓN HIDROLÓGICA CONJUNTA AGUAS ARRIBA
+    # PRESIÓN CONJUNTA AGUAS ARRIBA
     # ========================================================
 
     if upstream_cols:
@@ -1153,7 +1126,6 @@ def crear_features(
             )
         )
 
-
         x[
             "upstream_max_actual"
         ] = (
@@ -1166,7 +1138,6 @@ def crear_features(
             )
         )
 
-
         x[
             "upstream_mean_diff1"
         ] = (
@@ -1175,7 +1146,6 @@ def crear_features(
             ]
             .diff()
         )
-
 
         x[
             "upstream_mean_trend3"
@@ -1190,7 +1160,6 @@ def crear_features(
             )
         ) / 3.0
 
-
         x[
             "upstream_mean_trend7"
         ] = (
@@ -1204,14 +1173,12 @@ def crear_features(
             )
         ) / 7.0
 
-
         next_cols = [
             f"{col}_next"
             for col in upstream_cols
             if f"{col}_next"
             in x.columns
         ]
-
 
         if next_cols:
 
@@ -1227,9 +1194,8 @@ def crear_features(
                 )
             )
 
-
     # ========================================================
-    # OBJETIVO DEL MODELO
+    # OBJETIVO
     # ========================================================
 
     x[
@@ -1243,7 +1209,6 @@ def crear_features(
         )
     )
 
-
     x[
         "target_delta"
     ] = (
@@ -1255,12 +1220,11 @@ def crear_features(
         ]
     )
 
-
     return x
 
 
 # ============================================================
-# LÍMITE DIARIO APRENDIDO DEL HISTORIAL
+# LÍMITE DIARIO APRENDIDO
 # ============================================================
 
 def _calcular_limite_diario(
@@ -1279,11 +1243,9 @@ def _calcular_limite_diario(
         .dropna()
     )
 
-
     if delta.empty:
 
         return 0.25
-
 
     p99 = float(
         delta.quantile(
@@ -1291,21 +1253,17 @@ def _calcular_limite_diario(
         )
     )
 
-
     p995 = float(
         delta.quantile(
             0.995
         )
     )
 
-
     limite = max(
         p99,
-        p995
-        * 0.90,
+        p995 * 0.90,
         0.08,
     )
-
 
     return float(
         np.clip(
@@ -1313,6 +1271,91 @@ def _calcular_limite_diario(
             0.08,
             0.60,
         )
+    )
+
+
+# ============================================================
+# CALCULAR INCERTIDUMBRE V11.7
+# ============================================================
+
+def _calcular_incertidumbre(
+    prediction,
+    rmse,
+    horizon_day,
+):
+
+    rmse = max(
+        float(
+            rmse
+        ),
+        0.05,
+    )
+
+    h = max(
+        int(
+            horizon_day
+        ),
+        1,
+    )
+
+    # ========================================================
+    # CRECIMIENTO SUAVE
+    #
+    # Día 1 = RMSE base
+    # Día 15 ≈ 1.84 x RMSE
+    # Día 30 ≈ 2.74 x RMSE
+    #
+    # Pero siempre limitado por el margen máximo.
+    # ========================================================
+
+    horizon_factor = (
+        1.0
+        + UNCERTAINTY_GROWTH_PER_DAY
+        * (
+            h - 1
+        )
+    )
+
+    sigma = (
+        rmse
+        * horizon_factor
+    )
+
+    margin = (
+        UNCERTAINTY_Z
+        * sigma
+    )
+
+    margin = float(
+        np.clip(
+            margin,
+            UNCERTAINTY_MIN_MARGIN,
+            UNCERTAINTY_MAX_MARGIN,
+        )
+    )
+
+    lower = float(
+        np.clip(
+            prediction
+            - margin,
+            LEVEL_MIN,
+            LEVEL_MAX_INTERNAL,
+        )
+    )
+
+    upper = float(
+        np.clip(
+            prediction
+            + margin,
+            LEVEL_MIN,
+            LEVEL_MAX_INTERNAL,
+        )
+    )
+
+    return (
+        lower,
+        upper,
+        margin,
     )
 
 
@@ -1334,11 +1377,9 @@ def train(
             upstream_history,
     )
 
-
     features = crear_features(
         dataset
     )
-
 
     excluded = {
         "datetime",
@@ -1349,20 +1390,15 @@ def train(
         "target_delta",
     }
 
-
     feature_cols = [
         c
-        for c
-        in features.columns
-        if c
-        not in excluded
+        for c in features.columns
+        if c not in excluded
     ]
 
-
     feature_cols = [
         c
-        for c
-        in feature_cols
+        for c in feature_cols
         if (
             pd.to_numeric(
                 features[
@@ -1376,14 +1412,12 @@ def train(
         )
     ]
 
-
     if not feature_cols:
 
         raise ValueError(
             "No se pudieron construir variables "
             "suficientes para entrenar."
         )
-
 
     work = (
         features
@@ -1396,7 +1430,6 @@ def train(
         .copy()
     )
 
-
     if len(
         work
     ) < 30:
@@ -1406,7 +1439,6 @@ def train(
             "después de construir las variables: "
             f"{len(work)}."
         )
-
 
     # ========================================================
     # VALIDACIÓN CRONOLÓGICA
@@ -1419,12 +1451,10 @@ def train(
         * 0.80
     )
 
-
     split = max(
         25,
         split,
     )
-
 
     split = min(
         split,
@@ -1434,13 +1464,11 @@ def train(
         - 1,
     )
 
-
     X_train = work[
         feature_cols
     ].iloc[
         :split
     ]
-
 
     X_test = work[
         feature_cols
@@ -1448,13 +1476,11 @@ def train(
         split:
     ]
 
-
     y_train = work[
         "target_delta"
     ].iloc[
         :split
     ]
-
 
     y_test_delta = work[
         "target_delta"
@@ -1462,13 +1488,11 @@ def train(
         split:
     ]
 
-
     nivel_base_test = work[
         "nivel"
     ].iloc[
         split:
     ]
-
 
     # ========================================================
     # MODELO VALIDACIÓN
@@ -1484,17 +1508,14 @@ def train(
         n_jobs=-1,
     )
 
-
     model.fit(
         X_train,
         y_train,
     )
 
-
     pred_delta = model.predict(
         X_test
     )
-
 
     pred_nivel = (
         nivel_base_test
@@ -1503,7 +1524,6 @@ def train(
         )
         + pred_delta
     )
-
 
     y_test_nivel = (
         nivel_base_test
@@ -1516,7 +1536,6 @@ def train(
         )
     )
 
-
     rmse = float(
         np.sqrt(
             mean_squared_error(
@@ -1526,12 +1545,10 @@ def train(
         )
     )
 
-
     rmse = max(
         rmse,
         0.05,
     )
-
 
     # ========================================================
     # MODELO FINAL
@@ -1547,7 +1564,6 @@ def train(
         n_jobs=-1,
     )
 
-
     final_model.fit(
         work[
             feature_cols
@@ -1557,9 +1573,8 @@ def train(
         ],
     )
 
-
     # ========================================================
-    # IMPORTANCIA
+    # IMPORTANCIA VARIABLES
     # ========================================================
 
     importance = pd.DataFrame(
@@ -1573,7 +1588,6 @@ def train(
         }
     )
 
-
     importance = (
         importance
         .sort_values(
@@ -1585,9 +1599,8 @@ def train(
         )
     )
 
-
     # ========================================================
-    # LÍMITE HISTÓRICO DE CAMBIO
+    # LÍMITE HISTÓRICO
     # ========================================================
 
     daily_change_limit = (
@@ -1596,12 +1609,14 @@ def train(
         )
     )
 
-
     # ========================================================
-    # RESULTADOS
+    # MODELS
     # ========================================================
 
     models = {
+
+        "version":
+            MODEL_VERSION,
 
         "model":
             final_model,
@@ -1637,13 +1652,18 @@ def train(
         "daily_change_limit":
             daily_change_limit,
 
+        "uncertainty_z":
+            UNCERTAINTY_Z,
+
+        "uncertainty_max_margin":
+            UNCERTAINTY_MAX_MARGIN,
+
         "uses_rain":
             any(
                 c.startswith(
                     "rain_"
                 )
-                for c
-                in feature_cols
+                for c in feature_cols
             ),
 
         "uses_caudal":
@@ -1651,8 +1671,7 @@ def train(
                 c.startswith(
                     "q_"
                 )
-                for c
-                in feature_cols
+                for c in feature_cols
             ),
 
         "uses_upstream":
@@ -1663,11 +1682,9 @@ def train(
                 or c.startswith(
                     "upstream_"
                 )
-                for c
-                in feature_cols
+                for c in feature_cols
             ),
     }
-
 
     metrics = {
 
@@ -1691,8 +1708,10 @@ def train(
 
         "daily_change_limit":
             daily_change_limit,
-    }
 
+        "uncertainty_max_margin":
+            UNCERTAINTY_MAX_MARGIN,
+    }
 
     return (
         models,
@@ -1701,7 +1720,7 @@ def train(
 
 
 # ============================================================
-# PROYECTAR AGUAS ARRIBA UN DÍA
+# PROYECTAR AGUAS ARRIBA
 # ============================================================
 
 def _proyectar_upstream_un_dia(
@@ -1719,11 +1738,9 @@ def _proyectar_upstream_un_dia(
         .dropna()
     )
 
-
     if valid.empty:
 
         return np.nan
-
 
     actual = float(
         valid.iloc[
@@ -1731,12 +1748,10 @@ def _proyectar_upstream_un_dia(
         ]
     )
 
-
     pendiente = _safe_slope(
         valid,
         window=7,
     )
-
 
     volatilidad = (
         valid
@@ -1748,13 +1763,11 @@ def _proyectar_upstream_un_dia(
         .std()
     )
 
-
     if pd.isna(
         volatilidad
     ):
 
         volatilidad = 0.03
-
 
     limite = max(
         min(
@@ -1771,7 +1784,6 @@ def _proyectar_upstream_un_dia(
         0.03,
     )
 
-
     pendiente = float(
         np.clip(
             pendiente,
@@ -1780,12 +1792,10 @@ def _proyectar_upstream_un_dia(
         )
     )
 
-
     valor = (
         actual
         + pendiente
     )
-
 
     return float(
         np.clip(
@@ -1797,7 +1807,7 @@ def _proyectar_upstream_un_dia(
 
 
 # ============================================================
-# PREPARAR FUTURO LLUVIA + CAUDAL
+# PREPARAR FUTURO EXÓGENO
 # ============================================================
 
 def _preparar_future(
@@ -1816,9 +1826,10 @@ def _preparar_future(
 
         return pd.DataFrame()
 
-
-    future = exog_future.copy()
-
+    future = (
+        exog_future
+        .copy()
+    )
 
     future[
         "datetime"
@@ -1827,7 +1838,6 @@ def _preparar_future(
             "datetime"
         ]
     )
-
 
     if "precip_mm" in future.columns:
 
@@ -1847,7 +1857,6 @@ def _preparar_future(
             )
         )
 
-
     if "caudal_m3s" in future.columns:
 
         future[
@@ -1857,7 +1866,6 @@ def _preparar_future(
                 "caudal_m3s"
             ]
         )
-
 
     return (
         future
@@ -1901,9 +1909,10 @@ def _preparar_upstream_future(
 
         return pd.DataFrame()
 
-
-    future = upstream_future.copy()
-
+    future = (
+        upstream_future
+        .copy()
+    )
 
     future[
         "datetime"
@@ -1912,7 +1921,6 @@ def _preparar_upstream_future(
             "datetime"
         ]
     )
-
 
     for col in _upstream_cols(
         future
@@ -1925,7 +1933,6 @@ def _preparar_upstream_future(
                 col
             ]
         )
-
 
     return (
         future
@@ -1950,7 +1957,7 @@ def _preparar_upstream_future(
 
 
 # ============================================================
-# OBTENER VALOR FUTURO POR FECHA
+# VALOR FUTURO POR FECHA
 # ============================================================
 
 def _valor_futuro_por_fecha(
@@ -1966,12 +1973,10 @@ def _valor_futuro_por_fecha(
             pd.DataFrame,
         )
         or future.empty
-        or column
-        not in future.columns
+        or column not in future.columns
     ):
 
         return np.nan
-
 
     match = future[
         future[
@@ -1980,11 +1985,9 @@ def _valor_futuro_por_fecha(
         == target_date
     ]
 
-
     if match.empty:
 
         return np.nan
-
 
     return pd.to_numeric(
         match[
@@ -1997,7 +2000,7 @@ def _valor_futuro_por_fecha(
 
 
 # ============================================================
-# CREAR FEATURES PARA UN DÍA FUTURO
+# FEATURES DEL PRONÓSTICO
 # ============================================================
 
 def _crear_features_pronostico(
@@ -2010,11 +2013,6 @@ def _crear_features_pronostico(
 ):
 
     temp = history.copy()
-
-
-    # ========================================================
-    # FILA FUTURA AUXILIAR
-    # ========================================================
 
     row = {
 
@@ -2037,7 +2035,6 @@ def _crear_features_pronostico(
             caudal_next,
     }
 
-
     for col in _upstream_cols(
         temp
     ):
@@ -2054,7 +2051,6 @@ def _crear_features_pronostico(
             ),
         )
 
-
     trial = pd.concat(
         [
             temp,
@@ -2067,23 +2063,17 @@ def _crear_features_pronostico(
         ignore_index=True,
     )
 
-
     feat = crear_features(
         trial
     )
 
-
-    # La penúltima fila representa el día base.
-    # Sus variables *_next quedan construidas con
-    # los valores futuros del target_date.
-
+    # La penúltima fila representa el día desde el cual
+    # queremos calcular el cambio hacia target_date.
     source = feat.iloc[
         -2
     ]
 
-
     values = {}
-
 
     for col in feature_cols:
 
@@ -2092,11 +2082,9 @@ def _crear_features_pronostico(
             np.nan,
         )
 
-
         if pd.isna(
             value
         ):
-
 
             # =================================================
             # LLUVIA
@@ -2107,7 +2095,6 @@ def _crear_features_pronostico(
             ):
 
                 value = 0.0
-
 
             # =================================================
             # CAUDAL
@@ -2131,7 +2118,6 @@ def _crear_features_pronostico(
                         ),
                 )
 
-
             # =================================================
             # AGUAS ARRIBA
             # =================================================
@@ -2149,7 +2135,6 @@ def _crear_features_pronostico(
 
                 base = None
 
-
                 for upstream_col in _upstream_cols(
                     temp
                 ):
@@ -2161,7 +2146,6 @@ def _crear_features_pronostico(
                         base = upstream_col
 
                         break
-
 
                 if base is not None:
 
@@ -2179,7 +2163,6 @@ def _crear_features_pronostico(
                             ),
                     )
 
-
                 elif col.startswith(
                     "upstream_"
                 ):
@@ -2191,22 +2174,18 @@ def _crear_features_pronostico(
                             ],
                             default=np.nan,
                         )
-                        for c
-                        in _upstream_cols(
+                        for c in _upstream_cols(
                             temp
                         )
                     ]
 
-
                     vals = [
                         v
-                        for v
-                        in vals
+                        for v in vals
                         if pd.notna(
                             v
                         )
                     ]
-
 
                     if vals:
 
@@ -2216,18 +2195,15 @@ def _crear_features_pronostico(
                             )
                         )
 
-
             else:
 
                 value = 0.0
-
 
         values[
             col
         ] = float(
             value
         )
-
 
     return pd.DataFrame(
         [
@@ -2237,7 +2213,7 @@ def _crear_features_pronostico(
 
 
 # ============================================================
-# PRONÓSTICO RECURSIVO 1 A 30 DÍAS
+# PRONÓSTICO RECURSIVO
 # ============================================================
 
 def predict(
@@ -2258,7 +2234,6 @@ def predict(
         ),
     )
 
-
     if not isinstance(
         models,
         dict,
@@ -2268,14 +2243,12 @@ def predict(
             "models no es válido."
         )
 
-
     required = [
         "dataset",
         "model",
         "feature_cols",
         "rmse",
     ]
-
 
     for key in required:
 
@@ -2285,7 +2258,6 @@ def predict(
                 f"Falta models['{key}']."
             )
 
-
     history = (
         models[
             "dataset"
@@ -2293,23 +2265,19 @@ def predict(
         .copy()
     )
 
-
     model = models[
         "model"
     ]
 
-
     feature_cols = models[
         "feature_cols"
     ]
-
 
     rmse = float(
         models[
             "rmse"
         ]
     )
-
 
     daily_change_limit = float(
         models.get(
@@ -2318,11 +2286,9 @@ def predict(
         )
     )
 
-
     future = _preparar_future(
         exog_future
     )
-
 
     up_future = (
         _preparar_upstream_future(
@@ -2330,14 +2296,12 @@ def predict(
         )
     )
 
-
     last_date = history[
         "datetime"
     ].max()
 
-
     # ========================================================
-    # ASEGURAR QUE LA ÚLTIMA MEDICIÓN REAL SEA LA BASE
+    # ASEGURAR ÚLTIMA MEDICIÓN REAL
     # ========================================================
 
     try:
@@ -2346,11 +2310,9 @@ def predict(
             df
         )
 
-
         latest_local_date = local[
             "datetime"
         ].max()
-
 
         if (
             pd.notna(
@@ -2371,7 +2333,6 @@ def predict(
                     "nivel",
                 ]
             ].copy()
-
 
             for _, obs in missing.iterrows():
 
@@ -2401,7 +2362,6 @@ def predict(
                         ),
                 }
 
-
                 for col in _upstream_cols(
                     history
                 ):
@@ -2415,7 +2375,6 @@ def predict(
                         default=np.nan,
                     )
 
-
                 history = pd.concat(
                     [
                         history,
@@ -2428,29 +2387,24 @@ def predict(
                     ignore_index=True,
                 )
 
-
             last_date = history[
                 "datetime"
             ].max()
-
 
     except Exception:
 
         pass
 
-
     output = []
 
-
     # ========================================================
-    # PRONÓSTICO DÍA POR DÍA
+    # PRONÓSTICO DÍA A DÍA
     # ========================================================
 
     for h in range(
         1,
         days + 1,
     ):
-
 
         target_date = (
             last_date
@@ -2459,9 +2413,8 @@ def predict(
             )
         )
 
-
         # ====================================================
-        # LLUVIA DEL DÍA
+        # LLUVIA
         # ====================================================
 
         precip_next = (
@@ -2472,13 +2425,11 @@ def predict(
             )
         )
 
-
         if pd.isna(
             precip_next
         ):
 
             precip_next = 0.0
-
 
         precip_next = max(
             float(
@@ -2487,9 +2438,8 @@ def predict(
             0.0,
         )
 
-
         # ====================================================
-        # CAUDAL DEL DÍA
+        # CAUDAL
         # ====================================================
 
         caudal_next = (
@@ -2499,7 +2449,6 @@ def predict(
                 "caudal_m3s",
             )
         )
-
 
         if pd.isna(
             caudal_next
@@ -2519,13 +2468,11 @@ def predict(
                     ),
             )
 
-
         # ====================================================
         # AGUAS ARRIBA
         # ====================================================
 
         upstream_next = {}
-
 
         for col in _upstream_cols(
             history
@@ -2539,7 +2486,6 @@ def predict(
                 )
             )
 
-
             if pd.isna(
                 value
             ):
@@ -2550,7 +2496,6 @@ def predict(
                         col,
                     )
                 )
-
 
             if pd.isna(
                 value
@@ -2563,14 +2508,12 @@ def predict(
                     default=np.nan,
                 )
 
-
             upstream_next[
                 col
             ] = value
 
-
         # ====================================================
-        # CREAR VARIABLES
+        # FEATURES
         # ====================================================
 
         X = _crear_features_pronostico(
@@ -2594,9 +2537,8 @@ def predict(
                 upstream_next,
         )
 
-
         # ====================================================
-        # PREDECIR CAMBIO DIARIO
+        # PREDECIR CAMBIO
         # ====================================================
 
         delta_pred = float(
@@ -2604,7 +2546,6 @@ def predict(
                 X
             )[0]
         )
-
 
         nivel_base = float(
             history[
@@ -2614,9 +2555,8 @@ def predict(
             ]
         )
 
-
         # ====================================================
-        # LÍMITE HISTÓRICO
+        # CONTROL HISTÓRICO DEL SALTO DIARIO
         # ====================================================
 
         horizon_factor = min(
@@ -2625,18 +2565,15 @@ def predict(
             + (
                 0.01
                 * (
-                    h
-                    - 1
+                    h - 1
                 )
             ),
         )
-
 
         max_daily_level_change = (
             daily_change_limit
             * horizon_factor
         )
-
 
         delta_pred = float(
             np.clip(
@@ -2645,7 +2582,6 @@ def predict(
                 max_daily_level_change,
             )
         )
-
 
         # ====================================================
         # NIVEL RESULTANTE
@@ -2660,50 +2596,27 @@ def predict(
             )
         )
 
-
         # ====================================================
-        # INTERVALO EXPERIMENTAL
+        # INCERTIDUMBRE V11.7
         # ====================================================
 
-        sigma = (
-            rmse
-            * np.sqrt(
-                max(
-                    h,
-                    1,
-                )
-            )
+        (
+            lower,
+            upper,
+            uncertainty_margin,
+        ) = _calcular_incertidumbre(
+            prediction=
+                prediction,
+
+            rmse=
+                rmse,
+
+            horizon_day=
+                h,
         )
 
-
-        lower = float(
-            np.clip(
-                prediction
-                - (
-                    1.96
-                    * sigma
-                ),
-                LEVEL_MIN,
-                LEVEL_MAX_INTERNAL,
-            )
-        )
-
-
-        upper = float(
-            np.clip(
-                prediction
-                + (
-                    1.96
-                    * sigma
-                ),
-                LEVEL_MIN,
-                LEVEL_MAX_INTERNAL,
-            )
-        )
-
-
         # ====================================================
-        # RESULTADO DEL DÍA
+        # RESULTADO
         # ====================================================
 
         item = {
@@ -2719,6 +2632,9 @@ def predict(
 
             "upper":
                 upper,
+
+            "uncertainty_margin":
+                uncertainty_margin,
 
             "horizon_day":
                 h,
@@ -2736,23 +2652,20 @@ def predict(
                 caudal_next,
         }
 
-
         for col, value in upstream_next.items():
 
             item[
                 col
             ] = value
 
-
         output.append(
             item
         )
 
-
         # ====================================================
-        # MUY IMPORTANTE
+        # RECURSIVIDAD
         #
-        # EL NIVEL CALCULADO PASA A SER LA BASE DEL DÍA
+        # EL RESULTADO DEL DÍA ACTUAL ES LA BASE DEL DÍA
         # SIGUIENTE.
         # ====================================================
 
@@ -2771,13 +2684,11 @@ def predict(
                 caudal_next,
         }
 
-
         for col, value in upstream_next.items():
 
             new_row[
                 col
             ] = value
-
 
         history = pd.concat(
             [
@@ -2790,7 +2701,6 @@ def predict(
             ],
             ignore_index=True,
         )
-
 
     return pd.DataFrame(
         output
@@ -2814,7 +2724,6 @@ def prob(
         0.05,
     )
 
-
     z = (
         float(
             prediction
@@ -2824,13 +2733,11 @@ def prob(
         )
     ) / sigma
 
-
     z = np.clip(
         z,
         -50,
         50,
     )
-
 
     return float(
         1.0
