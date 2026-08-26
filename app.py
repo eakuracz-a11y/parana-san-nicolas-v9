@@ -56,13 +56,6 @@ st.markdown(
         margin-bottom: 20px;
     }
 
-    .status-box {
-        padding: 12px 16px;
-        border-radius: 10px;
-        background-color: rgba(120,120,120,0.08);
-        margin-bottom: 15px;
-    }
-
     div[data-testid="stMetric"] {
         background-color: rgba(120,120,120,0.05);
         border: 1px solid rgba(120,120,120,0.15);
@@ -99,7 +92,6 @@ st.markdown(
 today = date.today()
 
 default_end = today
-
 default_start = today - timedelta(days=30)
 
 
@@ -133,10 +125,11 @@ with st.sidebar:
 
     st.divider()
 
-    st.caption(
-        "Fuente de datos observados: "
-        "Instituto Nacional del Agua (INA)."
-    )
+    st.subheader("Objetivo")
+    st.write("San Nicolás de los Arroyos")
+
+    st.subheader("Fuente")
+    st.write("Instituto Nacional del Agua (INA)")
 
 
 # ============================================================
@@ -146,8 +139,7 @@ with st.sidebar:
 if start_date > end_date:
 
     st.error(
-        "La fecha Desde no puede ser posterior "
-        "a la fecha Hasta."
+        "La fecha Desde no puede ser posterior a la fecha Hasta."
     )
 
     st.stop()
@@ -163,15 +155,15 @@ if "ina_df" not in st.session_state:
 if "ina_error" not in st.session_state:
     st.session_state.ina_error = None
 
-if "diagnostic" not in st.session_state:
-    st.session_state.diagnostic = None
+if "ina_diag" not in st.session_state:
+    st.session_state.ina_diag = None
 
 if "last_query" not in st.session_state:
     st.session_state.last_query = None
 
 
 # ============================================================
-# CONSULTAR DATOS
+# FUNCIÓN DE CONSULTA
 # ============================================================
 
 def load_ina_data(start, end):
@@ -190,8 +182,13 @@ def load_ina_data(start, end):
 
 
 # ============================================================
-# CONSULTA AUTOMÁTICA INICIAL
+# CONSULTA
 # ============================================================
+
+current_query = (
+    str(start_date),
+    str(end_date),
+)
 
 need_initial_load = (
     st.session_state.last_query is None
@@ -204,21 +201,15 @@ if update_button or need_initial_load:
         "Consultando datos del INA..."
     ):
 
-        df, error, diag = load_ina_data(
+        df_loaded, error_loaded, diag_loaded = load_ina_data(
             start_date,
             end_date,
         )
 
-    st.session_state.ina_df = df
-
-    st.session_state.ina_error = error
-
-    st.session_state.diagnostic = diag
-
-    st.session_state.last_query = (
-        str(start_date),
-        str(end_date),
-    )
+    st.session_state.ina_df = df_loaded
+    st.session_state.ina_error = error_loaded
+    st.session_state.ina_diag = diag_loaded
+    st.session_state.last_query = current_query
 
 
 # ============================================================
@@ -229,7 +220,7 @@ df = st.session_state.ina_df
 
 ina_error = st.session_state.ina_error
 
-diag = st.session_state.diagnostic
+diag = st.session_state.ina_diag
 
 
 # ============================================================
@@ -277,50 +268,58 @@ with st.expander(
 
         col1, col2, col3, col4 = st.columns(4)
 
+        http_value = diag.get("http_status")
+
+        if http_value is None:
+            http_value = "—"
+
         col1.metric(
             "HTTP",
-            diag.get("http_status")
-            if diag.get("http_status") is not None
-            else "—",
+            http_value,
         )
 
         col2.metric(
             "Serie",
-            diag.get("series_id", "—"),
+            diag.get(
+                "series_id",
+                "—",
+            ),
         )
 
         col3.metric(
             "Tipo",
-            diag.get("tipo", "—"),
+            diag.get(
+                "tipo",
+                "—",
+            ),
         )
 
         col4.metric(
             "Registros",
-            diag.get("registros", 0),
+            diag.get(
+                "registros",
+                0,
+            ),
         )
 
         col5, col6 = st.columns(2)
 
-        col5.write(
-            "**Desde:**",
-            diag.get("desde", "—"),
+        col5.markdown(
+            f"**Desde:** {diag.get('desde', '—')}"
         )
 
-        col6.write(
-            "**Hasta:**",
-            diag.get("hasta", "—"),
+        col6.markdown(
+            f"**Hasta:** {diag.get('hasta', '—')}"
         )
 
-        st.write(
-            "**Endpoint:**",
-            diag.get("endpoint", "—"),
+        st.markdown(
+            f"**Endpoint:** {diag.get('endpoint', '—')}"
         )
 
         if diag.get("error"):
 
             st.error(
-                f"Error informado: "
-                f"{diag.get('error')}"
+                f"Error informado: {diag.get('error')}"
             )
 
         elif diag.get("http_status") == 200:
@@ -360,6 +359,35 @@ if df.empty:
         "Cuando el INA entregue observaciones válidas, "
         "en esta sección aparecerán el nivel actual, "
         "la variación y el gráfico histórico."
+    )
+
+    st.divider()
+
+    st.subheader("🔮 Pronóstico experimental")
+
+    meta = forecast_meta()
+
+    st.info(
+        meta.get(
+            "observacion",
+            "Pronóstico experimental generado "
+            "por el modelo propio.",
+        )
+    )
+
+    with st.expander(
+        "📍 Estaciones consideradas"
+    ):
+
+        for station in STATIONS:
+            st.write(f"• {station}")
+
+    st.divider()
+
+    st.caption(
+        "Paraná · San Nicolás | "
+        "Datos observados: INA | "
+        "Predicción: modelo experimental propio"
     )
 
     st.stop()
@@ -436,7 +464,6 @@ if len(df) >= 2:
 else:
 
     previous_level = None
-
     variation = 0.0
 
 
@@ -500,8 +527,7 @@ m4.metric(
 
 
 st.caption(
-    "Última medición disponible: "
-    f"{last_datetime}"
+    f"Última medición disponible: {last_datetime}"
 )
 
 
@@ -554,7 +580,6 @@ fig.update_layout(
 )
 
 
-# Escala fija solicitada para la plataforma
 fig.update_yaxes(
     range=[0, 7],
     dtick=0.5,
@@ -608,60 +633,69 @@ with st.expander(
 
 
 # ============================================================
-# INFORMACIÓN DEL SERVICIO
+# PRONÓSTICO EXPERIMENTAL
 # ============================================================
+
+st.divider()
+
+st.subheader("🔮 Pronóstico experimental")
 
 meta = forecast_meta()
 
+st.info(
+    meta.get(
+        "observacion",
+        (
+            "Pronóstico experimental generado "
+            "por el modelo propio."
+        ),
+    )
+)
+
+
+with st.expander(
+    "📍 Estaciones consideradas"
+):
+
+    for station in STATIONS:
+
+        st.write(
+            f"• {station}"
+        )
+
+
+# ============================================================
+# INFORMACIÓN FUENTE
+# ============================================================
 
 with st.expander(
     "ℹ️ Información de la fuente"
 ):
 
-    st.write(
-        "**Fuente:**",
-        meta.get("fuente", "INA"),
+    st.markdown(
+        f"**Fuente:** {meta.get('fuente', 'INA')}"
     )
 
-    st.write(
-        "**Servicio:**",
-        meta.get("servicio", "—"),
+    st.markdown(
+        f"**Servicio:** {meta.get('servicio', '—')}"
     )
 
-    st.write(
-        "**Estación:**",
-        meta.get(
-            "estacion",
-            "San Nicolás",
-        ),
+    st.markdown(
+        f"**Estación:** {meta.get('estacion', 'San Nicolás')}"
     )
 
-    st.write(
-        "**Serie:**",
-        meta.get("serie", 36),
+    st.markdown(
+        f"**Serie:** {meta.get('serie', 36)}"
     )
 
-    st.write(
-        "**Variable:**",
-        meta.get(
-            "variable",
-            "Nivel hidrométrico",
-        ),
+    st.markdown(
+        f"**Variable:** "
+        f"{meta.get('variable', 'Nivel hidrométrico')}"
     )
 
-    st.write(
-        "**Unidad:**",
-        meta.get(
-            "unidad",
-            "metros",
-        ),
+    st.markdown(
+        f"**Unidad:** {meta.get('unidad', 'metros')}"
     )
-
-    if meta.get("observacion"):
-
-        st.caption(
-            meta["observacion"]
-        )
 
 
 # ============================================================
@@ -671,7 +705,7 @@ with st.expander(
 st.divider()
 
 st.caption(
-    "Paraná · San Nicolás · "
-    "Sistema experimental de monitoreo hidrológico. "
-    "Los datos oficiales corresponden al INA."
+    "Paraná · San Nicolás | "
+    "Datos observados: INA | "
+    "Predicción: modelo experimental propio"
 )
