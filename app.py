@@ -2,7 +2,7 @@
 # PARANÁ · SAN NICOLÁS
 # app.py
 #
-# Monitoreo hidrológico y diagnóstico INA
+# V2 - Monitoreo hidrológico + diagnóstico detallado INA
 # ============================================================
 
 from datetime import date, timedelta
@@ -20,7 +20,7 @@ from src.ina import (
 
 
 # ============================================================
-# CONFIGURACIÓN DE PÁGINA
+# CONFIGURACIÓN
 # ============================================================
 
 st.set_page_config(
@@ -40,7 +40,7 @@ st.markdown(
     <style>
 
     .block-container {
-        padding-top: 1.5rem;
+        padding-top: 1.4rem;
         padding-bottom: 3rem;
         max-width: 1500px;
     }
@@ -52,7 +52,7 @@ st.markdown(
     .subtitle {
         color: #6b7280;
         font-size: 0.95rem;
-        margin-top: -5px;
+        margin-top: -6px;
         margin-bottom: 20px;
     }
 
@@ -86,12 +86,13 @@ st.markdown(
 
 
 # ============================================================
-# FECHAS POR DEFECTO
+# FECHAS
 # ============================================================
 
 today = date.today()
 
 default_end = today
+
 default_start = today - timedelta(days=30)
 
 
@@ -125,21 +126,22 @@ with st.sidebar:
 
     st.divider()
 
-    st.subheader("Objetivo")
+    st.markdown("### Objetivo")
     st.write("San Nicolás de los Arroyos")
 
-    st.subheader("Fuente")
+    st.markdown("### Fuente")
     st.write("Instituto Nacional del Agua (INA)")
 
 
 # ============================================================
-# VALIDACIÓN DE FECHAS
+# VALIDAR FECHAS
 # ============================================================
 
 if start_date > end_date:
 
     st.error(
-        "La fecha Desde no puede ser posterior a la fecha Hasta."
+        "La fecha Desde no puede ser posterior "
+        "a la fecha Hasta."
     )
 
     st.stop()
@@ -163,7 +165,7 @@ if "last_query" not in st.session_state:
 
 
 # ============================================================
-# FUNCIÓN DE CONSULTA
+# FUNCIÓN DE CARGA
 # ============================================================
 
 def load_ina_data(start, end):
@@ -202,18 +204,21 @@ if update_button or need_initial_load:
     ):
 
         df_loaded, error_loaded, diag_loaded = load_ina_data(
-            start_date,
-            end_date,
+            start=start_date,
+            end=end_date,
         )
 
     st.session_state.ina_df = df_loaded
+
     st.session_state.ina_error = error_loaded
+
     st.session_state.ina_diag = diag_loaded
+
     st.session_state.last_query = current_query
 
 
 # ============================================================
-# RECUPERAR RESULTADOS
+# DATOS DE SESIÓN
 # ============================================================
 
 df = st.session_state.ina_df
@@ -229,6 +234,7 @@ diag = st.session_state.ina_diag
 
 st.subheader("Estado del sistema")
 
+
 if ina_error is None and not df.empty:
 
     st.success(
@@ -238,8 +244,9 @@ if ina_error is None and not df.empty:
 elif diag and diag.get("http_status") == 200:
 
     st.warning(
-        "INA respondió, pero no se encontraron "
-        "datos válidos para el período seleccionado."
+        "INA respondió correctamente, "
+        "pero todavía no se obtuvieron observaciones "
+        "utilizables."
     )
 
 else:
@@ -250,7 +257,7 @@ else:
 
 
 # ============================================================
-# DIAGNÓSTICO INA
+# DIAGNÓSTICO BÁSICO
 # ============================================================
 
 with st.expander(
@@ -266,19 +273,25 @@ with st.expander(
 
     else:
 
-        col1, col2, col3, col4 = st.columns(4)
+        # ----------------------------------------------------
+        # MÉTRICAS PRINCIPALES
+        # ----------------------------------------------------
 
-        http_value = diag.get("http_status")
+        c1, c2, c3, c4 = st.columns(4)
 
-        if http_value is None:
-            http_value = "—"
-
-        col1.metric(
-            "HTTP",
-            http_value,
+        http_status = diag.get(
+            "http_status"
         )
 
-        col2.metric(
+        if http_status is None:
+            http_status = "—"
+
+        c1.metric(
+            "HTTP",
+            http_status,
+        )
+
+        c2.metric(
             "Serie",
             diag.get(
                 "series_id",
@@ -286,7 +299,7 @@ with st.expander(
             ),
         )
 
-        col3.metric(
+        c3.metric(
             "Tipo",
             diag.get(
                 "tipo",
@@ -294,7 +307,7 @@ with st.expander(
             ),
         )
 
-        col4.metric(
+        c4.metric(
             "Registros",
             diag.get(
                 "registros",
@@ -302,24 +315,36 @@ with st.expander(
             ),
         )
 
-        col5, col6 = st.columns(2)
+        # ----------------------------------------------------
+        # FECHAS
+        # ----------------------------------------------------
 
-        col5.markdown(
+        c5, c6 = st.columns(2)
+
+        c5.markdown(
             f"**Desde:** {diag.get('desde', '—')}"
         )
 
-        col6.markdown(
+        c6.markdown(
             f"**Hasta:** {diag.get('hasta', '—')}"
         )
+
+        # ----------------------------------------------------
+        # ENDPOINT
+        # ----------------------------------------------------
 
         st.markdown(
             f"**Endpoint:** {diag.get('endpoint', '—')}"
         )
 
+        # ----------------------------------------------------
+        # ESTADO
+        # ----------------------------------------------------
+
         if diag.get("error"):
 
             st.error(
-                f"Error informado: {diag.get('error')}"
+                f"Error INA: {diag.get('error')}"
             )
 
         elif diag.get("http_status") == 200:
@@ -333,9 +358,147 @@ with st.expander(
             else:
 
                 st.warning(
-                    "El INA responde HTTP 200, "
-                    "pero la consulta devuelve 0 registros."
+                    "HTTP 200, pero la función actual "
+                    "no detectó registros de observaciones."
                 )
+
+
+# ============================================================
+# DIAGNÓSTICO AVANZADO
+# ============================================================
+
+with st.expander(
+    "🧪 Diagnóstico avanzado de respuesta INA",
+    expanded=True,
+):
+
+    if diag is None:
+
+        st.info(
+            "No hay información de diagnóstico."
+        )
+
+    else:
+
+        # ----------------------------------------------------
+        # TIPO JSON
+        # ----------------------------------------------------
+
+        st.markdown("### Tipo de respuesta JSON")
+
+        json_tipo = diag.get(
+            "json_tipo"
+        )
+
+        if json_tipo:
+
+            st.code(
+                str(json_tipo)
+            )
+
+        else:
+
+            st.write(
+                "No detectado"
+            )
+
+        # ----------------------------------------------------
+        # CLAVES PRINCIPALES
+        # ----------------------------------------------------
+
+        st.markdown(
+            "### Claves principales devueltas por INA"
+        )
+
+        json_claves = diag.get(
+            "json_claves"
+        )
+
+        if json_claves:
+
+            st.code(
+                str(json_claves)
+            )
+
+        else:
+
+            st.write(
+                "No se detectaron claves."
+            )
+
+        # ----------------------------------------------------
+        # COLUMNAS
+        # ----------------------------------------------------
+
+        st.markdown(
+            "### Columnas detectadas"
+        )
+
+        columnas = diag.get(
+            "columnas_detectadas"
+        )
+
+        if columnas:
+
+            st.code(
+                str(columnas)
+            )
+
+        else:
+
+            st.write(
+                "No se detectaron columnas."
+            )
+
+        # ----------------------------------------------------
+        # PRIMER REGISTRO
+        # ----------------------------------------------------
+
+        st.markdown(
+            "### Primer registro recibido"
+        )
+
+        primer_registro = diag.get(
+            "primer_registro"
+        )
+
+        if primer_registro:
+
+            st.code(
+                str(primer_registro),
+                language="text",
+            )
+
+        else:
+
+            st.write(
+                "No fue posible extraer un primer registro."
+            )
+
+        # ----------------------------------------------------
+        # PREVIEW COMPLETO
+        # ----------------------------------------------------
+
+        st.markdown(
+            "### Vista previa de la respuesta INA"
+        )
+
+        preview = diag.get(
+            "respuesta_preview"
+        )
+
+        if preview:
+
+            st.code(
+                str(preview),
+                language="text",
+            )
+
+        else:
+
+            st.write(
+                "No hay vista previa disponible."
+            )
 
 
 # ============================================================
@@ -350,28 +513,29 @@ if ina_error:
 
 
 # ============================================================
-# SI NO HAY DATOS
+# SI NO HAY DATOS NORMALIZADOS
 # ============================================================
 
 if df.empty:
 
     st.info(
-        "Cuando el INA entregue observaciones válidas, "
-        "en esta sección aparecerán el nivel actual, "
-        "la variación y el gráfico histórico."
+        "La aplicación está conectándose al INA. "
+        "El diagnóstico avanzado permitirá identificar "
+        "la estructura exacta de la respuesta."
     )
 
     st.divider()
 
-    st.subheader("🔮 Pronóstico experimental")
+    st.subheader(
+        "🔮 Pronóstico experimental"
+    )
 
     meta = forecast_meta()
 
     st.info(
         meta.get(
             "observacion",
-            "Pronóstico experimental generado "
-            "por el modelo propio.",
+            "Modelo experimental.",
         )
     )
 
@@ -380,7 +544,10 @@ if df.empty:
     ):
 
         for station in STATIONS:
-            st.write(f"• {station}")
+
+            st.write(
+                f"• {station}"
+            )
 
     st.divider()
 
@@ -399,15 +566,18 @@ if df.empty:
 
 df = df.copy()
 
+
 df["datetime"] = pd.to_datetime(
     df["datetime"],
     errors="coerce",
 )
 
+
 df["value"] = pd.to_numeric(
     df["value"],
     errors="coerce",
 )
+
 
 df = df.dropna(
     subset=[
@@ -416,15 +586,18 @@ df = df.dropna(
     ]
 )
 
-df = df.sort_values(
-    "datetime"
-).reset_index(drop=True)
+
+df = (
+    df
+    .sort_values("datetime")
+    .reset_index(drop=True)
+)
 
 
 if df.empty:
 
     st.warning(
-        "Se recibieron registros del INA, "
+        "El INA devolvió información, "
         "pero no quedaron valores válidos "
         "después de procesarlos."
     )
@@ -438,9 +611,11 @@ if df.empty:
 
 last_row = df.iloc[-1]
 
+
 last_level = float(
     last_row["value"]
 )
+
 
 last_datetime = last_row[
     "datetime"
@@ -448,7 +623,7 @@ last_datetime = last_row[
 
 
 # ============================================================
-# VARIACIÓN
+# NIVEL ANTERIOR
 # ============================================================
 
 if len(df) >= 2:
@@ -464,6 +639,7 @@ if len(df) >= 2:
 else:
 
     previous_level = None
+
     variation = 0.0
 
 
@@ -485,10 +661,13 @@ else:
 
 
 # ============================================================
-# MÉTRICAS
+# MÉTRICAS NIVEL
 # ============================================================
 
-st.subheader("📊 Nivel observado")
+st.subheader(
+    "📊 Nivel observado"
+)
+
 
 m1, m2, m3, m4 = st.columns(4)
 
@@ -521,8 +700,8 @@ m3.metric(
 
 
 m4.metric(
-    "Registros",
-    f"{len(df)}",
+    "Registros válidos",
+    len(df),
 )
 
 
@@ -532,7 +711,7 @@ st.caption(
 
 
 # ============================================================
-# GRÁFICO HISTÓRICO
+# GRÁFICO
 # ============================================================
 
 st.subheader(
@@ -570,13 +749,6 @@ fig.update_layout(
     xaxis_title="Fecha",
     yaxis_title="Nivel (m)",
     hovermode="x unified",
-    legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=1.02,
-        xanchor="left",
-        x=0,
-    ),
 )
 
 
@@ -598,7 +770,7 @@ st.plotly_chart(
 
 
 # ============================================================
-# TABLA DE DATOS
+# TABLA
 # ============================================================
 
 with st.expander(
@@ -612,15 +784,18 @@ with st.expander(
         ]
     ].copy()
 
+
     table_df.columns = [
         "Fecha / hora",
         "Nivel (m)",
     ]
 
+
     table_df["Nivel (m)"] = (
         table_df["Nivel (m)"]
         .round(2)
     )
+
 
     st.dataframe(
         table_df.sort_values(
@@ -633,40 +808,11 @@ with st.expander(
 
 
 # ============================================================
-# PRONÓSTICO EXPERIMENTAL
+# FUENTE
 # ============================================================
-
-st.divider()
-
-st.subheader("🔮 Pronóstico experimental")
 
 meta = forecast_meta()
 
-st.info(
-    meta.get(
-        "observacion",
-        (
-            "Pronóstico experimental generado "
-            "por el modelo propio."
-        ),
-    )
-)
-
-
-with st.expander(
-    "📍 Estaciones consideradas"
-):
-
-    for station in STATIONS:
-
-        st.write(
-            f"• {station}"
-        )
-
-
-# ============================================================
-# INFORMACIÓN FUENTE
-# ============================================================
 
 with st.expander(
     "ℹ️ Información de la fuente"
@@ -689,8 +835,7 @@ with st.expander(
     )
 
     st.markdown(
-        f"**Variable:** "
-        f"{meta.get('variable', 'Nivel hidrométrico')}"
+        f"**Variable:** {meta.get('variable', 'Nivel hidrométrico')}"
     )
 
     st.markdown(
