@@ -2,7 +2,7 @@
 # PARANÁ · SAN NICOLÁS
 # src/ina.py
 #
-# V2 - Diagnóstico detallado de respuesta INA A5
+# V3 - INA robusto con A5 + fallback API pública
 # ============================================================
 
 from datetime import date, datetime
@@ -16,6 +16,8 @@ import requests
 # ============================================================
 
 INA_A5_URL = "https://alerta.ina.gob.ar/a5/getObservaciones"
+
+INA_PUBLIC_URL = "https://alerta.ina.gob.ar/pub/datos/datos"
 
 REQUEST_TIMEOUT = 60
 
@@ -55,9 +57,6 @@ STATION_CODES = {
 # ============================================================
 
 def _format_date(value):
-    """
-    Convierte una fecha a YYYY-MM-DD.
-    """
 
     if value is None:
         raise ValueError("La fecha no puede estar vacía.")
@@ -77,90 +76,118 @@ def _format_date(value):
 
 
 # ============================================================
-# EXTRAER REGISTROS
+# UTILIDAD
 # ============================================================
+
+def _safe_json(response):
+
+    if response.status_code != 200:
+
+        raise RuntimeError(
+            f"INA respondió HTTP {response.status_code}."
+        )
+
+    if not response.text.strip():
+
+        raise RuntimeError(
+            "INA respondió sin contenido."
+        )
+
+    try:
+
+        return response.json()
+
+    except ValueError as exc:
+
+        preview = response.text[:500]
+
+        raise RuntimeError(
+            "INA no devolvió JSON válido. "
+            f"Respuesta inicial: {preview}"
+        ) from exc
+
+
+# ============================================================
+# EXTRACCIÓN RECURSIVA
+# ============================================================
+
+def _looks_like_record(obj):
+
+    if not isinstance(obj, dict):
+        return False
+
+    keys = {
+        str(k).lower()
+        for k in obj.keys()
+    }
+
+    date_tokens = [
+        "fecha",
+        "date",
+        "time",
+        "timestamp",
+        "timestart",
+    ]
+
+    value_tokens = [
+        "valor",
+        "value",
+        "nivel",
+        "altura",
+        "obsvalue",
+    ]
+
+    has_date = any(
+        any(token in key for token in date_tokens)
+        for key in keys
+    )
+
+    has_value = any(
+        any(token in key for token in value_tokens)
+        for key in keys
+    )
+
+    return has_date and has_value
+
 
 def _extract_records(data):
     """
-    Busca registros de observaciones dentro de la respuesta
-    del INA, considerando distintas estructuras posibles.
+    Extrae observaciones aunque el JSON venga anidado.
     """
 
-    if data is None:
-        return []
+    records = []
 
-    if isinstance(data, list):
-        return data
+    def walk(obj):
 
-    if not isinstance(data, dict):
-        return []
+        if isinstance(obj, list):
 
-    possible_keys = [
-        "observaciones",
-        "data",
-        "datos",
-        "results",
-        "result",
-        "items",
-        "values",
-        "observations",
-    ]
+            for item in obj:
 
-    for key in possible_keys:
+                if _looks_like_record(item):
+                    records.append(item)
+                else:
+                    walk(item)
 
-        value = data.get(key)
+        elif isinstance(obj, dict):
 
-        if isinstance(value, list):
-            return value
+            if _looks_like_record(obj):
 
-        if isinstance(value, dict):
+                records.append(obj)
+                return
 
-            nested = _extract_records(value)
+            for value in obj.values():
+                walk(value)
 
-            if nested:
-                return nested
+    walk(data)
 
-    # Si el diccionario ya parece ser un registro
-    lower_keys = {
-        str(key).lower()
-        for key in data.keys()
-    }
-
-    possible_date_keys = {
-        "fecha",
-        "datetime",
-        "date",
-        "timestamp",
-        "timestart",
-        "time",
-    }
-
-    possible_value_keys = {
-        "valor",
-        "value",
-        "obsvalue",
-        "nivel",
-        "altura",
-        "level",
-    }
-
-    if (
-        lower_keys.intersection(possible_date_keys)
-        and lower_keys.intersection(possible_value_keys)
-    ):
-        return [data]
-
-    return []
+    return records
 
 
 # ============================================================
-# BUSCAR COLUMNA
+# BUSCAR COLUMNAS
 # ============================================================
 
 def _find_column(df, candidates):
-    """
-    Busca columnas ignorando mayúsculas y minúsculas.
-    """
 
     lookup = {
         str(column).strip().lower(): column
@@ -178,14 +205,10 @@ def _find_column(df, candidates):
 
 
 # ============================================================
-# NORMALIZAR DATOS
+# NORMALIZACIÓN
 # ============================================================
 
 def _normalize_observations(records):
-    """
-    Convierte los registros del INA al formato esperado
-    por app.py.
-    """
 
     if not records:
         return pd.DataFrame()
@@ -215,9 +238,8 @@ def _normalize_observations(records):
             "date",
             "timestamp",
             "time",
-            "fechaHora",
             "fecha_hora",
-            "inicio",
+            "fechaHora",
         ],
     )
 
@@ -235,13 +257,11 @@ def _normalize_observations(records):
             "nivel",
             "altura",
             "level",
-            "valorNumerico",
-            "valor_numerico",
         ],
     )
 
     # --------------------------------------------------------
-    # BUSQUEDA FLEXIBLE DE FECHA
+    # BÚSQUEDA FLEXIBLE FECHA
     # --------------------------------------------------------
 
     if datetime_column is None:
@@ -255,12 +275,11 @@ def _normalize_observations(records):
                 or "date" in name
                 or "time" in name
             ):
-
                 datetime_column = column
                 break
 
     # --------------------------------------------------------
-    # BUSQUEDA FLEXIBLE DE VALOR
+    # BÚSQUEDA FLEXIBLE VALOR
     # --------------------------------------------------------
 
     if value_column is None:
@@ -275,7 +294,6 @@ def _normalize_observations(records):
                 or "nivel" in name
                 or "altura" in name
             ):
-
                 value_column = column
                 break
 
@@ -293,14 +311,14 @@ def _normalize_observations(records):
         utc=True,
     )
 
-    values = (
+    raw_values = (
         df[value_column]
         .astype(str)
         .str.replace(",", ".", regex=False)
     )
 
     result["value"] = pd.to_numeric(
-        values,
+        raw_values,
         errors="coerce",
     )
 
@@ -314,8 +332,12 @@ def _normalize_observations(records):
     if result.empty:
         return pd.DataFrame()
 
+    # Rango amplio de seguridad
     result = result[
-        result["value"].between(-5, 20)
+        result["value"].between(
+            -5,
+            20,
+        )
     ].copy()
 
     if result.empty:
@@ -332,90 +354,78 @@ def _normalize_observations(records):
     )
 
     result["station"] = "San Nicolás"
+
     result["station_code"] = 36
-    result["series_id"] = 36
+
+    result["series_id"] = SAN_NICOLAS_SERIES_ID
+
     result["variable"] = "Nivel hidrométrico"
+
     result["unit"] = "m"
 
     return result
 
 
 # ============================================================
-# CONSULTA INA
+# CONSULTA A5
 # ============================================================
 
-def _request_ina(start, end, series_id):
-    """
-    Ejecuta la consulta al INA y devuelve:
-    response, json, error
-    """
-
-    start_str = _format_date(start)
-    end_str = _format_date(end)
+def _request_a5(start, end):
 
     params = {
         "tipo": "puntual",
-        "series_id": int(series_id),
-        "timestart": start_str,
-        "timeend": end_str,
+        "series_id": SAN_NICOLAS_SERIES_ID,
+        "timestart": _format_date(start),
+        "timeend": _format_date(end),
     }
 
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "Parana-San-Nicolas-App/2.0",
+    response = requests.get(
+        INA_A5_URL,
+        params=params,
+        timeout=REQUEST_TIMEOUT,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Parana-San-Nicolas-App/3.0",
+        },
+    )
+
+    data = _safe_json(response)
+
+    return response, data, params
+
+
+# ============================================================
+# CONSULTA API PÚBLICA
+# ============================================================
+
+def _request_public(start, end):
+
+    params = {
+        "timeStart": _format_date(start),
+        "timeEnd": _format_date(end),
+        "seriesId": SAN_NICOLAS_SERIES_ID,
+        "format": "json",
     }
 
-    try:
+    response = requests.get(
+        INA_PUBLIC_URL,
+        params=params,
+        timeout=REQUEST_TIMEOUT,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Parana-San-Nicolas-App/3.0",
+        },
+    )
 
-        response = requests.get(
-            INA_A5_URL,
-            params=params,
-            headers=headers,
-            timeout=REQUEST_TIMEOUT,
-        )
+    data = _safe_json(response)
 
-    except requests.Timeout as exc:
+    if isinstance(data, dict):
 
-        raise RuntimeError(
-            "El INA demoró demasiado en responder."
-        ) from exc
+        if data.get("mensaje"):
 
-    except requests.ConnectionError as exc:
-
-        raise RuntimeError(
-            "No fue posible conectarse con el INA."
-        ) from exc
-
-    except requests.RequestException as exc:
-
-        raise RuntimeError(
-            f"Error de comunicación con INA: {exc}"
-        ) from exc
-
-    if response.status_code != 200:
-
-        raise RuntimeError(
-            f"INA respondió HTTP {response.status_code}."
-        )
-
-    if not response.text.strip():
-
-        raise RuntimeError(
-            "INA respondió correctamente pero sin contenido."
-        )
-
-    try:
-
-        data = response.json()
-
-    except ValueError as exc:
-
-        preview = response.text[:500]
-
-        raise RuntimeError(
-            "INA no devolvió JSON válido. "
-            f"Respuesta inicial: {preview}"
-        ) from exc
+            raise RuntimeError(
+                f"INA: {data.get('mensaje')}"
+            )
 
     return response, data, params
 
@@ -424,36 +434,73 @@ def _request_ina(start, end, series_id):
 # GET SERIES
 # ============================================================
 
-def get_series(
-    start,
-    end,
-    series_id=SAN_NICOLAS_SERIES_ID,
-):
-    """
-    Devuelve observaciones normalizadas.
-    """
+def get_series(start, end):
 
     start_str = _format_date(start)
     end_str = _format_date(end)
 
-    if pd.to_datetime(start_str) > pd.to_datetime(end_str):
+    if (
+        pd.to_datetime(start_str)
+        > pd.to_datetime(end_str)
+    ):
 
         raise ValueError(
             "La fecha Desde no puede ser posterior a Hasta."
         )
 
-    response, data, params = _request_ina(
-        start=start,
-        end=end,
-        series_id=series_id,
-    )
+    # ========================================================
+    # INTENTO 1 - A5
+    # ========================================================
 
-    records = _extract_records(data)
+    try:
 
-    if not records:
-        return pd.DataFrame()
+        _, data_a5, _ = _request_a5(
+            start=start,
+            end=end,
+        )
 
-    return _normalize_observations(records)
+        records_a5 = _extract_records(
+            data_a5
+        )
+
+        df_a5 = _normalize_observations(
+            records_a5
+        )
+
+        if not df_a5.empty:
+
+            return df_a5
+
+    except Exception:
+        pass
+
+    # ========================================================
+    # INTENTO 2 - API PÚBLICA
+    # ========================================================
+
+    try:
+
+        _, data_public, _ = _request_public(
+            start=start,
+            end=end,
+        )
+
+        records_public = _extract_records(
+            data_public
+        )
+
+        df_public = _normalize_observations(
+            records_public
+        )
+
+        if not df_public.empty:
+
+            return df_public
+
+    except Exception:
+        pass
+
+    return pd.DataFrame()
 
 
 # ============================================================
@@ -461,18 +508,12 @@ def get_series(
 # ============================================================
 
 def observed(start, end):
-    """
-    app.py espera exactamente:
-
-        df, error = observed(start, end)
-    """
 
     try:
 
         df = get_series(
             start=start,
             end=end,
-            series_id=SAN_NICOLAS_SERIES_ID,
         )
 
         if df.empty:
@@ -480,9 +521,9 @@ def observed(start, end):
             return (
                 pd.DataFrame(),
                 (
-                    "El INA respondió correctamente, "
-                    "pero no se pudieron interpretar "
-                    "observaciones válidas para San Nicolás."
+                    "INA respondió, pero no fue posible "
+                    "obtener observaciones válidas para "
+                    "San Nicolás."
                 ),
             )
 
@@ -500,54 +541,49 @@ def observed(start, end):
 
 
 # ============================================================
-# DIAGNÓSTICO DETALLADO
+# DIAGNÓSTICO
 # ============================================================
 
 def diagnostic(start, end):
-    """
-    Diagnóstico completo de la respuesta del INA.
-    """
-
-    start_str = _format_date(start)
-    end_str = _format_date(end)
 
     info = {
         "endpoint": INA_A5_URL,
         "series_id": SAN_NICOLAS_SERIES_ID,
         "tipo": "puntual",
-        "desde": start_str,
-        "hasta": end_str,
+        "desde": _format_date(start),
+        "hasta": _format_date(end),
+
         "http_status": None,
         "registros": 0,
         "error": None,
 
-        # Nuevos campos de diagnóstico
         "json_tipo": None,
         "json_claves": None,
-        "primer_registro": None,
         "columnas_detectadas": None,
+        "primer_registro": None,
         "respuesta_preview": None,
+
+        "fuente_utilizada": None,
     }
+
+    # ========================================================
+    # DIAGNÓSTICO A5
+    # ========================================================
 
     try:
 
-        response, data, params = _request_ina(
+        response, data, _ = _request_a5(
             start=start,
             end=end,
-            series_id=SAN_NICOLAS_SERIES_ID,
         )
 
-        info["http_status"] = response.status_code
+        info["http_status"] = (
+            response.status_code
+        )
 
-        # ----------------------------------------------------
-        # TIPO DE JSON
-        # ----------------------------------------------------
-
-        info["json_tipo"] = type(data).__name__
-
-        # ----------------------------------------------------
-        # CLAVES PRINCIPALES
-        # ----------------------------------------------------
+        info["json_tipo"] = (
+            type(data).__name__
+        )
 
         if isinstance(data, dict):
 
@@ -558,68 +594,128 @@ def diagnostic(start, end):
         elif isinstance(data, list):
 
             info["json_claves"] = [
-                "Respuesta raíz tipo lista"
+                "respuesta_raiz_lista"
             ]
 
-        # ----------------------------------------------------
-        # PREVIEW DE RESPUESTA
-        # ----------------------------------------------------
-
-        info["respuesta_preview"] = str(data)[:1000]
-
-        # ----------------------------------------------------
-        # EXTRAER REGISTROS
-        # ----------------------------------------------------
+        info["respuesta_preview"] = (
+            str(data)[:1500]
+        )
 
         records = _extract_records(data)
 
         info["registros"] = len(records)
 
-        # ----------------------------------------------------
-        # PRIMER REGISTRO
-        # ----------------------------------------------------
-
         if records:
 
-            info["primer_registro"] = str(
-                records[0]
-            )[:1000]
+            info["primer_registro"] = (
+                str(records[0])[:1000]
+            )
 
             try:
 
-                temp_df = pd.json_normalize(
+                temp = pd.json_normalize(
                     records
                 )
 
-                info["columnas_detectadas"] = list(
-                    temp_df.columns
-                )
+                info[
+                    "columnas_detectadas"
+                ] = list(temp.columns)
 
             except Exception:
 
-                try:
+                pass
 
-                    temp_df = pd.DataFrame(
-                        records
-                    )
+            df = _normalize_observations(
+                records
+            )
 
-                    info["columnas_detectadas"] = list(
-                        temp_df.columns
-                    )
+            if not df.empty:
 
-                except Exception:
+                info["fuente_utilizada"] = (
+                    "INA A5"
+                )
 
-                    info["columnas_detectadas"] = [
-                        "No se pudieron detectar"
-                    ]
+                info["registros"] = len(df)
 
-        return info
+                return info
 
     except Exception as exc:
 
-        info["error"] = str(exc)
+        info["error"] = (
+            f"A5: {exc}"
+        )
 
-        return info
+    # ========================================================
+    # DIAGNÓSTICO API PÚBLICA
+    # ========================================================
+
+    try:
+
+        response, data, _ = _request_public(
+            start=start,
+            end=end,
+        )
+
+        records = _extract_records(data)
+
+        df = _normalize_observations(
+            records
+        )
+
+        if not df.empty:
+
+            info["http_status"] = (
+                response.status_code
+            )
+
+            info["registros"] = len(df)
+
+            info["fuente_utilizada"] = (
+                "INA API pública"
+            )
+
+            info["respuesta_preview"] = (
+                str(data)[:1500]
+            )
+
+            if records:
+
+                info["primer_registro"] = (
+                    str(records[0])[:1000]
+                )
+
+            try:
+
+                temp = pd.json_normalize(
+                    records
+                )
+
+                info[
+                    "columnas_detectadas"
+                ] = list(temp.columns)
+
+            except Exception:
+
+                pass
+
+            info["error"] = None
+
+            return info
+
+    except Exception as exc:
+
+        previous_error = (
+            info.get("error")
+            or ""
+        )
+
+        info["error"] = (
+            previous_error
+            + " | API pública: "
+            + str(exc)
+        )
+
+    return info
 
 
 # ============================================================
@@ -629,8 +725,12 @@ def diagnostic(start, end):
 def forecast_meta():
 
     return {
-        "fuente": "Instituto Nacional del Agua (INA)",
-        "servicio": "INA A5 - getObservaciones",
+        "fuente": (
+            "Instituto Nacional del Agua (INA)"
+        ),
+        "servicio": (
+            "INA A5 + API pública"
+        ),
         "estacion": "San Nicolás",
         "serie": SAN_NICOLAS_SERIES_ID,
         "variable": "Nivel hidrométrico",
@@ -638,9 +738,9 @@ def forecast_meta():
         "estado": "Consulta online",
         "observacion": (
             "Los datos observados son obtenidos "
-            "del servicio público del Instituto "
-            "Nacional del Agua (INA). "
-            "La predicción corresponde al modelo "
-            "experimental propio de la plataforma."
+            "del Instituto Nacional del Agua. "
+            "La plataforma intenta primero el "
+            "servicio INA A5 y utiliza como respaldo "
+            "la API pública de datos observados."
         ),
     }
