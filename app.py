@@ -1,856 +1,746 @@
 # ============================================================
 # PARANÁ · SAN NICOLÁS
-# app.py
+# src/ina.py
 #
-# V2 - Monitoreo hidrológico + diagnóstico detallado INA
+# V3 - INA robusto con A5 + fallback API pública
 # ============================================================
 
-from datetime import date, timedelta
+from datetime import date, datetime
 
 import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
-
-from src.ina import (
-    STATIONS,
-    diagnostic,
-    forecast_meta,
-    observed,
-)
+import requests
 
 
 # ============================================================
 # CONFIGURACIÓN
 # ============================================================
 
-st.set_page_config(
-    page_title="Paraná · San Nicolás",
-    page_icon="🌊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+INA_A5_URL = "https://alerta.ina.gob.ar/a5/getObservaciones"
+
+INA_PUBLIC_URL = "https://alerta.ina.gob.ar/pub/datos/datos"
+
+REQUEST_TIMEOUT = 60
+
+SAN_NICOLAS_SERIES_ID = 36
 
 
 # ============================================================
-# ESTILOS
+# ESTACIONES
 # ============================================================
 
-st.markdown(
-    """
-    <style>
-
-    .block-container {
-        padding-top: 1.4rem;
-        padding-bottom: 3rem;
-        max-width: 1500px;
-    }
-
-    h1 {
-        margin-bottom: 0rem;
-    }
-
-    .subtitle {
-        color: #6b7280;
-        font-size: 0.95rem;
-        margin-top: -6px;
-        margin-bottom: 20px;
-    }
-
-    div[data-testid="stMetric"] {
-        background-color: rgba(120,120,120,0.05);
-        border: 1px solid rgba(120,120,120,0.15);
-        padding: 12px;
-        border-radius: 10px;
-    }
-
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+STATIONS = [
+    "Corrientes",
+    "Goya",
+    "La Paz",
+    "Paraná",
+    "Diamante",
+    "Rosario",
+    "Villa Constitución",
+    "San Nicolás",
+]
 
 
-# ============================================================
-# TÍTULO
-# ============================================================
-
-st.title("🌊 PARANÁ · SAN NICOLÁS")
-
-st.markdown(
-    """
-    <div class="subtitle">
-        Monitoreo hidrológico · datos INA · análisis experimental
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+STATION_CODES = {
+    "Corrientes": 19,
+    "Goya": 23,
+    "La Paz": 26,
+    "Paraná": 29,
+    "Diamante": 31,
+    "Rosario": 34,
+    "Villa Constitución": 35,
+    "San Nicolás": 36,
+}
 
 
 # ============================================================
 # FECHAS
 # ============================================================
 
-today = date.today()
+def _format_date(value):
 
-default_end = today
+    if value is None:
+        raise ValueError("La fecha no puede estar vacía.")
 
-default_start = today - timedelta(days=30)
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
 
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
 
-# ============================================================
-# SIDEBAR
-# ============================================================
-
-with st.sidebar:
-
-    st.header("⚙️ Consulta")
-
-    start_date = st.date_input(
-        "Desde",
-        value=default_start,
-        format="DD/MM/YYYY",
+    parsed = pd.to_datetime(
+        value,
+        errors="raise",
     )
 
-    end_date = st.date_input(
-        "Hasta",
-        value=default_end,
-        format="DD/MM/YYYY",
-    )
-
-    st.divider()
-
-    update_button = st.button(
-        "🔄 Actualizar INA",
-        use_container_width=True,
-        type="primary",
-    )
-
-    st.divider()
-
-    st.markdown("### Objetivo")
-    st.write("San Nicolás de los Arroyos")
-
-    st.markdown("### Fuente")
-    st.write("Instituto Nacional del Agua (INA)")
+    return parsed.strftime("%Y-%m-%d")
 
 
 # ============================================================
-# VALIDAR FECHAS
+# UTILIDAD
 # ============================================================
 
-if start_date > end_date:
+def _safe_json(response):
 
-    st.error(
-        "La fecha Desde no puede ser posterior "
-        "a la fecha Hasta."
-    )
+    if response.status_code != 200:
 
-    st.stop()
-
-
-# ============================================================
-# ESTADO DE SESIÓN
-# ============================================================
-
-if "ina_df" not in st.session_state:
-    st.session_state.ina_df = pd.DataFrame()
-
-if "ina_error" not in st.session_state:
-    st.session_state.ina_error = None
-
-if "ina_diag" not in st.session_state:
-    st.session_state.ina_diag = None
-
-if "last_query" not in st.session_state:
-    st.session_state.last_query = None
-
-
-# ============================================================
-# FUNCIÓN DE CARGA
-# ============================================================
-
-def load_ina_data(start, end):
-
-    df, error = observed(
-        start=start,
-        end=end,
-    )
-
-    diag = diagnostic(
-        start=start,
-        end=end,
-    )
-
-    return df, error, diag
-
-
-# ============================================================
-# CONSULTA
-# ============================================================
-
-current_query = (
-    str(start_date),
-    str(end_date),
-)
-
-need_initial_load = (
-    st.session_state.last_query is None
-)
-
-
-if update_button or need_initial_load:
-
-    with st.spinner(
-        "Consultando datos del INA..."
-    ):
-
-        df_loaded, error_loaded, diag_loaded = load_ina_data(
-            start=start_date,
-            end=end_date,
+        raise RuntimeError(
+            f"INA respondió HTTP {response.status_code}."
         )
 
-    st.session_state.ina_df = df_loaded
+    if not response.text.strip():
 
-    st.session_state.ina_error = error_loaded
+        raise RuntimeError(
+            "INA respondió sin contenido."
+        )
 
-    st.session_state.ina_diag = diag_loaded
+    try:
 
-    st.session_state.last_query = current_query
+        return response.json()
+
+    except ValueError as exc:
+
+        preview = response.text[:500]
+
+        raise RuntimeError(
+            "INA no devolvió JSON válido. "
+            f"Respuesta inicial: {preview}"
+        ) from exc
 
 
 # ============================================================
-# DATOS DE SESIÓN
+# EXTRACCIÓN RECURSIVA
 # ============================================================
 
-df = st.session_state.ina_df
-
-ina_error = st.session_state.ina_error
-
-diag = st.session_state.ina_diag
-
-
-# ============================================================
-# ESTADO GENERAL
-# ============================================================
-
-st.subheader("Estado del sistema")
-
-
-if ina_error is None and not df.empty:
-
-    st.success(
-        "INA conectado · datos observados disponibles"
-    )
-
-elif diag and diag.get("http_status") == 200:
-
-    st.warning(
-        "INA respondió correctamente, "
-        "pero todavía no se obtuvieron observaciones "
-        "utilizables."
-    )
-
-else:
-
-    st.error(
-        "No fue posible obtener datos válidos del INA."
-    )
-
-
-# ============================================================
-# DIAGNÓSTICO BÁSICO
-# ============================================================
-
-with st.expander(
-    "🔎 Diagnóstico INA",
-    expanded=True,
-):
-
-    if diag is None:
-
-        st.info(
-            "Todavía no se realizó una consulta."
-        )
-
-    else:
-
-        # ----------------------------------------------------
-        # MÉTRICAS PRINCIPALES
-        # ----------------------------------------------------
-
-        c1, c2, c3, c4 = st.columns(4)
-
-        http_status = diag.get(
-            "http_status"
-        )
-
-        if http_status is None:
-            http_status = "—"
-
-        c1.metric(
-            "HTTP",
-            http_status,
-        )
-
-        c2.metric(
-            "Serie",
-            diag.get(
-                "series_id",
-                "—",
-            ),
-        )
-
-        c3.metric(
-            "Tipo",
-            diag.get(
-                "tipo",
-                "—",
-            ),
-        )
-
-        c4.metric(
-            "Registros",
-            diag.get(
-                "registros",
-                0,
-            ),
-        )
-
-        # ----------------------------------------------------
-        # FECHAS
-        # ----------------------------------------------------
-
-        c5, c6 = st.columns(2)
-
-        c5.markdown(
-            f"**Desde:** {diag.get('desde', '—')}"
-        )
-
-        c6.markdown(
-            f"**Hasta:** {diag.get('hasta', '—')}"
-        )
-
-        # ----------------------------------------------------
-        # ENDPOINT
-        # ----------------------------------------------------
-
-        st.markdown(
-            f"**Endpoint:** {diag.get('endpoint', '—')}"
-        )
-
-        # ----------------------------------------------------
-        # ESTADO
-        # ----------------------------------------------------
-
-        if diag.get("error"):
-
-            st.error(
-                f"Error INA: {diag.get('error')}"
-            )
-
-        elif diag.get("http_status") == 200:
-
-            if diag.get("registros", 0) > 0:
-
-                st.success(
-                    "El servicio INA está devolviendo registros."
-                )
-
-            else:
-
-                st.warning(
-                    "HTTP 200, pero la función actual "
-                    "no detectó registros de observaciones."
-                )
-
-
-# ============================================================
-# DIAGNÓSTICO AVANZADO
-# ============================================================
-
-with st.expander(
-    "🧪 Diagnóstico avanzado de respuesta INA",
-    expanded=True,
-):
-
-    if diag is None:
-
-        st.info(
-            "No hay información de diagnóstico."
-        )
-
-    else:
-
-        # ----------------------------------------------------
-        # TIPO JSON
-        # ----------------------------------------------------
-
-        st.markdown("### Tipo de respuesta JSON")
-
-        json_tipo = diag.get(
-            "json_tipo"
-        )
-
-        if json_tipo:
-
-            st.code(
-                str(json_tipo)
-            )
-
-        else:
-
-            st.write(
-                "No detectado"
-            )
-
-        # ----------------------------------------------------
-        # CLAVES PRINCIPALES
-        # ----------------------------------------------------
-
-        st.markdown(
-            "### Claves principales devueltas por INA"
-        )
-
-        json_claves = diag.get(
-            "json_claves"
-        )
-
-        if json_claves:
-
-            st.code(
-                str(json_claves)
-            )
-
-        else:
-
-            st.write(
-                "No se detectaron claves."
-            )
-
-        # ----------------------------------------------------
-        # COLUMNAS
-        # ----------------------------------------------------
-
-        st.markdown(
-            "### Columnas detectadas"
-        )
-
-        columnas = diag.get(
-            "columnas_detectadas"
-        )
-
-        if columnas:
-
-            st.code(
-                str(columnas)
-            )
-
-        else:
-
-            st.write(
-                "No se detectaron columnas."
-            )
-
-        # ----------------------------------------------------
-        # PRIMER REGISTRO
-        # ----------------------------------------------------
-
-        st.markdown(
-            "### Primer registro recibido"
-        )
-
-        primer_registro = diag.get(
-            "primer_registro"
-        )
-
-        if primer_registro:
-
-            st.code(
-                str(primer_registro),
-                language="text",
-            )
-
-        else:
-
-            st.write(
-                "No fue posible extraer un primer registro."
-            )
-
-        # ----------------------------------------------------
-        # PREVIEW COMPLETO
-        # ----------------------------------------------------
-
-        st.markdown(
-            "### Vista previa de la respuesta INA"
-        )
-
-        preview = diag.get(
-            "respuesta_preview"
-        )
-
-        if preview:
-
-            st.code(
-                str(preview),
-                language="text",
-            )
-
-        else:
-
-            st.write(
-                "No hay vista previa disponible."
-            )
-
-
-# ============================================================
-# ERROR DETALLADO
-# ============================================================
-
-if ina_error:
-
-    st.warning(
-        f"Detalle de la consulta: {ina_error}"
-    )
-
-
-# ============================================================
-# SI NO HAY DATOS NORMALIZADOS
-# ============================================================
-
-if df.empty:
-
-    st.info(
-        "La aplicación está conectándose al INA. "
-        "El diagnóstico avanzado permitirá identificar "
-        "la estructura exacta de la respuesta."
-    )
-
-    st.divider()
-
-    st.subheader(
-        "🔮 Pronóstico experimental"
-    )
-
-    meta = forecast_meta()
-
-    st.info(
-        meta.get(
-            "observacion",
-            "Modelo experimental.",
-        )
-    )
-
-    with st.expander(
-        "📍 Estaciones consideradas"
-    ):
-
-        for station in STATIONS:
-
-            st.write(
-                f"• {station}"
-            )
-
-    st.divider()
-
-    st.caption(
-        "Paraná · San Nicolás | "
-        "Datos observados: INA | "
-        "Predicción: modelo experimental propio"
-    )
-
-    st.stop()
-
-
-# ============================================================
-# PREPARAR DATOS
-# ============================================================
-
-df = df.copy()
-
-
-df["datetime"] = pd.to_datetime(
-    df["datetime"],
-    errors="coerce",
-)
-
-
-df["value"] = pd.to_numeric(
-    df["value"],
-    errors="coerce",
-)
-
-
-df = df.dropna(
-    subset=[
-        "datetime",
-        "value",
+def _looks_like_record(obj):
+
+    if not isinstance(obj, dict):
+        return False
+
+    keys = {
+        str(k).lower()
+        for k in obj.keys()
+    }
+
+    date_tokens = [
+        "fecha",
+        "date",
+        "time",
+        "timestamp",
+        "timestart",
     ]
-)
 
+    value_tokens = [
+        "valor",
+        "value",
+        "nivel",
+        "altura",
+        "obsvalue",
+    ]
 
-df = (
-    df
-    .sort_values("datetime")
-    .reset_index(drop=True)
-)
-
-
-if df.empty:
-
-    st.warning(
-        "El INA devolvió información, "
-        "pero no quedaron valores válidos "
-        "después de procesarlos."
+    has_date = any(
+        any(token in key for token in date_tokens)
+        for key in keys
     )
 
-    st.stop()
-
-
-# ============================================================
-# ÚLTIMO NIVEL
-# ============================================================
-
-last_row = df.iloc[-1]
-
-
-last_level = float(
-    last_row["value"]
-)
-
-
-last_datetime = last_row[
-    "datetime"
-]
-
-
-# ============================================================
-# NIVEL ANTERIOR
-# ============================================================
-
-if len(df) >= 2:
-
-    previous_level = float(
-        df.iloc[-2]["value"]
+    has_value = any(
+        any(token in key for token in value_tokens)
+        for key in keys
     )
 
-    variation = (
-        last_level - previous_level
-    )
-
-else:
-
-    previous_level = None
-
-    variation = 0.0
+    return has_date and has_value
 
 
-# ============================================================
-# TENDENCIA
-# ============================================================
+def _extract_records(data):
+    """
+    Extrae observaciones aunque el JSON venga anidado.
+    """
 
-if variation > 0.01:
+    records = []
 
-    trend_text = "▲ Creciendo"
+    def walk(obj):
 
-elif variation < -0.01:
+        if isinstance(obj, list):
 
-    trend_text = "▼ Bajando"
+            for item in obj:
 
-else:
+                if _looks_like_record(item):
+                    records.append(item)
+                else:
+                    walk(item)
 
-    trend_text = "→ Estable"
+        elif isinstance(obj, dict):
 
+            if _looks_like_record(obj):
 
-# ============================================================
-# MÉTRICAS NIVEL
-# ============================================================
+                records.append(obj)
+                return
 
-st.subheader(
-    "📊 Nivel observado"
-)
+            for value in obj.values():
+                walk(value)
 
+    walk(data)
 
-m1, m2, m3, m4 = st.columns(4)
-
-
-m1.metric(
-    "San Nicolás",
-    f"{last_level:.2f} m",
-)
-
-
-if previous_level is not None:
-
-    m2.metric(
-        "Variación",
-        f"{variation:+.2f} m",
-    )
-
-else:
-
-    m2.metric(
-        "Variación",
-        "—",
-    )
-
-
-m3.metric(
-    "Tendencia",
-    trend_text,
-)
-
-
-m4.metric(
-    "Registros válidos",
-    len(df),
-)
-
-
-st.caption(
-    f"Última medición disponible: {last_datetime}"
-)
+    return records
 
 
 # ============================================================
-# GRÁFICO
+# BUSCAR COLUMNAS
 # ============================================================
 
-st.subheader(
-    "Evolución del nivel · San Nicolás"
-)
+def _find_column(df, candidates):
 
+    lookup = {
+        str(column).strip().lower(): column
+        for column in df.columns
+    }
 
-fig = go.Figure()
+    for candidate in candidates:
 
+        candidate_lower = candidate.lower()
 
-fig.add_trace(
-    go.Scatter(
-        x=df["datetime"],
-        y=df["value"],
-        mode="lines+markers",
-        name="Nivel observado",
-        hovertemplate=(
-            "%{x|%d/%m/%Y %H:%M}"
-            "<br>"
-            "Nivel: %{y:.2f} m"
-            "<extra></extra>"
-        ),
-    )
-)
+        if candidate_lower in lookup:
+            return lookup[candidate_lower]
 
-
-fig.update_layout(
-    height=480,
-    margin=dict(
-        l=20,
-        r=20,
-        t=30,
-        b=20,
-    ),
-    xaxis_title="Fecha",
-    yaxis_title="Nivel (m)",
-    hovermode="x unified",
-)
-
-
-fig.update_yaxes(
-    range=[0, 7],
-    dtick=0.5,
-)
-
-
-fig.update_xaxes(
-    tickformat="%d/%m/%Y",
-)
-
-
-st.plotly_chart(
-    fig,
-    use_container_width=True,
-)
+    return None
 
 
 # ============================================================
-# TABLA
+# NORMALIZACIÓN
 # ============================================================
 
-with st.expander(
-    "📋 Ver datos observados"
-):
+def _normalize_observations(records):
 
-    table_df = df[
+    if not records:
+        return pd.DataFrame()
+
+    try:
+
+        df = pd.json_normalize(records)
+
+    except Exception:
+
+        df = pd.DataFrame(records)
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # --------------------------------------------------------
+    # FECHA
+    # --------------------------------------------------------
+
+    datetime_column = _find_column(
+        df,
         [
+            "timestart",
+            "timeStart",
+            "datetime",
+            "fecha",
+            "date",
+            "timestamp",
+            "time",
+            "fecha_hora",
+            "fechaHora",
+        ],
+    )
+
+    # --------------------------------------------------------
+    # VALOR
+    # --------------------------------------------------------
+
+    value_column = _find_column(
+        df,
+        [
+            "valor",
+            "value",
+            "obsvalue",
+            "obsValue",
+            "nivel",
+            "altura",
+            "level",
+        ],
+    )
+
+    # --------------------------------------------------------
+    # BÚSQUEDA FLEXIBLE FECHA
+    # --------------------------------------------------------
+
+    if datetime_column is None:
+
+        for column in df.columns:
+
+            name = str(column).lower()
+
+            if (
+                "fecha" in name
+                or "date" in name
+                or "time" in name
+            ):
+                datetime_column = column
+                break
+
+    # --------------------------------------------------------
+    # BÚSQUEDA FLEXIBLE VALOR
+    # --------------------------------------------------------
+
+    if value_column is None:
+
+        for column in df.columns:
+
+            name = str(column).lower()
+
+            if (
+                "valor" in name
+                or "value" in name
+                or "nivel" in name
+                or "altura" in name
+            ):
+                value_column = column
+                break
+
+    if datetime_column is None:
+        return pd.DataFrame()
+
+    if value_column is None:
+        return pd.DataFrame()
+
+    result = pd.DataFrame()
+
+    result["datetime"] = pd.to_datetime(
+        df[datetime_column],
+        errors="coerce",
+        utc=True,
+    )
+
+    raw_values = (
+        df[value_column]
+        .astype(str)
+        .str.replace(",", ".", regex=False)
+    )
+
+    result["value"] = pd.to_numeric(
+        raw_values,
+        errors="coerce",
+    )
+
+    result = result.dropna(
+        subset=[
             "datetime",
             "value",
         ]
+    ).copy()
+
+    if result.empty:
+        return pd.DataFrame()
+
+    # Rango amplio de seguridad
+    result = result[
+        result["value"].between(
+            -5,
+            20,
+        )
     ].copy()
 
+    if result.empty:
+        return pd.DataFrame()
 
-    table_df.columns = [
-        "Fecha / hora",
-        "Nivel (m)",
-    ]
-
-
-    table_df["Nivel (m)"] = (
-        table_df["Nivel (m)"]
-        .round(2)
+    result = (
+        result
+        .drop_duplicates(
+            subset=["datetime"],
+            keep="last",
+        )
+        .sort_values("datetime")
+        .reset_index(drop=True)
     )
 
+    result["station"] = "San Nicolás"
 
-    st.dataframe(
-        table_df.sort_values(
-            "Fecha / hora",
-            ascending=False,
+    result["station_code"] = 36
+
+    result["series_id"] = SAN_NICOLAS_SERIES_ID
+
+    result["variable"] = "Nivel hidrométrico"
+
+    result["unit"] = "m"
+
+    return result
+
+
+# ============================================================
+# CONSULTA A5
+# ============================================================
+
+def _request_a5(start, end):
+
+    params = {
+        "tipo": "puntual",
+        "series_id": SAN_NICOLAS_SERIES_ID,
+        "timestart": _format_date(start),
+        "timeend": _format_date(end),
+    }
+
+    response = requests.get(
+        INA_A5_URL,
+        params=params,
+        timeout=REQUEST_TIMEOUT,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Parana-San-Nicolas-App/3.0",
+        },
+    )
+
+    data = _safe_json(response)
+
+    return response, data, params
+
+
+# ============================================================
+# CONSULTA API PÚBLICA
+# ============================================================
+
+def _request_public(start, end):
+
+    params = {
+        "timeStart": _format_date(start),
+        "timeEnd": _format_date(end),
+        "seriesId": SAN_NICOLAS_SERIES_ID,
+        "format": "json",
+    }
+
+    response = requests.get(
+        INA_PUBLIC_URL,
+        params=params,
+        timeout=REQUEST_TIMEOUT,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Parana-San-Nicolas-App/3.0",
+        },
+    )
+
+    data = _safe_json(response)
+
+    if isinstance(data, dict):
+
+        if data.get("mensaje"):
+
+            raise RuntimeError(
+                f"INA: {data.get('mensaje')}"
+            )
+
+    return response, data, params
+
+
+# ============================================================
+# GET SERIES
+# ============================================================
+
+def get_series(start, end):
+
+    start_str = _format_date(start)
+    end_str = _format_date(end)
+
+    if (
+        pd.to_datetime(start_str)
+        > pd.to_datetime(end_str)
+    ):
+
+        raise ValueError(
+            "La fecha Desde no puede ser posterior a Hasta."
+        )
+
+    # ========================================================
+    # INTENTO 1 - A5
+    # ========================================================
+
+    try:
+
+        _, data_a5, _ = _request_a5(
+            start=start,
+            end=end,
+        )
+
+        records_a5 = _extract_records(
+            data_a5
+        )
+
+        df_a5 = _normalize_observations(
+            records_a5
+        )
+
+        if not df_a5.empty:
+
+            return df_a5
+
+    except Exception:
+        pass
+
+    # ========================================================
+    # INTENTO 2 - API PÚBLICA
+    # ========================================================
+
+    try:
+
+        _, data_public, _ = _request_public(
+            start=start,
+            end=end,
+        )
+
+        records_public = _extract_records(
+            data_public
+        )
+
+        df_public = _normalize_observations(
+            records_public
+        )
+
+        if not df_public.empty:
+
+            return df_public
+
+    except Exception:
+        pass
+
+    return pd.DataFrame()
+
+
+# ============================================================
+# OBSERVED
+# ============================================================
+
+def observed(start, end):
+
+    try:
+
+        df = get_series(
+            start=start,
+            end=end,
+        )
+
+        if df.empty:
+
+            return (
+                pd.DataFrame(),
+                (
+                    "INA respondió, pero no fue posible "
+                    "obtener observaciones válidas para "
+                    "San Nicolás."
+                ),
+            )
+
+        return (
+            df,
+            None,
+        )
+
+    except Exception as exc:
+
+        return (
+            pd.DataFrame(),
+            str(exc),
+        )
+
+
+# ============================================================
+# DIAGNÓSTICO
+# ============================================================
+
+def diagnostic(start, end):
+
+    info = {
+        "endpoint": INA_A5_URL,
+        "series_id": SAN_NICOLAS_SERIES_ID,
+        "tipo": "puntual",
+        "desde": _format_date(start),
+        "hasta": _format_date(end),
+
+        "http_status": None,
+        "registros": 0,
+        "error": None,
+
+        "json_tipo": None,
+        "json_claves": None,
+        "columnas_detectadas": None,
+        "primer_registro": None,
+        "respuesta_preview": None,
+
+        "fuente_utilizada": None,
+    }
+
+    # ========================================================
+    # DIAGNÓSTICO A5
+    # ========================================================
+
+    try:
+
+        response, data, _ = _request_a5(
+            start=start,
+            end=end,
+        )
+
+        info["http_status"] = (
+            response.status_code
+        )
+
+        info["json_tipo"] = (
+            type(data).__name__
+        )
+
+        if isinstance(data, dict):
+
+            info["json_claves"] = list(
+                data.keys()
+            )
+
+        elif isinstance(data, list):
+
+            info["json_claves"] = [
+                "respuesta_raiz_lista"
+            ]
+
+        info["respuesta_preview"] = (
+            str(data)[:1500]
+        )
+
+        records = _extract_records(data)
+
+        info["registros"] = len(records)
+
+        if records:
+
+            info["primer_registro"] = (
+                str(records[0])[:1000]
+            )
+
+            try:
+
+                temp = pd.json_normalize(
+                    records
+                )
+
+                info[
+                    "columnas_detectadas"
+                ] = list(temp.columns)
+
+            except Exception:
+
+                pass
+
+            df = _normalize_observations(
+                records
+            )
+
+            if not df.empty:
+
+                info["fuente_utilizada"] = (
+                    "INA A5"
+                )
+
+                info["registros"] = len(df)
+
+                return info
+
+    except Exception as exc:
+
+        info["error"] = (
+            f"A5: {exc}"
+        )
+
+    # ========================================================
+    # DIAGNÓSTICO API PÚBLICA
+    # ========================================================
+
+    try:
+
+        response, data, _ = _request_public(
+            start=start,
+            end=end,
+        )
+
+        records = _extract_records(data)
+
+        df = _normalize_observations(
+            records
+        )
+
+        if not df.empty:
+
+            info["http_status"] = (
+                response.status_code
+            )
+
+            info["registros"] = len(df)
+
+            info["fuente_utilizada"] = (
+                "INA API pública"
+            )
+
+            info["respuesta_preview"] = (
+                str(data)[:1500]
+            )
+
+            if records:
+
+                info["primer_registro"] = (
+                    str(records[0])[:1000]
+                )
+
+            try:
+
+                temp = pd.json_normalize(
+                    records
+                )
+
+                info[
+                    "columnas_detectadas"
+                ] = list(temp.columns)
+
+            except Exception:
+
+                pass
+
+            info["error"] = None
+
+            return info
+
+    except Exception as exc:
+
+        previous_error = (
+            info.get("error")
+            or ""
+        )
+
+        info["error"] = (
+            previous_error
+            + " | API pública: "
+            + str(exc)
+        )
+
+    return info
+
+
+# ============================================================
+# FORECAST META
+# ============================================================
+
+def forecast_meta():
+
+    return {
+        "fuente": (
+            "Instituto Nacional del Agua (INA)"
         ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-# ============================================================
-# FUENTE
-# ============================================================
-
-meta = forecast_meta()
-
-
-with st.expander(
-    "ℹ️ Información de la fuente"
-):
-
-    st.markdown(
-        f"**Fuente:** {meta.get('fuente', 'INA')}"
-    )
-
-    st.markdown(
-        f"**Servicio:** {meta.get('servicio', '—')}"
-    )
-
-    st.markdown(
-        f"**Estación:** {meta.get('estacion', 'San Nicolás')}"
-    )
-
-    st.markdown(
-        f"**Serie:** {meta.get('serie', 36)}"
-    )
-
-    st.markdown(
-        f"**Variable:** {meta.get('variable', 'Nivel hidrométrico')}"
-    )
-
-    st.markdown(
-        f"**Unidad:** {meta.get('unidad', 'metros')}"
-    )
-
-
-# ============================================================
-# PIE
-# ============================================================
-
-st.divider()
-
-st.caption(
-    "Paraná · San Nicolás | "
-    "Datos observados: INA | "
-    "Predicción: modelo experimental propio"
-)
+        "servicio": (
+            "INA A5 + API pública"
+        ),
+        "estacion": "San Nicolás",
+        "serie": SAN_NICOLAS_SERIES_ID,
+        "variable": "Nivel hidrométrico",
+        "unidad": "metros",
+        "estado": "Consulta online",
+        "observacion": (
+            "Los datos observados son obtenidos "
+            "del Instituto Nacional del Agua. "
+            "La plataforma intenta primero el "
+            "servicio INA A5 y utiliza como respaldo "
+            "la API pública de datos observados."
+        ),
+    }
