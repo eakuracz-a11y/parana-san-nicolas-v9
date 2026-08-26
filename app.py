@@ -1,51 +1,70 @@
 import streamlit as st
 import traceback
 
+
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
+
 st.set_page_config(
     page_title="Paraná · San Nicolás",
     page_icon="🌊",
     layout="wide",
 )
 
-st.title("🌊 PARANÁ · SAN NICOLÁS")
-st.caption("V12.0 · Diagnóstico de inicio")
 
-st.write(
-    "Verificando los módulos necesarios para iniciar la aplicación..."
+# ============================================================
+# MOSTRAR PANTALLA ANTES DE CUALQUIER IMPORT
+# ============================================================
+
+st.title("🌊 PARANÁ · SAN NICOLÁS")
+
+st.caption(
+    "V12.0 · Diagnóstico de módulos"
 )
 
-errores = []
+st.success(
+    "✅ Streamlit inició correctamente."
+)
+
+st.write(
+    "Ahora verificaremos cada archivo del proyecto por separado."
+)
+
+st.divider()
 
 
 # ============================================================
 # INA
 # ============================================================
 
+st.subheader("1. Verificando src/ina.py")
+
 try:
+
     from src.ina import observed
 
     st.success(
-        "✅ src/ina.py cargado correctamente"
+        "✅ src/ina.py funciona correctamente"
     )
 
 except Exception as exc:
 
-    errores.append(
-        (
-            "src/ina.py",
-            exc,
-            traceback.format_exc(),
-        )
-    )
-
     st.error(
         f"❌ Error en src/ina.py: {exc}"
+    )
+
+    st.code(
+        traceback.format_exc(),
+        language="text",
     )
 
 
 # ============================================================
 # MODEL
 # ============================================================
+
+st.subheader("2. Verificando src/model.py")
 
 try:
 
@@ -56,27 +75,26 @@ try:
     )
 
     st.success(
-        "✅ src/model.py cargado correctamente"
+        "✅ src/model.py funciona correctamente"
     )
 
 except Exception as exc:
 
-    errores.append(
-        (
-            "src/model.py",
-            exc,
-            traceback.format_exc(),
-        )
-    )
-
     st.error(
         f"❌ Error en src/model.py: {exc}"
+    )
+
+    st.code(
+        traceback.format_exc(),
+        language="text",
     )
 
 
 # ============================================================
 # EXOGENOUS
 # ============================================================
+
+st.subheader("3. Verificando src/exogenous.py")
 
 try:
 
@@ -85,27 +103,26 @@ try:
     )
 
     st.success(
-        "✅ src/exogenous.py cargado correctamente"
+        "✅ src/exogenous.py funciona correctamente"
     )
 
 except Exception as exc:
 
-    errores.append(
-        (
-            "src/exogenous.py",
-            exc,
-            traceback.format_exc(),
-        )
-    )
-
     st.error(
         f"❌ Error en src/exogenous.py: {exc}"
+    )
+
+    st.code(
+        traceback.format_exc(),
+        language="text",
     )
 
 
 # ============================================================
 # UPSTREAM
 # ============================================================
+
+st.subheader("4. Verificando src/upstream.py")
 
 try:
 
@@ -114,27 +131,26 @@ try:
     )
 
     st.success(
-        "✅ src/upstream.py cargado correctamente"
+        "✅ src/upstream.py funciona correctamente"
     )
 
 except Exception as exc:
 
-    errores.append(
-        (
-            "src/upstream.py",
-            exc,
-            traceback.format_exc(),
-        )
-    )
-
     st.error(
         f"❌ Error en src/upstream.py: {exc}"
+    )
+
+    st.code(
+        traceback.format_exc(),
+        language="text",
     )
 
 
 # ============================================================
 # STRESS
 # ============================================================
+
+st.subheader("5. Verificando src/stress_ui.py")
 
 try:
 
@@ -143,52 +159,32 @@ try:
     )
 
     st.success(
-        "✅ src/stress_ui.py cargado correctamente"
+        "✅ src/stress_ui.py funciona correctamente"
     )
 
 except Exception as exc:
 
     st.warning(
-        f"⚠️ src/stress_ui.py todavía no es compatible: {exc}"
+        f"⚠️ src/stress_ui.py presenta un problema: {exc}"
+    )
+
+    st.code(
+        traceback.format_exc(),
+        language="text",
     )
 
 
 # ============================================================
-# RESULTADO
+# FIN
 # ============================================================
 
 st.divider()
 
-if not errores:
-
-    st.success(
-        "✅ Todos los módulos principales cargaron correctamente."
-    )
-
-    st.info(
-        "La base V12 está funcionando. "
-        "Podemos volver a colocar la interfaz completa."
-    )
-
-else:
-
-    st.error(
-        f"Se detectaron {len(errores)} errores."
-    )
-
-    for archivo, exc, detalle in errores:
-
-        st.subheader(
-            f"Error encontrado en {archivo}"
-        )
-
-        st.code(
-            detalle,
-            language="text",
-        )
-
-
-st.divider()
+st.info(
+    "Si podés leer esta pantalla, Streamlit y app.py "
+    "están funcionando. El mensaje en rojo indicará "
+    "exactamente qué archivo debemos corregir."
+)
 
 st.caption(
     "Paraná · San Nicolás V12.0 · Diagnóstico"
