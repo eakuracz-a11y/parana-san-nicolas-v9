@@ -4,7 +4,9 @@ import numpy as np
 
 
 # ============================================================
-# CONFIGURACIÓN
+# PARANÁ · SAN NICOLÁS
+# src/exogenous.py
+# BASE V11
 # ============================================================
 
 FORECAST_URL = (
@@ -19,27 +21,10 @@ INA_SERIES_URL = (
     "https://alerta.ina.gob.ar/pub/datos/series"
 )
 
-INA_A5_URL = (
-    "https://alerta.ina.gob.ar/a5/getObservaciones"
+INA_DATA_URL = (
+    "https://alerta.ina.gob.ar/pub/datos/datos"
 )
 
-
-# ============================================================
-# PARÁMETROS GENERALES
-# ============================================================
-
-MAX_FORECAST_DAYS = 30
-
-WEATHER_FORECAST_DAYS = 16
-
-CLIMATOLOGY_LOOKBACK_YEARS = 15
-
-CAUDAL_TREND_WINDOW = 14
-
-
-# ============================================================
-# PUNTOS REPRESENTATIVOS DEL CORREDOR DEL PARANÁ
-# ============================================================
 
 RAIN_POINTS = {
 
@@ -75,12 +60,7 @@ RAIN_POINTS = {
 }
 
 
-# ============================================================
-# ESTACIONES PREFERIDAS PARA CAUDAL
-# ============================================================
-
 CAUDAL_STATION_PRIORITY = [
-
     "San Nicolás",
     "Rosario",
     "Paraná",
@@ -89,10 +69,6 @@ CAUDAL_STATION_PRIORITY = [
     "Corrientes",
 ]
 
-
-# ============================================================
-# CACHE
-# ============================================================
 
 _SERIES_CATALOG_CACHE = None
 
@@ -126,55 +102,7 @@ def _request_json(
 
 
 # ============================================================
-# UTILIDADES DE FECHA
-# ============================================================
-
-def _normalize_date(
-    value,
-):
-
-    dt = pd.to_datetime(
-        value,
-        errors="coerce",
-        utc=True,
-    )
-
-    if pd.isna(
-        dt
-    ):
-
-        return pd.NaT
-
-    return (
-        dt
-        .tz_localize(
-            None
-        )
-        .normalize()
-    )
-
-
-def _normalize_series_dates(
-    serie,
-):
-
-    return (
-        pd.to_datetime(
-            serie,
-            errors="coerce",
-            utc=True,
-        )
-        .dt
-        .tz_localize(
-            None
-        )
-        .dt
-        .normalize()
-    )
-
-
-# ============================================================
-# HISTÓRICO DE PRECIPITACIÓN DEL CORREDOR
+# LLUVIA HISTÓRICA
 # ============================================================
 
 def get_rain_history(
@@ -304,17 +232,6 @@ def get_rain_history(
                 }
             )
 
-            frame[
-                f"rain_{name}"
-            ] = (
-                frame[
-                    f"rain_{name}"
-                ]
-                .clip(
-                    lower=0.0
-                )
-            )
-
             frames.append(
                 frame
             )
@@ -348,8 +265,7 @@ def get_rain_history(
 
     rain_cols = [
         c
-        for c
-        in result.columns
+        for c in result.columns
         if c.startswith(
             "rain_"
         )
@@ -369,30 +285,16 @@ def get_rain_history(
 
     result[
         "precip_mm"
-    ] = (
-        pd.to_numeric(
-            result[
-                "precip_mm"
-            ],
-            errors="coerce",
-        )
-        .fillna(
-            0.0
-        )
-        .clip(
-            lower=0.0
-        )
-    )
-
-    result[
-        "datetime"
-    ] = _normalize_series_dates(
+    ] = pd.to_numeric(
         result[
-            "datetime"
-        ]
+            "precip_mm"
+        ],
+        errors="coerce",
+    ).fillna(
+        0.0
     )
 
-    result = (
+    return (
         result[
             [
                 "datetime",
@@ -407,22 +309,14 @@ def get_rain_history(
         .sort_values(
             "datetime"
         )
-        .drop_duplicates(
-            subset=[
-                "datetime"
-            ],
-            keep="last",
-        )
         .reset_index(
             drop=True
         )
     )
 
-    return result
-
 
 # ============================================================
-# PRECIPITACIÓN FUTURA OPEN-METEO
+# LLUVIA FUTURA
 # ============================================================
 
 def get_rain_forecast(
@@ -435,7 +329,7 @@ def get_rain_forecast(
             int(
                 days
             ),
-            WEATHER_FORECAST_DAYS,
+            16,
         ),
     )
 
@@ -512,17 +406,6 @@ def get_rain_forecast(
                 }
             )
 
-            frame[
-                f"rain_{name}"
-            ] = (
-                frame[
-                    f"rain_{name}"
-                ]
-                .clip(
-                    lower=0.0
-                )
-            )
-
             frames.append(
                 frame
             )
@@ -537,7 +420,6 @@ def get_rain_forecast(
             columns=[
                 "datetime",
                 "precip_mm",
-                "rain_source",
             ]
         )
 
@@ -557,8 +439,7 @@ def get_rain_forecast(
 
     rain_cols = [
         c
-        for c
-        in result.columns
+        for c in result.columns
         if c.startswith(
             "rain_"
         )
@@ -578,46 +459,22 @@ def get_rain_forecast(
 
     result[
         "precip_mm"
-    ] = (
-        pd.to_numeric(
-            result[
-                "precip_mm"
-            ],
-            errors="coerce",
-        )
-        .fillna(
-            0.0
-        )
-        .clip(
-            lower=0.0
-        )
-    )
-
-    result[
-        "datetime"
-    ] = _normalize_series_dates(
+    ] = pd.to_numeric(
         result[
-            "datetime"
-        ]
+            "precip_mm"
+        ],
+        errors="coerce",
+    ).fillna(
+        0.0
     )
-
-    result[
-        "rain_source"
-    ] = "Open-Meteo forecast"
 
     return (
         result[
             [
                 "datetime",
                 "precip_mm",
-                "rain_source",
             ]
         ]
-        .dropna(
-            subset=[
-                "datetime"
-            ]
-        )
         .sort_values(
             "datetime"
         )
@@ -631,334 +488,14 @@ def get_rain_forecast(
 
 
 # ============================================================
-# CLIMATOLOGÍA DE LLUVIA
-# ============================================================
-
-def _build_rain_climatology(
-    history,
-):
-
-    if (
-        history is None
-        or not isinstance(
-            history,
-            pd.DataFrame,
-        )
-        or history.empty
-        or "datetime"
-        not in history.columns
-        or "precip_mm"
-        not in history.columns
-    ):
-
-        return pd.DataFrame(
-            columns=[
-                "month",
-                "day",
-                "rain_climatology_mm",
-            ]
-        )
-
-    x = history.copy()
-
-    x[
-        "datetime"
-    ] = _normalize_series_dates(
-        x[
-            "datetime"
-        ]
-    )
-
-    x[
-        "precip_mm"
-    ] = (
-        pd.to_numeric(
-            x[
-                "precip_mm"
-            ],
-            errors="coerce",
-        )
-        .fillna(
-            0.0
-        )
-        .clip(
-            lower=0.0
-        )
-    )
-
-    x = x.dropna(
-        subset=[
-            "datetime"
-        ]
-    )
-
-    if x.empty:
-
-        return pd.DataFrame(
-            columns=[
-                "month",
-                "day",
-                "rain_climatology_mm",
-            ]
-        )
-
-    x[
-        "month"
-    ] = x[
-        "datetime"
-    ].dt.month
-
-    x[
-        "day"
-    ] = x[
-        "datetime"
-    ].dt.day
-
-    clim = (
-        x
-        .groupby(
-            [
-                "month",
-                "day",
-            ],
-            as_index=False,
-        )[
-            "precip_mm"
-        ]
-        .median()
-        .rename(
-            columns={
-                "precip_mm":
-                    "rain_climatology_mm"
-            }
-        )
-    )
-
-    return clim
-
-
-# ============================================================
-# EXTENDER LLUVIA HASTA 30 DÍAS
-# ============================================================
-
-def extend_rain_forecast(
-    rain_forecast,
-    rain_history,
-    start_date,
-    days,
-):
-
-    days = max(
-        1,
-        min(
-            int(
-                days
-            ),
-            MAX_FORECAST_DAYS,
-        ),
-    )
-
-    start_date = _normalize_date(
-        start_date
-    )
-
-    if pd.isna(
-        start_date
-    ):
-
-        start_date = (
-            pd.Timestamp.today()
-            .normalize()
-        )
-
-    dates = pd.date_range(
-        start_date,
-        periods=days,
-        freq="D",
-    )
-
-    result = pd.DataFrame(
-        {
-            "datetime":
-                dates
-        }
-    )
-
-    if (
-        isinstance(
-            rain_forecast,
-            pd.DataFrame,
-        )
-        and not rain_forecast.empty
-        and "datetime"
-        in rain_forecast.columns
-    ):
-
-        forecast = (
-            rain_forecast
-            .copy()
-        )
-
-        forecast[
-            "datetime"
-        ] = _normalize_series_dates(
-            forecast[
-                "datetime"
-            ]
-        )
-
-        if "precip_mm" not in forecast.columns:
-
-            forecast[
-                "precip_mm"
-            ] = 0.0
-
-        if "rain_source" not in forecast.columns:
-
-            forecast[
-                "rain_source"
-            ] = "Open-Meteo forecast"
-
-        forecast = forecast[
-            [
-                "datetime",
-                "precip_mm",
-                "rain_source",
-            ]
-        ].copy()
-
-        result = result.merge(
-            forecast,
-            on="datetime",
-            how="left",
-        )
-
-    else:
-
-        result[
-            "precip_mm"
-        ] = np.nan
-
-        result[
-            "rain_source"
-        ] = None
-
-    climatology = _build_rain_climatology(
-        rain_history
-    )
-
-    result[
-        "month"
-    ] = result[
-        "datetime"
-    ].dt.month
-
-    result[
-        "day"
-    ] = result[
-        "datetime"
-    ].dt.day
-
-    if not climatology.empty:
-
-        result = result.merge(
-            climatology,
-            on=[
-                "month",
-                "day",
-            ],
-            how="left",
-        )
-
-    else:
-
-        result[
-            "rain_climatology_mm"
-        ] = 0.0
-
-    result[
-        "rain_climatology_mm"
-    ] = (
-        pd.to_numeric(
-            result[
-                "rain_climatology_mm"
-            ],
-            errors="coerce",
-        )
-        .fillna(
-            0.0
-        )
-        .clip(
-            lower=0.0
-        )
-    )
-
-    missing = result[
-        "precip_mm"
-    ].isna()
-
-    result.loc[
-        missing,
-        "precip_mm",
-    ] = result.loc[
-        missing,
-        "rain_climatology_mm",
-    ]
-
-    result.loc[
-        missing,
-        "rain_source",
-    ] = "Climatología histórica"
-
-    result[
-        "precip_mm"
-    ] = (
-        pd.to_numeric(
-            result[
-                "precip_mm"
-            ],
-            errors="coerce",
-        )
-        .fillna(
-            0.0
-        )
-        .clip(
-            lower=0.0
-        )
-    )
-
-    result[
-        "rain_source"
-    ] = result[
-        "rain_source"
-    ].fillna(
-        "Climatología histórica"
-    )
-
-    return (
-        result[
-            [
-                "datetime",
-                "precip_mm",
-                "rain_source",
-            ]
-        ]
-        .sort_values(
-            "datetime"
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-
-# ============================================================
 # CATÁLOGO INA
 # ============================================================
 
 def _get_series_catalog():
 
-    global _SERIES_CATALOG_CACHE
+    global (
+        _SERIES_CATALOG_CACHE
+    )
 
     if (
         _SERIES_CATALOG_CACHE
@@ -1003,20 +540,21 @@ def _get_series_catalog():
             ):
 
                 catalog = value
-
                 break
 
     else:
 
         catalog = []
 
-    _SERIES_CATALOG_CACHE = catalog
+    _SERIES_CATALOG_CACHE = (
+        catalog
+    )
 
     return catalog
 
 
 # ============================================================
-# BUSCAR MEJOR SERIE DE CAUDAL
+# MEJOR SERIE DE CAUDAL
 # ============================================================
 
 def find_best_caudal_series():
@@ -1053,6 +591,7 @@ def find_best_caudal_series():
 
             continue
 
+        # Variable INA de caudal
         if varid != 4:
 
             continue
@@ -1095,6 +634,8 @@ def find_best_caudal_series():
 
             continue
 
+        score = 0
+
         try:
 
             procid = int(
@@ -1107,6 +648,14 @@ def find_best_caudal_series():
         except Exception:
 
             procid = -1
+
+        if procid == 1:
+
+            score += 100
+
+        elif procid == 2:
+
+            score += 70
 
         try:
 
@@ -1122,62 +671,9 @@ def find_best_caudal_series():
 
             obs_count = 0
 
-        to_date = pd.to_datetime(
-            row.get(
-                "to_date"
-            ),
-            errors="coerce",
-            utc=True,
-        )
-
-        score = 0
-
-        if procid == 1:
-
-            score += 100
-
-        elif procid == 2:
-
-            score += 80
-
         if obs_count > 0:
 
-            score += 40
-
-        if obs_count > 100:
-
-            score += 15
-
-        if obs_count > 1000:
-
-            score += 20
-
-        if pd.notna(
-            to_date
-        ):
-
-            age_days = (
-                pd.Timestamp.now(
-                    tz="UTC"
-                )
-                - to_date
-            ).days
-
-            if age_days <= 7:
-
-                score += 50
-
-            elif age_days <= 30:
-
-                score += 35
-
-            elif age_days <= 180:
-
-                score += 20
-
-            elif age_days <= 365:
-
-                score += 10
+            score += 30
 
         try:
 
@@ -1198,15 +694,11 @@ def find_best_caudal_series():
 
         candidates.append(
             {
-
                 "series_id":
                     series_id,
 
                 "station":
                     station,
-
-                "procid":
-                    procid,
 
                 "proc_name":
                     row.get(
@@ -1216,14 +708,6 @@ def find_best_caudal_series():
                 "unit":
                     row.get(
                         "unit_nombre"
-                    ),
-
-                "obs_count":
-                    obs_count,
-
-                "to_date":
-                    row.get(
-                        "to_date"
                     ),
 
                 "score":
@@ -1277,30 +761,25 @@ def get_caudal_history(
         )
 
     params = {
+        "timeStart":
+            str(start),
 
-        "tipo":
-            "puntual",
+        "timeEnd":
+            str(end),
 
-        "series_id":
+        "seriesId":
             info[
                 "series_id"
             ],
 
-        "timestart":
-            str(
-                start
-            ),
-
-        "timeend":
-            str(
-                end
-            ),
+        "format":
+            "json",
     }
 
     try:
 
         data = _request_json(
-            INA_A5_URL,
+            INA_DATA_URL,
             params=params,
         )
 
@@ -1310,6 +789,29 @@ def get_caudal_history(
             empty,
             info,
         )
+
+    if isinstance(
+        data,
+        dict,
+    ):
+
+        if "data" in data:
+
+            data = data[
+                "data"
+            ]
+
+        elif "results" in data:
+
+            data = data[
+                "results"
+            ]
+
+        elif "observaciones" in data:
+
+            data = data[
+                "observaciones"
+            ]
 
     if not isinstance(
         data,
@@ -1332,11 +834,36 @@ def get_caudal_history(
             info,
         )
 
+    fecha_col = None
+    valor_col = None
+
+    for col in [
+        "timestart",
+        "timeStart",
+        "datetime",
+        "fecha",
+        "date",
+    ]:
+
+        if col in df.columns:
+
+            fecha_col = col
+            break
+
+    for col in [
+        "valor",
+        "value",
+        "caudal",
+    ]:
+
+        if col in df.columns:
+
+            valor_col = col
+            break
+
     if (
-        "timestart"
-        not in df.columns
-        or "valor"
-        not in df.columns
+        fecha_col is None
+        or valor_col is None
     ):
 
         return (
@@ -1344,32 +871,48 @@ def get_caudal_history(
             info,
         )
 
-    df[
+    out = pd.DataFrame()
+
+    out[
         "datetime"
-    ] = _normalize_series_dates(
+    ] = pd.to_datetime(
         df[
-            "timestart"
-        ]
+            fecha_col
+        ],
+        errors="coerce",
+        utc=True,
     )
 
-    df[
+    out[
+        "datetime"
+    ] = (
+        out[
+            "datetime"
+        ]
+        .dt.tz_localize(
+            None
+        )
+        .dt.normalize()
+    )
+
+    out[
         "caudal_m3s"
     ] = pd.to_numeric(
         df[
-            "valor"
+            valor_col
         ],
         errors="coerce",
     )
 
-    df = df.dropna(
+    out = out.dropna(
         subset=[
             "datetime",
             "caudal_m3s",
         ]
     )
 
-    df = (
-        df
+    out = (
+        out
         .groupby(
             "datetime",
             as_index=False,
@@ -1377,25 +920,19 @@ def get_caudal_history(
             "caudal_m3s"
         ]
         .mean()
-        .sort_values(
-            "datetime"
-        )
-        .reset_index(
-            drop=True
-        )
     )
 
     return (
-        df,
+        out,
         info,
     )
 
 
 # ============================================================
-# PROYECCIÓN NORMAL DE CAUDAL
+# FUTURO DE CAUDAL
 # ============================================================
 
-def project_caudal(
+def build_caudal_future(
     history,
     future_dates,
 ):
@@ -1407,10 +944,6 @@ def project_caudal(
 
     if (
         history is None
-        or not isinstance(
-            history,
-            pd.DataFrame,
-        )
         or history.empty
         or "caudal_m3s"
         not in history.columns
@@ -1423,22 +956,16 @@ def project_caudal(
 
                 "caudal_m3s":
                     np.nan,
-
-                "caudal_source":
-                    "Sin datos",
             }
         )
 
     values = (
-        pd.to_numeric(
-            history[
-                "caudal_m3s"
-            ],
-            errors="coerce",
-        )
+        history[
+            "caudal_m3s"
+        ]
         .dropna()
         .tail(
-            CAUDAL_TREND_WINDOW
+            14
         )
         .to_numpy(
             dtype=float
@@ -1456,9 +983,6 @@ def project_caudal(
 
                 "caudal_m3s":
                     np.nan,
-
-                "caudal_source":
-                    "Sin datos",
             }
         )
 
@@ -1492,7 +1016,7 @@ def project_caudal(
         abs(
             base
         )
-        * 0.025,
+        * 0.03,
         1.0,
     )
 
@@ -1506,8 +1030,6 @@ def project_caudal(
 
     predictions = []
 
-    previous = base
-
     for h in range(
         1,
         len(
@@ -1518,65 +1040,38 @@ def project_caudal(
 
         damping = np.exp(
             -h
-            / 12.0
-        )
-
-        daily_delta = (
-            slope
-            * damping
-        )
-
-        daily_limit = max(
-            abs(
-                previous
-            )
-            * 0.025,
-            1.0,
-        )
-
-        daily_delta = float(
-            np.clip(
-                daily_delta,
-                -daily_limit,
-                daily_limit,
-            )
+            / 10.0
         )
 
         value = (
-            previous
-            + daily_delta
-        )
-
-        value = max(
-            float(
-                value
-            ),
-            0.0,
+            base
+            + slope
+            * h
+            * damping
         )
 
         predictions.append(
-            value
+            max(
+                float(
+                    value
+                ),
+                0.0,
+            )
         )
-
-        previous = value
 
     return pd.DataFrame(
         {
-
             "datetime":
                 future_dates,
 
             "caudal_m3s":
                 predictions,
-
-            "caudal_source":
-                "Proyección experimental por tendencia reciente",
         }
     )
 
 
 # ============================================================
-# VARIABLES EXÓGENAS COMPLETAS
+# DATOS EXÓGENOS
 # ============================================================
 
 def get_exogenous_data(
@@ -1585,216 +1080,38 @@ def get_exogenous_data(
     forecast_days=15,
 ):
 
-    forecast_days = max(
-        1,
-        min(
-            int(
-                forecast_days
-            ),
-            MAX_FORECAST_DAYS,
-        ),
-    )
-
-    start_dt = pd.to_datetime(
-        start,
-        errors="coerce",
-    )
-
-    end_dt = pd.to_datetime(
-        end,
-        errors="coerce",
-    )
-
-    today = (
-        pd.Timestamp.today()
-        .normalize()
-    )
-
-    if pd.isna(
-        start_dt
-    ):
-
-        start_dt = (
-            today
-            - pd.Timedelta(
-                days=120
-            )
-        )
-
-    if pd.isna(
-        end_dt
-    ):
-
-        end_dt = today
-
-    historical_end = min(
-        end_dt.normalize(),
-        today,
-    )
-
-    historical_start = min(
-        start_dt.normalize(),
-        historical_end,
-    )
-
-    start_text = (
-        historical_start
-        .strftime(
-            "%Y-%m-%d"
-        )
-    )
-
-    end_text = (
-        historical_end
-        .strftime(
-            "%Y-%m-%d"
-        )
-    )
-
-    # ========================================================
-    # LLUVIA HISTÓRICA
-    # ========================================================
-
     rain_history = (
         get_rain_history(
-            start_text,
-            end_text,
+            start,
+            end,
         )
     )
-
-    # ========================================================
-    # HISTORIAL PARA CLIMATOLOGÍA
-    # ========================================================
-
-    climatology_start = (
-        historical_end
-        - pd.DateOffset(
-            years=CLIMATOLOGY_LOOKBACK_YEARS
-        )
-    )
-
-    climatology_start_text = (
-        climatology_start
-        .strftime(
-            "%Y-%m-%d"
-        )
-    )
-
-    try:
-
-        rain_climatology_history = (
-            get_rain_history(
-                climatology_start_text,
-                end_text,
-            )
-        )
-
-    except Exception:
-
-        rain_climatology_history = (
-            rain_history.copy()
-        )
-
-    if (
-        rain_climatology_history.empty
-        and not rain_history.empty
-    ):
-
-        rain_climatology_history = (
-            rain_history.copy()
-        )
-
-    # ========================================================
-    # PRONÓSTICO METEOROLÓGICO
-    # ========================================================
-
-    weather_days = min(
-        forecast_days,
-        WEATHER_FORECAST_DAYS,
-    )
-
-    rain_forecast = (
-        get_rain_forecast(
-            weather_days
-        )
-    )
-
-    # ========================================================
-    # FECHAS FUTURAS
-    # ========================================================
-
-    future_start = (
-        historical_end
-        + pd.Timedelta(
-            days=1
-        )
-    )
-
-    if (
-        historical_end
-        >= today
-        - pd.Timedelta(
-            days=1
-        )
-    ):
-
-        future_start = (
-            today
-            + pd.Timedelta(
-                days=1
-            )
-        )
-
-    # ========================================================
-    # EXTENDER LLUVIA HASTA 30 DÍAS
-    # ========================================================
 
     rain_future = (
-        extend_rain_forecast(
-            rain_forecast=rain_forecast,
-            rain_history=rain_climatology_history,
-            start_date=future_start,
-            days=forecast_days,
+        get_rain_forecast(
+            forecast_days
         )
     )
-
-    # ========================================================
-    # CAUDAL HISTÓRICO
-    # ========================================================
 
     (
         caudal_history,
         caudal_info,
     ) = get_caudal_history(
-        start_text,
-        end_text,
+        start,
+        end,
     )
 
-    # ========================================================
-    # UNIFICAR HISTÓRICO
-    # ========================================================
+    history = (
+        rain_history.copy()
+    )
 
-    if not rain_history.empty:
-
-        history = (
-            rain_history
-            .copy()
-        )
-
-    else:
+    if history.empty:
 
         history = pd.DataFrame(
-            {
-                "datetime":
-                    pd.date_range(
-                        historical_start,
-                        historical_end,
-                        freq="D",
-                    ),
-
-                "precip_mm":
-                    0.0,
-            }
+            columns=[
+                "datetime",
+                "precip_mm",
+            ]
         )
 
     if not caudal_history.empty:
@@ -1805,136 +1122,65 @@ def get_exogenous_data(
             how="outer",
         )
 
-    if "precip_mm" not in history.columns:
-
-        history[
-            "precip_mm"
-        ] = 0.0
-
-    if "caudal_m3s" not in history.columns:
+    if (
+        "caudal_m3s"
+        not in history.columns
+    ):
 
         history[
             "caudal_m3s"
         ] = np.nan
 
-    history[
-        "datetime"
-    ] = _normalize_series_dates(
-        history[
-            "datetime"
-        ]
+    future = (
+        rain_future.copy()
     )
 
-    history[
-        "precip_mm"
-    ] = (
-        pd.to_numeric(
-            history[
-                "precip_mm"
+    if future.empty:
+
+        future_dates = pd.date_range(
+            pd.Timestamp.today()
+            .normalize()
+            + pd.Timedelta(
+                days=1
+            ),
+            periods=
+                forecast_days,
+            freq="D",
+        )
+
+        future = pd.DataFrame(
+            {
+                "datetime":
+                    future_dates,
+
+                "precip_mm":
+                    0.0,
+            }
+        )
+
+    q_future = (
+        build_caudal_future(
+            caudal_history,
+            future[
+                "datetime"
             ],
-            errors="coerce",
-        )
-        .fillna(
-            0.0
-        )
-        .clip(
-            lower=0.0
         )
     )
 
-    history[
-        "caudal_m3s"
-    ] = pd.to_numeric(
-        history[
-            "caudal_m3s"
-        ],
-        errors="coerce",
+    future = future.merge(
+        q_future,
+        on="datetime",
+        how="left",
     )
-
-    if (
-        history[
-            "caudal_m3s"
-        ]
-        .notna()
-        .sum()
-        >= 7
-    ):
-
-        history[
-            "caudal_m3s"
-        ] = (
-            history[
-                "caudal_m3s"
-            ]
-            .interpolate(
-                limit=5,
-                limit_direction="both",
-            )
-        )
 
     history = (
         history
         .sort_values(
             "datetime"
         )
-        .drop_duplicates(
-            subset=[
-                "datetime"
-            ],
-            keep="last",
-        )
         .reset_index(
             drop=True
         )
-    )
-
-    # ========================================================
-    # CAUDAL FUTURO
-    # ========================================================
-
-    caudal_future = (
-        project_caudal(
-            caudal_history,
-            rain_future[
-                "datetime"
-            ],
-        )
-    )
-
-    # ========================================================
-    # UNIFICAR FUTURO
-    # ========================================================
-
-    future = rain_future.merge(
-        caudal_future,
-        on="datetime",
-        how="left",
-    )
-
-    future[
-        "precip_mm"
-    ] = (
-        pd.to_numeric(
-            future[
-                "precip_mm"
-            ],
-            errors="coerce",
-        )
-        .fillna(
-            0.0
-        )
-        .clip(
-            lower=0.0
-        )
-    )
-
-    future[
-        "caudal_m3s"
-    ] = pd.to_numeric(
-        future[
-            "caudal_m3s"
-        ],
-        errors="coerce",
     )
 
     future = (
@@ -1942,126 +1188,19 @@ def get_exogenous_data(
         .sort_values(
             "datetime"
         )
-        .head(
-            forecast_days
-        )
         .reset_index(
             drop=True
         )
     )
 
-    # ========================================================
-    # DIAGNÓSTICO
-    # ========================================================
-
-    rain_valid = int(
-        history[
-            "precip_mm"
-        ]
-        .notna()
-        .sum()
-    )
-
-    rain_max = (
-        float(
-            history[
-                "precip_mm"
-            ].max()
-        )
-        if rain_valid
-        else 0.0
-    )
-
-    q_valid = int(
-        history[
-            "caudal_m3s"
-        ]
-        .notna()
-        .sum()
-    )
-
-    q_last = (
-        float(
-            history[
-                "caudal_m3s"
-            ]
-            .dropna()
-            .iloc[-1]
-        )
-        if q_valid
-        else None
-    )
-
-    official_rain_days = int(
-        (
-            future[
-                "rain_source"
-            ]
-            == "Open-Meteo forecast"
-        ).sum()
-    )
-
-    climatology_rain_days = int(
-        (
-            future[
-                "rain_source"
-            ]
-            == "Climatología histórica"
-        ).sum()
-    )
-
-    # ========================================================
-    # META
-    # ========================================================
-
     meta = {
+        "caudal":
+            caudal_info,
 
         "rain_points":
             list(
                 RAIN_POINTS.keys()
             ),
-
-        "caudal_series":
-            caudal_info,
-
-        "rain_source":
-            "Open-Meteo",
-
-        "caudal_source":
-            "INA",
-
-        "caudal_projection":
-            "Tendencia reciente amortiguada",
-
-        "historical_start":
-            start_text,
-
-        "historical_end":
-            end_text,
-
-        "rain_history_records":
-            rain_valid,
-
-        "rain_history_max_mm":
-            rain_max,
-
-        "caudal_history_records":
-            q_valid,
-
-        "caudal_last_m3s":
-            q_last,
-
-        "forecast_days":
-            forecast_days,
-
-        "official_rain_forecast_days":
-            official_rain_days,
-
-        "climatology_extension_days":
-            climatology_rain_days,
-
-        "climatology_lookback_years":
-            CLIMATOLOGY_LOOKBACK_YEARS,
     }
 
     return (
