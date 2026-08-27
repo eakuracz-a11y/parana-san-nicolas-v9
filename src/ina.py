@@ -1,5 +1,4 @@
 import unicodedata
-from urllib.parse import quote
 
 import pandas as pd
 import requests
@@ -8,25 +7,16 @@ import requests
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # src/ina.py
-# V11.0 - CONEXIÓN INA CORREGIDA
+# V11.0 - CONSULTA INA CORREGIDA
 # ============================================================
 
-INA_SERIES_BASE = "https://alerta.ina.gob.ar/pub/datos/series"
-INA_DATA_BASE = "https://alerta.ina.gob.ar/pub/datos/datos"
-
-# Respaldo A5
-INA_A5_URL = "https://alerta.ina.gob.ar/a5/getObservaciones"
+INA_SERIES_URL = "https://alerta.ina.gob.ar/pub/datos/series"
+INA_DATA_URL = "https://alerta.ina.gob.ar/pub/datos/datos"
 
 REQUEST_TIMEOUT = 60
 
 TARGET_STATION = "San Nicolás"
-
-# Nivel hidrométrico
 VAR_ID_LEVEL = 2
-
-# Serie que ya utilizamos históricamente como respaldo.
-SAN_NICOLAS_FALLBACK_SERIES_ID = 36
-
 
 STATIONS = [
     "Corrientes",
@@ -39,12 +29,11 @@ STATIONS = [
     "San Nicolás",
 ]
 
-
 _CATALOG_CACHE = None
 
 
 # ============================================================
-# NORMALIZAR TEXTO
+# UTILIDADES
 # ============================================================
 
 def normalizar_texto(value):
@@ -66,10 +55,6 @@ def normalizar_texto(value):
     return text.strip().lower()
 
 
-# ============================================================
-# FECHA
-# ============================================================
-
 def normalizar_fecha(value):
 
     dt = pd.to_datetime(
@@ -78,31 +63,32 @@ def normalizar_fecha(value):
     )
 
     if pd.isna(dt):
-
         raise ValueError(
             f"Fecha inválida: {value}"
         )
 
-    return dt.strftime(
-        "%Y-%m-%d"
-    )
+    return dt.strftime("%Y-%m-%d")
 
 
 # ============================================================
 # REQUEST
 # ============================================================
 
-def _request_url(url):
+def request_json(
+    url,
+    params=None,
+    timeout=REQUEST_TIMEOUT,
+):
 
     try:
 
         response = requests.get(
             url,
-            timeout=REQUEST_TIMEOUT,
+            params=params,
+            timeout=timeout,
             headers={
                 "Accept":
                     "application/json,text/plain,*/*",
-
                 "User-Agent":
                     "Parana-San-Nicolas-V11/1.0",
             },
@@ -129,7 +115,8 @@ def _request_url(url):
     if response.status_code != 200:
 
         raise RuntimeError(
-            f"INA respondió HTTP {response.status_code}."
+            f"INA respondió HTTP {response.status_code}. "
+            f"URL: {response.url}"
         )
 
     if not response.text.strip():
@@ -140,171 +127,73 @@ def _request_url(url):
 
     try:
 
-        return response.json()
+        data = response.json()
 
     except ValueError as exc:
 
         raise RuntimeError(
             "INA no devolvió JSON válido. "
-            f"Inicio de respuesta: {response.text[:300]}"
+            f"URL: {response.url} · "
+            f"Respuesta: {response.text[:300]}"
         ) from exc
 
-
-# ============================================================
-# URL API PÚBLICA INA
-# ============================================================
-
-def _build_data_url(
-    start,
-    end,
-    series_id,
-):
-
-    start_text = normalizar_fecha(
-        start
-    )
-
-    end_text = normalizar_fecha(
-        end
-    )
-
-    if (
-        pd.to_datetime(start_text)
-        >
-        pd.to_datetime(end_text)
-    ):
-
-        raise ValueError(
-            "La fecha Desde no puede ser posterior a Hasta."
-        )
-
-    # IMPORTANTE:
-    # El asistente del INA genera el identificador del recurso
-    # agregando parámetros con & directamente luego de /datos.
-    #
-    # Ejemplo:
-    # /pub/datos/datos&timeStart=...&timeEnd=...&seriesId=...
-    #
     return (
-        f"{INA_DATA_BASE}"
-        f"&timeStart={quote(start_text)}"
-        f"&timeEnd={quote(end_text)}"
-        f"&seriesId={int(series_id)}"
-        f"&format=json"
+        data,
+        response.url,
     )
 
 
 # ============================================================
-# URL CATÁLOGO
+# EXTRAER LISTA
 # ============================================================
 
-def _build_series_url():
-
-    # Pedimos catálogo de series observadas.
-    return (
-        f"{INA_SERIES_BASE}"
-        f"&varId={VAR_ID_LEVEL}"
-        f"&format=json"
-    )
-
-
-# ============================================================
-# EXTRAER LISTAS
-# ============================================================
-
-def _extract_list(data):
+def extraer_lista(data):
 
     if data is None:
         return []
 
-    if isinstance(
-        data,
-        list,
-    ):
-
+    if isinstance(data, list):
         return data
 
-    if not isinstance(
-        data,
-        dict,
-    ):
-
+    if not isinstance(data, dict):
         return []
 
-    # --------------------------------------------------------
-    # ERROR DEL INA
-    # --------------------------------------------------------
-
-    message = (
-        data.get("mensaje")
-        or data.get("message")
-        or data.get("error")
-    )
-
-    possible_keys = [
+    for key in [
         "data",
         "datos",
         "observaciones",
         "results",
         "result",
         "items",
-    ]
+    ]:
 
-    for key in possible_keys:
+        value = data.get(key)
 
-        value = data.get(
-            key
-        )
-
-        if isinstance(
-            value,
-            list,
-        ):
-
+        if isinstance(value, list):
             return value
 
-        if isinstance(
-            value,
-            dict,
-        ):
+        if isinstance(value, dict):
 
-            nested = _extract_list(
+            nested = extraer_lista(
                 value
             )
 
             if nested:
                 return nested
-
-    # --------------------------------------------------------
-    # BÚSQUEDA RECURSIVA
-    # --------------------------------------------------------
 
     for value in data.values():
 
-        if isinstance(
-            value,
-            list,
-        ):
-
+        if isinstance(value, list):
             return value
 
-        if isinstance(
-            value,
-            dict,
-        ):
+        if isinstance(value, dict):
 
-            nested = _extract_list(
+            nested = extraer_lista(
                 value
             )
 
             if nested:
                 return nested
-
-    if message:
-
-        raise RuntimeError(
-            str(message)
-        )
 
     return []
 
@@ -318,87 +207,50 @@ def obtener_catalogo():
     global _CATALOG_CACHE
 
     if _CATALOG_CACHE is not None:
-
         return _CATALOG_CACHE
 
-    try:
+    data, url_final = request_json(
+        INA_SERIES_URL
+    )
 
-        url = _build_series_url()
+    catalogo = extraer_lista(
+        data
+    )
 
-        data = _request_url(
-            url
+    if not catalogo:
+
+        raise RuntimeError(
+            "El catálogo del INA no devolvió series. "
+            f"URL: {url_final}"
         )
 
-        catalog = _extract_list(
-            data
-        )
+    _CATALOG_CACHE = catalogo
 
-        if catalog:
-
-            _CATALOG_CACHE = catalog
-
-            return catalog
-
-    except Exception:
-
-        pass
-
-    # --------------------------------------------------------
-    # SEGUNDO INTENTO:
-    # catálogo sin filtros
-    # --------------------------------------------------------
-
-    try:
-
-        data = _request_url(
-            INA_SERIES_BASE
-        )
-
-        catalog = _extract_list(
-            data
-        )
-
-        _CATALOG_CACHE = (
-            catalog
-            if catalog
-            else []
-        )
-
-        return _CATALOG_CACHE
-
-    except Exception:
-
-        _CATALOG_CACHE = []
-
-        return []
+    return catalogo
 
 
 # ============================================================
-# BUSCAR SERIE SAN NICOLÁS
+# BUSCAR SERIE DE NIVEL
 # ============================================================
 
 def buscar_serie_nivel(
-    station=TARGET_STATION,
+    estacion=TARGET_STATION,
 ):
 
-    catalog = obtener_catalogo()
+    catalogo = obtener_catalogo()
 
-    target = normalizar_texto(
-        station
+    objetivo = normalizar_texto(
+        estacion
     )
 
-    candidates = []
+    candidatos = []
 
-    for row in catalog:
+    for row in catalogo:
 
-        if not isinstance(
-            row,
-            dict,
-        ):
-
+        if not isinstance(row, dict):
             continue
 
-        station_name = normalizar_texto(
+        nombre = normalizar_texto(
             row.get(
                 "estacion_nombre",
                 row.get(
@@ -408,13 +260,8 @@ def buscar_serie_nivel(
             )
         )
 
-        if station_name != target:
-
+        if nombre != objetivo:
             continue
-
-        # ----------------------------------------------------
-        # VARIABLE
-        # --------------------------------------------------------
 
         raw_var = (
             row.get("varid")
@@ -429,25 +276,15 @@ def buscar_serie_nivel(
             )
 
         except Exception:
-
-            var_id = None
-
-        if (
-            var_id is not None
-            and var_id != VAR_ID_LEVEL
-        ):
-
             continue
 
-        # ----------------------------------------------------
-        # SERIES ID
-        # --------------------------------------------------------
+        if var_id != VAR_ID_LEVEL:
+            continue
 
         raw_series = (
             row.get("seriesid")
             or row.get("seriesId")
             or row.get("series_id")
-            or row.get("id")
         )
 
         try:
@@ -457,14 +294,7 @@ def buscar_serie_nivel(
             )
 
         except Exception:
-
             continue
-
-        # ----------------------------------------------------
-        # SCORE
-        # --------------------------------------------------------
-
-        score = 0
 
         try:
 
@@ -478,45 +308,6 @@ def buscar_serie_nivel(
         except Exception:
 
             procid = -1
-
-        if procid == 1:
-
-            score += 100
-
-        elif procid == 2:
-
-            score += 70
-
-        to_date = pd.to_datetime(
-            row.get(
-                "to_date"
-            ),
-            errors="coerce",
-            utc=True,
-        )
-
-        if pd.notna(
-            to_date
-        ):
-
-            age = (
-                pd.Timestamp.now(
-                    tz="UTC"
-                )
-                - to_date
-            ).days
-
-            if age <= 7:
-                score += 100
-
-            elif age <= 30:
-                score += 70
-
-            elif age <= 180:
-                score += 40
-
-            elif age <= 365:
-                score += 20
 
         try:
 
@@ -532,77 +323,91 @@ def buscar_serie_nivel(
 
             obs_count = 0
 
-        if obs_count > 0:
+        to_date = pd.to_datetime(
+            row.get("to_date"),
+            errors="coerce",
+            utc=True,
+        )
 
+        score = 0
+
+        if procid == 1:
+            score += 100
+
+        elif procid == 2:
+            score += 70
+
+        if obs_count > 0:
             score += 30
 
-        candidates.append(
+        if pd.notna(to_date):
+
+            age_days = (
+                pd.Timestamp.now(
+                    tz="UTC"
+                )
+                - to_date
+            ).days
+
+            if age_days <= 7:
+                score += 100
+
+            elif age_days <= 30:
+                score += 70
+
+            elif age_days <= 180:
+                score += 40
+
+            elif age_days <= 365:
+                score += 20
+
+        candidatos.append(
             {
+                "station":
+                    estacion,
                 "series_id":
                     series_id,
-
-                "station":
-                    station,
-
                 "procid":
                     procid,
-
                 "proc_name":
                     row.get(
                         "proc_nombre"
                     ),
-
+                "obs_count":
+                    obs_count,
                 "to_date":
                     row.get(
                         "to_date"
                     ),
-
-                "obs_count":
-                    obs_count,
-
                 "score":
                     score,
             }
         )
 
-    if not candidates:
+    if not candidatos:
 
-        # Respaldo conocido
-        return {
-            "series_id":
-                SAN_NICOLAS_FALLBACK_SERIES_ID,
+        raise RuntimeError(
+            "No se encontró una serie activa "
+            "de nivel para San Nicolás."
+        )
 
-            "station":
-                TARGET_STATION,
-
-            "score":
-                0,
-
-            "source":
-                "fallback",
-        }
-
-    candidates = sorted(
-        candidates,
+    candidatos = sorted(
+        candidatos,
         key=lambda item:
-            item[
-                "score"
-            ],
+            item["score"],
         reverse=True,
     )
 
-    return candidates[
-        0
-    ]
+    return candidatos[0]
 
 
 # ============================================================
-# DETECTAR FECHA
+# DETECTAR COLUMNAS
 # ============================================================
 
-def _find_datetime_column(df):
+def detectar_fecha(df):
 
-    candidates = [
+    candidatos = [
         "timestart",
         "timeStart",
         "datetime",
@@ -613,76 +418,54 @@ def _find_datetime_column(df):
         "time",
     ]
 
-    columns = list(
-        df.columns
-    )
+    for candidato in candidatos:
 
-    for candidate in candidates:
-
-        for column in columns:
+        for col in df.columns:
 
             if (
-                str(column).lower()
-                ==
-                candidate.lower()
+                str(col).lower()
+                == candidato.lower()
             ):
+                return col
 
-                return column
+    for col in df.columns:
 
-    for column in columns:
-
-        name = str(
-            column
-        ).lower()
+        name = str(col).lower()
 
         if (
             "fecha" in name
             or "date" in name
             or "time" in name
         ):
-
-            return column
+            return col
 
     return None
 
 
-# ============================================================
-# DETECTAR VALOR
-# ============================================================
+def detectar_valor(df):
 
-def _find_value_column(df):
-
-    candidates = [
+    candidatos = [
         "valor",
         "value",
         "nivel",
         "altura",
         "level",
         "height",
-        "measurement",
     ]
 
-    columns = list(
-        df.columns
-    )
+    for candidato in candidatos:
 
-    for candidate in candidates:
-
-        for column in columns:
+        for col in df.columns:
 
             if (
-                str(column).lower()
-                ==
-                candidate.lower()
+                str(col).lower()
+                == candidato.lower()
             ):
+                return col
 
-                return column
+    for col in df.columns:
 
-    for column in columns:
-
-        name = str(
-            column
-        ).lower()
+        name = str(col).lower()
 
         if (
             "valor" in name
@@ -690,8 +473,7 @@ def _find_value_column(df):
             or "nivel" in name
             or "altura" in name
         ):
-
-            return column
+            return col
 
     return None
 
@@ -700,74 +482,60 @@ def _find_value_column(df):
 # NORMALIZAR OBSERVACIONES
 # ============================================================
 
-def _normalize_observations(
-    records,
+def normalizar_observaciones(
+    registros,
 ):
 
-    if not records:
-
+    if not registros:
         return pd.DataFrame()
 
     try:
 
         raw = pd.json_normalize(
-            records
+            registros
         )
 
     except Exception:
 
         raw = pd.DataFrame(
-            records
+            registros
         )
 
     if raw.empty:
-
         return pd.DataFrame()
 
-    date_col = (
-        _find_datetime_column(
-            raw
-        )
+    fecha_col = detectar_fecha(
+        raw
     )
 
-    value_col = (
-        _find_value_column(
-            raw
-        )
+    valor_col = detectar_valor(
+        raw
     )
 
-    if date_col is None:
+    if fecha_col is None:
 
         raise RuntimeError(
-            "INA devolvió registros pero no "
-            "se encontró la columna de fecha. "
-            f"Columnas: {list(raw.columns)}"
+            "INA devolvió datos, pero no se encontró "
+            f"la columna de fecha. Columnas: {list(raw.columns)}"
         )
 
-    if value_col is None:
+    if valor_col is None:
 
         raise RuntimeError(
-            "INA devolvió registros pero no "
-            "se encontró la columna de nivel. "
-            f"Columnas: {list(raw.columns)}"
+            "INA devolvió datos, pero no se encontró "
+            f"la columna de nivel. Columnas: {list(raw.columns)}"
         )
 
     result = pd.DataFrame()
 
-    result[
-        "datetime"
-    ] = pd.to_datetime(
-        raw[
-            date_col
-        ],
+    result["datetime"] = pd.to_datetime(
+        raw[fecha_col],
         errors="coerce",
         utc=True,
     )
 
     values = (
-        raw[
-            value_col
-        ]
+        raw[valor_col]
         .astype(str)
         .str.replace(
             ",",
@@ -776,9 +544,7 @@ def _normalize_observations(
         )
     )
 
-    result[
-        "value"
-    ] = pd.to_numeric(
+    result["value"] = pd.to_numeric(
         values,
         errors="coerce",
     )
@@ -789,15 +555,6 @@ def _normalize_observations(
             "value",
         ]
     )
-
-    result = result[
-        result[
-            "value"
-        ].between(
-            -5.0,
-            20.0,
-        )
-    ]
 
     result = (
         result
@@ -819,39 +576,10 @@ def _normalize_observations(
 
 
 # ============================================================
-# CONSULTA API PÚBLICA
+# CONSULTAR DATOS INA
 # ============================================================
 
-def _query_public_api(
-    series_id,
-    start,
-    end,
-):
-
-    url = _build_data_url(
-        start=start,
-        end=end,
-        series_id=series_id,
-    )
-
-    data = _request_url(
-        url
-    )
-
-    records = _extract_list(
-        data
-    )
-
-    return _normalize_observations(
-        records
-    )
-
-
-# ============================================================
-# RESPALDO A5
-# ============================================================
-
-def _query_a5(
+def consultar_serie(
     series_id,
     start,
     end,
@@ -865,46 +593,84 @@ def _query_a5(
         end
     )
 
-    # Esta es la sintaxis documentada por A5.
+    if (
+        pd.to_datetime(start_text)
+        >
+        pd.to_datetime(end_text)
+    ):
+
+        raise ValueError(
+            "La fecha Desde no puede ser posterior a Hasta."
+        )
+
+    # ========================================================
+    # PARAMETROS EXACTOS
+    # ========================================================
+
     params = {
-        "tipo":
-            "puntual",
-
-        "series_id":
-            int(
-                series_id
-            ),
-
-        "timestart":
+        "timeStart":
             start_text,
 
-        "timeend":
+        "timeEnd":
             end_text,
+
+        "seriesId":
+            int(series_id),
+
+        "format":
+            "json",
     }
 
-    response = requests.get(
-        INA_A5_URL,
+    data, url_final = request_json(
+        INA_DATA_URL,
         params=params,
-        timeout=REQUEST_TIMEOUT,
-        headers={
-            "Accept":
-                "application/json",
-
-            "User-Agent":
-                "Parana-San-Nicolas-V11/1.0",
-        },
     )
 
-    response.raise_for_status()
+    # ========================================================
+    # SI INA ENVIA ERROR
+    # ========================================================
 
-    data = response.json()
+    if isinstance(data, dict):
 
-    records = _extract_list(
+        mensaje = (
+            data.get("mensaje")
+            or data.get("message")
+            or data.get("error")
+        )
+
+        if mensaje:
+
+            raise RuntimeError(
+                f"{mensaje} · URL enviada: {url_final}"
+            )
+
+    registros = extraer_lista(
         data
     )
 
-    return _normalize_observations(
-        records
+    if not registros:
+
+        raise RuntimeError(
+            "INA respondió correctamente pero "
+            "no devolvió observaciones. "
+            f"URL enviada: {url_final}"
+        )
+
+    df = normalizar_observaciones(
+        registros
+    )
+
+    if df.empty:
+
+        raise RuntimeError(
+            "INA devolvió registros, pero no quedaron "
+            "niveles válidos después de procesarlos. "
+            f"URL enviada: {url_final}"
+        )
+
+    return (
+        df,
+        url_final,
     )
 
 
@@ -928,72 +694,17 @@ def get_series(
             "series_id"
         ]
 
-    errors = []
-
-    # ========================================================
-    # INTENTO 1
-    # API PÚBLICA CON FORMATO DEL ASISTENTE INA
-    # ========================================================
-
-    try:
-
-        df = _query_public_api(
-            series_id=
-                series_id,
-            start=
-                start,
-            end=
-                end,
-        )
-
-        if not df.empty:
-
-            return df
-
-    except Exception as exc:
-
-        errors.append(
-            "API pública: "
-            + str(exc)
-        )
-
-    # ========================================================
-    # INTENTO 2
-    # A5
-    # ========================================================
-
-    try:
-
-        df = _query_a5(
-            series_id=
-                series_id,
-            start=
-                start,
-            end=
-                end,
-        )
-
-        if not df.empty:
-
-            return df
-
-    except Exception as exc:
-
-        errors.append(
-            "A5: "
-            + str(exc)
-        )
-
-    raise RuntimeError(
-        "No fue posible recuperar observaciones. "
-        + " | ".join(
-            errors
-        )
+    df, url_final = consultar_serie(
+        series_id=series_id,
+        start=start,
+        end=end,
     )
+
+    return df
 
 
 # ============================================================
-# FUNCIÓN PRINCIPAL DE APP.PY
+# OBSERVED
 # ============================================================
 
 def observed(
@@ -1007,45 +718,29 @@ def observed(
             TARGET_STATION
         )
 
-        series_id = int(
-            info[
-                "series_id"
-            ]
-        )
+        series_id = info[
+            "series_id"
+        ]
 
-        df = get_series(
+        df, url_final = consultar_serie(
+            series_id=series_id,
             start=start,
             end=end,
-            series_id=series_id,
         )
 
-        if df.empty:
+        df["station"] = (
+            TARGET_STATION
+        )
 
-            return (
-                pd.DataFrame(),
-                (
-                    "El INA no devolvió observaciones "
-                    "para San Nicolás en el período seleccionado."
-                ),
-            )
+        df["series_id"] = (
+            series_id
+        )
 
-        df[
-            "station"
-        ] = TARGET_STATION
-
-        df[
-            "series_id"
-        ] = series_id
-
-        df[
-            "variable"
-        ] = (
+        df["variable"] = (
             "Nivel hidrométrico"
         )
 
-        df[
-            "unit"
-        ] = "m"
+        df["unit"] = "m"
 
         return (
             df,
@@ -1072,8 +767,10 @@ def forecast_meta():
             TARGET_STATION
         )
 
-        series_id = info.get(
-            "series_id"
+        series_id = (
+            info.get(
+                "series_id"
+            )
         )
 
     except Exception:
@@ -1085,7 +782,7 @@ def forecast_meta():
             "Instituto Nacional del Agua (INA)",
 
         "servicio":
-            "Web API pública INA / respaldo A5",
+            "Web API pública INA",
 
         "estacion":
             TARGET_STATION,
@@ -1101,10 +798,4 @@ def forecast_meta():
 
         "estado":
             "Consulta online",
-
-        "observacion":
-            (
-                "La aplicación consulta primero la API "
-                "pública del INA y utiliza A5 como respaldo."
-            ),
     }
