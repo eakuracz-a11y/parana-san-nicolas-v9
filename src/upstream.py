@@ -1,81 +1,98 @@
 import unicodedata
-import requests
+
 import pandas as pd
+import requests
 
 
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # src/upstream.py
-# BASE V11
+# V11.1 - ESTACIONES AGUAS ARRIBA
 # ============================================================
 
-INA_SERIES_URL = (
-    "https://alerta.ina.gob.ar/pub/datos/series"
-)
+INA_SERIES_URL = "https://alerta.ina.gob.ar/pub/datos/series"
+INA_DATA_URL = "https://alerta.ina.gob.ar/pub/datos/datos"
 
-INA_DATA_URL = (
-    "https://alerta.ina.gob.ar/pub/datos/datos"
-)
+REQUEST_TIMEOUT = 60
 
+VAR_ID_LEVEL = 2
+
+
+# ============================================================
+# ESTACIONES AGUAS ARRIBA
+# ============================================================
 
 UPSTREAM_STATIONS = [
     "Corrientes",
     "Goya",
     "La Paz",
     "Paraná",
+    "Diamante",
     "Rosario",
     "Villa Constitución",
 ]
 
 
-VAR_ID_LEVEL = 2
+# ============================================================
+# CACHE
+# ============================================================
 
 _CATALOG_CACHE = None
 
 
 # ============================================================
-# TEXTO
+# NORMALIZACIÓN DE TEXTO
 # ============================================================
 
-def normalizar_texto(
-    texto,
-):
+def normalizar_texto(texto):
 
     if texto is None:
         return ""
 
-    texto = str(
-        texto
-    )
-
     texto = unicodedata.normalize(
         "NFKD",
-        texto,
+        str(texto),
     )
 
     texto = "".join(
-        c
-        for c in texto
+        caracter
+        for caracter in texto
         if not unicodedata.combining(
-            c
+            caracter
         )
     )
 
+    return texto.strip().lower()
+
+
+# ============================================================
+# NOMBRE DE COLUMNA
+# ============================================================
+
+def nombre_columna_estacion(
+    estacion,
+):
+
     return (
-        texto
-        .strip()
-        .lower()
+        "nivel_"
+        + normalizar_texto(
+            estacion
+        )
+        .replace(
+            " ",
+            "_",
+        )
     )
 
 
 # ============================================================
-# REQUEST
+# REQUEST JSON
 # ============================================================
 
 def request_json(
     url,
     params=None,
-    timeout=60,
+    timeout=REQUEST_TIMEOUT,
 ):
 
     response = requests.get(
@@ -83,20 +100,104 @@ def request_json(
         params=params,
         timeout=timeout,
         headers={
-            "User-Agent":
-                "Parana-San-Nicolas-V11/1.0",
             "Accept":
                 "application/json,text/plain,*/*",
+
+            "User-Agent":
+                "Parana-San-Nicolas-V11.1/1.0",
         },
     )
 
     response.raise_for_status()
 
+    if not response.text.strip():
+
+        raise RuntimeError(
+            "INA respondió sin contenido."
+        )
+
     return response.json()
 
 
 # ============================================================
-# CATÁLOGO
+# EXTRAER LISTA
+# ============================================================
+
+def extraer_lista(
+    data,
+):
+
+    if data is None:
+        return []
+
+    if isinstance(
+        data,
+        list,
+    ):
+        return data
+
+    if not isinstance(
+        data,
+        dict,
+    ):
+        return []
+
+    for key in [
+        "data",
+        "datos",
+        "observaciones",
+        "results",
+        "result",
+        "items",
+    ]:
+
+        value = data.get(
+            key
+        )
+
+        if isinstance(
+            value,
+            list,
+        ):
+            return value
+
+        if isinstance(
+            value,
+            dict,
+        ):
+
+            nested = extraer_lista(
+                value
+            )
+
+            if nested:
+                return nested
+
+    for value in data.values():
+
+        if isinstance(
+            value,
+            list,
+        ):
+            return value
+
+        if isinstance(
+            value,
+            dict,
+        ):
+
+            nested = extraer_lista(
+                value
+            )
+
+            if nested:
+                return nested
+
+    return []
+
+
+# ============================================================
+# CATÁLOGO INA
 # ============================================================
 
 def obtener_catalogo():
@@ -104,7 +205,6 @@ def obtener_catalogo():
     global _CATALOG_CACHE
 
     if _CATALOG_CACHE is not None:
-
         return _CATALOG_CACHE
 
     try:
@@ -113,37 +213,11 @@ def obtener_catalogo():
             INA_SERIES_URL
         )
 
+        catalogo = extraer_lista(
+            data
+        )
+
     except Exception:
-
-        _CATALOG_CACHE = []
-
-        return []
-
-    if isinstance(
-        data,
-        list,
-    ):
-
-        catalogo = data
-
-    elif isinstance(
-        data,
-        dict,
-    ):
-
-        catalogo = []
-
-        for value in data.values():
-
-            if isinstance(
-                value,
-                list,
-            ):
-
-                catalogo = value
-                break
-
-    else:
 
         catalogo = []
 
@@ -155,7 +229,7 @@ def obtener_catalogo():
 
 
 # ============================================================
-# BUSCAR MEJOR SERIE
+# BUSCAR SERIE DE NIVEL
 # ============================================================
 
 def buscar_serie_nivel(
@@ -165,7 +239,6 @@ def buscar_serie_nivel(
     catalogo = obtener_catalogo()
 
     if not catalogo:
-
         return None
 
     objetivo = normalizar_texto(
@@ -185,48 +258,62 @@ def buscar_serie_nivel(
         nombre = normalizar_texto(
             row.get(
                 "estacion_nombre",
-                "",
+                row.get(
+                    "station_name",
+                    "",
+                ),
             )
         )
 
         if nombre != objetivo:
             continue
 
+        # ----------------------------------------------------
+        # VARIABLE
+        # ----------------------------------------------------
+
+        raw_var = (
+            row.get("varid")
+            or row.get("varId")
+            or row.get("var_id")
+        )
+
         try:
 
-            varid = int(
-                row.get(
-                    "varid",
-                    -1,
-                )
+            var_id = int(
+                raw_var
             )
 
         except Exception:
+
             continue
 
-        if varid != VAR_ID_LEVEL:
+        if var_id != VAR_ID_LEVEL:
             continue
 
-        series_id = (
-            row.get(
-                "seriesid"
-            )
-            or row.get(
-                "seriesId"
-            )
+        # ----------------------------------------------------
+        # SERIES ID
+        # ----------------------------------------------------
+
+        raw_series = (
+            row.get("seriesid")
+            or row.get("seriesId")
+            or row.get("series_id")
         )
-
-        if series_id is None:
-            continue
 
         try:
 
             series_id = int(
-                series_id
+                raw_series
             )
 
         except Exception:
+
             continue
+
+        # ----------------------------------------------------
+        # PROCEDIMIENTO
+        # ----------------------------------------------------
 
         try:
 
@@ -240,6 +327,10 @@ def buscar_serie_nivel(
         except Exception:
 
             procid = -1
+
+        # ----------------------------------------------------
+        # CANTIDAD DE OBSERVACIONES
+        # ----------------------------------------------------
 
         try:
 
@@ -255,6 +346,10 @@ def buscar_serie_nivel(
 
             obs_count = 0
 
+        # ----------------------------------------------------
+        # ÚLTIMA FECHA
+        # ----------------------------------------------------
+
         to_date = pd.to_datetime(
             row.get(
                 "to_date"
@@ -263,39 +358,50 @@ def buscar_serie_nivel(
             utc=True,
         )
 
+        # ----------------------------------------------------
+        # SCORE
+        # ----------------------------------------------------
+
         score = 0
 
         if procid == 1:
+
             score += 100
 
         elif procid == 2:
+
             score += 70
 
         if obs_count > 0:
-            score += 40
+
+            score += 30
 
         if pd.notna(
             to_date
         ):
 
-            age = (
+            age_days = (
                 pd.Timestamp.now(
                     tz="UTC"
                 )
                 - to_date
             ).days
 
-            if age <= 7:
-                score += 60
+            if age_days <= 7:
 
-            elif age <= 30:
-                score += 50
+                score += 100
 
-            elif age <= 180:
-                score += 30
+            elif age_days <= 30:
 
-            elif age <= 365:
-                score += 10
+                score += 70
+
+            elif age_days <= 180:
+
+                score += 40
+
+            elif age_days <= 365:
+
+                score += 20
 
         candidatos.append(
             {
@@ -337,19 +443,119 @@ def buscar_serie_nivel(
         )
 
     if not candidatos:
-
         return None
 
     candidatos = sorted(
         candidatos,
-        key=lambda x:
-            x["score"],
+        key=lambda item:
+            item[
+                "score"
+            ],
         reverse=True,
     )
 
     return candidatos[
         0
     ]
+
+
+# ============================================================
+# DETECTAR COLUMNA FECHA
+# ============================================================
+
+def detectar_columna_fecha(
+    df,
+):
+
+    candidatos = [
+        "timestart",
+        "timeStart",
+        "datetime",
+        "dateTime",
+        "timestamp",
+        "fecha",
+        "date",
+        "time",
+    ]
+
+    for candidato in candidatos:
+
+        for columna in df.columns:
+
+            if (
+                str(
+                    columna
+                ).lower()
+                ==
+                candidato.lower()
+            ):
+
+                return columna
+
+    for columna in df.columns:
+
+        nombre = str(
+            columna
+        ).lower()
+
+        if (
+            "fecha" in nombre
+            or "date" in nombre
+            or "time" in nombre
+        ):
+
+            return columna
+
+    return None
+
+
+# ============================================================
+# DETECTAR COLUMNA VALOR
+# ============================================================
+
+def detectar_columna_valor(
+    df,
+):
+
+    candidatos = [
+        "valor",
+        "value",
+        "nivel",
+        "altura",
+        "level",
+        "height",
+    ]
+
+    for candidato in candidatos:
+
+        for columna in df.columns:
+
+            if (
+                str(
+                    columna
+                ).lower()
+                ==
+                candidato.lower()
+            ):
+
+                return columna
+
+    for columna in df.columns:
+
+        nombre = str(
+            columna
+        ).lower()
+
+        if (
+            "valor" in nombre
+            or "value" in nombre
+            or "nivel" in nombre
+            or "altura" in nombre
+        ):
+
+            return columna
+
+    return None
 
 
 # ============================================================
@@ -389,81 +595,37 @@ def consultar_serie(
 
         return pd.DataFrame()
 
-    if isinstance(
-        data,
-        dict,
-    ):
-
-        if (
-            "data"
-            in data
-        ):
-
-            data = data[
-                "data"
-            ]
-
-        elif (
-            "results"
-            in data
-        ):
-
-            data = data[
-                "results"
-            ]
-
-        elif (
-            "observaciones"
-            in data
-        ):
-
-            data = data[
-                "observaciones"
-            ]
-
-    if not isinstance(
-        data,
-        list,
-    ):
-
-        return pd.DataFrame()
-
-    df = pd.DataFrame(
+    registros = extraer_lista(
         data
     )
 
-    if df.empty:
+    if not registros:
 
-        return df
+        return pd.DataFrame()
 
-    fecha_col = None
-    valor_col = None
+    try:
 
-    for col in [
-        "timestart",
-        "timeStart",
-        "datetime",
-        "fecha",
-        "date",
-        "timestamp",
-    ]:
+        raw = pd.json_normalize(
+            registros
+        )
 
-        if col in df.columns:
+    except Exception:
 
-            fecha_col = col
-            break
+        raw = pd.DataFrame(
+            registros
+        )
 
-    for col in [
-        "valor",
-        "value",
-        "nivel",
-        "altura",
-    ]:
+    if raw.empty:
 
-        if col in df.columns:
+        return pd.DataFrame()
 
-            valor_col = col
-            break
+    fecha_col = detectar_columna_fecha(
+        raw
+    )
+
+    valor_col = detectar_columna_valor(
+        raw
+    )
 
     if (
         fecha_col is None
@@ -477,13 +639,40 @@ def consultar_serie(
     result[
         "datetime"
     ] = pd.to_datetime(
-        df[
+        raw[
             fecha_col
         ],
         errors="coerce",
         utc=True,
     )
 
+    result[
+        "value"
+    ] = pd.to_numeric(
+        raw[
+            valor_col
+        ]
+        .astype(str)
+        .str.replace(
+            ",",
+            ".",
+            regex=False,
+        ),
+        errors="coerce",
+    )
+
+    result = result.dropna(
+        subset=[
+            "datetime",
+            "value",
+        ]
+    )
+
+    if result.empty:
+
+        return pd.DataFrame()
+
+    # Pasar a día
     result[
         "datetime"
     ] = (
@@ -496,36 +685,89 @@ def consultar_serie(
         .dt.normalize()
     )
 
-    result[
-        "value"
-    ] = pd.to_numeric(
-        df[
-            valor_col
-        ],
-        errors="coerce",
-    )
-
-    result = result.dropna(
-        subset=[
-            "datetime",
-            "value",
-        ]
-    )
-
+    # Un valor medio diario
     result = (
         result
         .groupby(
             "datetime",
             as_index=False,
-        )["value"]
+        )[
+            "value"
+        ]
         .mean()
+    )
+
+    result = (
+        result
+        .sort_values(
+            "datetime"
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
     return result
 
 
 # ============================================================
-# DESCARGAR AGUAS ARRIBA
+# DESCARGAR UNA ESTACIÓN
+# ============================================================
+
+def get_station_history(
+    estacion,
+    start,
+    end,
+):
+
+    info = buscar_serie_nivel(
+        estacion
+    )
+
+    if info is None:
+
+        return (
+            pd.DataFrame(),
+            None,
+        )
+
+    df = consultar_serie(
+        series_id=
+            info[
+                "series_id"
+            ],
+        start=
+            start,
+        end=
+            end,
+    )
+
+    if df.empty:
+
+        return (
+            df,
+            info,
+        )
+
+    columna = nombre_columna_estacion(
+        estacion
+    )
+
+    df = df.rename(
+        columns={
+            "value":
+                columna
+        }
+    )
+
+    return (
+        df,
+        info,
+    )
+
+
+# ============================================================
+# HISTÓRICO COMPLETO AGUAS ARRIBA
 # ============================================================
 
 def get_upstream_history(
@@ -541,70 +783,49 @@ def get_upstream_history(
         UPSTREAM_STATIONS
     ):
 
-        info = buscar_serie_nivel(
-            estacion
+        (
+            station_df,
+            info,
+        ) = get_station_history(
+            estacion=
+                estacion,
+            start=
+                start,
+            end=
+                end,
         )
 
         metadata[
             estacion
         ] = info
 
-        if info is None:
+        if (
+            station_df is None
+            or station_df.empty
+        ):
 
             continue
-
-        df = consultar_serie(
-            info[
-                "series_id"
-            ],
-            start,
-            end,
-        )
-
-        if df.empty:
-
-            continue
-
-        nombre_columna = (
-            "nivel_"
-            + normalizar_texto(
-                estacion
-            )
-            .replace(
-                " ",
-                "_",
-            )
-        )
-
-        df = df.rename(
-            columns={
-                "value":
-                    nombre_columna
-            }
-        )
 
         if resultado is None:
 
-            resultado = df
+            resultado = (
+                station_df.copy()
+            )
 
         else:
 
-            resultado = (
-                resultado.merge(
-                    df,
-                    on="datetime",
-                    how="outer",
-                )
+            resultado = resultado.merge(
+                station_df,
+                on="datetime",
+                how="outer",
             )
 
     if resultado is None:
 
-        resultado = (
-            pd.DataFrame(
-                columns=[
-                    "datetime"
-                ]
-            )
+        resultado = pd.DataFrame(
+            columns=[
+                "datetime"
+            ]
         )
 
     resultado = (
@@ -620,4 +841,161 @@ def get_upstream_history(
     return (
         resultado,
         metadata,
+    )
+
+
+# ============================================================
+# RESUMEN DE ESTACIONES
+# ============================================================
+
+def resumen_upstream(
+    upstream_history,
+):
+
+    rows = []
+
+    if (
+        upstream_history is None
+        or not isinstance(
+            upstream_history,
+            pd.DataFrame,
+        )
+        or upstream_history.empty
+    ):
+
+        return pd.DataFrame()
+
+    for estacion in (
+        UPSTREAM_STATIONS
+    ):
+
+        col = nombre_columna_estacion(
+            estacion
+        )
+
+        if col not in upstream_history.columns:
+            continue
+
+        temp = upstream_history[
+            [
+                "datetime",
+                col,
+            ]
+        ].copy()
+
+        temp[
+            col
+        ] = pd.to_numeric(
+            temp[
+                col
+            ],
+            errors="coerce",
+        )
+
+        temp = temp.dropna(
+            subset=[
+                col
+            ]
+        )
+
+        if temp.empty:
+            continue
+
+        nivel_actual = float(
+            temp[
+                col
+            ].iloc[-1]
+        )
+
+        nivel_anterior = None
+        variacion = None
+
+        if len(
+            temp
+        ) >= 2:
+
+            nivel_anterior = float(
+                temp[
+                    col
+                ].iloc[-2]
+            )
+
+            variacion = (
+                nivel_actual
+                - nivel_anterior
+            )
+
+        if variacion is None:
+
+            tendencia = (
+                "Sin comparación"
+            )
+
+        elif variacion > 0.01:
+
+            tendencia = (
+                "↑ Creciendo"
+            )
+
+        elif variacion < -0.01:
+
+            tendencia = (
+                "↓ Bajando"
+            )
+
+        else:
+
+            tendencia = (
+                "→ Estable"
+            )
+
+        rows.append(
+            {
+                "Estación":
+                    estacion,
+
+                "Nivel actual":
+                    round(
+                        nivel_actual,
+                        2,
+                    ),
+
+                "Nivel anterior":
+                    (
+                        round(
+                            nivel_anterior,
+                            2,
+                        )
+                        if nivel_anterior
+                        is not None
+                        else None
+                    ),
+
+                "Variación":
+                    (
+                        round(
+                            variacion,
+                            2,
+                        )
+                        if variacion
+                        is not None
+                        else None
+                    ),
+
+                "Tendencia":
+                    tendencia,
+
+                "Última fecha":
+                    pd.to_datetime(
+                        temp[
+                            "datetime"
+                        ].iloc[-1]
+                    ).strftime(
+                        "%d/%m/%Y"
+                    ),
+            }
+        )
+
+    return pd.DataFrame(
+        rows
     )
