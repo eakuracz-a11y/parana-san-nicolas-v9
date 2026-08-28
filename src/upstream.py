@@ -1,1769 +1,2085 @@
-import numpy as np
+import requests
 import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
+import numpy as np
+import unicodedata
+
+from datetime import (
+    datetime,
+    timedelta,
+)
 
 
 # ============================================================
 # PARANÁ · SAN NICOLÁS
-# src/stress_ui.py
-# V11.7
+# src/upstream.py
+# V11.8
 #
-# ESCENARIO HIDROLÓGICO EXTENDIDO
+# OBJETIVOS
 #
-# CAMBIO PRINCIPAL:
-# El escenario puede comenzar desde el nivel proyectado
-# al día 30 para evitar saltos artificiales entre:
+# - Descubrir series INA automáticamente.
+# - No inventar series_id.
+# - Consultar observaciones por INA A5.
+# - Recuperar Corrientes con histórico ampliado.
+# - Mantener el resto de estaciones para el período elegido.
+# - Evitar que el fallo de una estación detenga toda la app.
 #
-# 15 días -> 30 días -> 60 días
-#
+# IMPORTANTE:
+# San Nicolás NO se consulta aquí.
+# San Nicolás continúa usando src/ina.py serie 36.
 # ============================================================
 
 
-STRESS_DAYS = 60
+CATALOG_URL = (
+    "https://alerta.ina.gob.ar/pub/datos/series"
+)
 
-Y_MIN = 0.0
-Y_MAX = 7.0
+A5_URL = (
+    "https://alerta.ina.gob.ar/a5/getObservaciones"
+)
+
+
+# Variable nivel
+VAR_ID_NIVEL = 2
 
 
 # ============================================================
-# UTILIDADES
+# HISTÓRICO CORRIENTES
+#
+# Se intenta analizar un período mucho mayor que el rango
+# seleccionado por el usuario.
+#
+# 1990 es solamente un límite inicial de consulta.
+# INA devolverá lo que realmente tenga disponible.
 # ============================================================
 
 
-def _to_numeric(series):
-
-    return pd.to_numeric(
-        series,
-        errors="coerce",
-    )
+CORRIENTES_HISTORY_START = (
+    "1990-01-01"
+)
 
 
-def _to_datetime(series):
-
-    x = pd.to_datetime(
-        series,
-        errors="coerce",
-        utc=True,
-    )
-
-    return x.dt.tz_localize(None)
+# ============================================================
+# ESTACIONES
+# ============================================================
 
 
-def _safe_float(
+STATIONS = {
+    "Corrientes": [
+        "Corrientes",
+    ],
+
+    "Goya": [
+        "Goya",
+    ],
+
+    "La Paz": [
+        "La Paz",
+        "La Paz Entre Rios",
+        "La Paz Entre Ríos",
+    ],
+
+    "Paraná": [
+        "Paraná",
+        "Parana",
+    ],
+
+    "Diamante": [
+        "Diamante",
+    ],
+
+    "Rosario": [
+        "Rosario",
+    ],
+
+    "Villa Constitución": [
+        "Villa Constitución",
+        "Villa Constitucion",
+    ],
+}
+
+
+OUTPUT_COLUMNS = {
+    "Corrientes":
+        "nivel_corrientes",
+
+    "Goya":
+        "nivel_goya",
+
+    "La Paz":
+        "nivel_la_paz",
+
+    "Paraná":
+        "nivel_parana",
+
+    "Diamante":
+        "nivel_diamante",
+
+    "Rosario":
+        "nivel_rosario",
+
+    "Villa Constitución":
+        "nivel_villa_constitucion",
+}
+
+
+# ============================================================
+# SESSION HTTP
+# ============================================================
+
+
+SESSION = requests.Session()
+
+SESSION.headers.update(
+    {
+        "User-Agent":
+            "Parana-San-Nicolas-App/11.8",
+
+        "Accept":
+            "application/json",
+    }
+)
+
+
+# ============================================================
+# NORMALIZACIÓN DE TEXTO
+# ============================================================
+
+
+def normalizar_texto(
     value,
-    default=np.nan,
 ):
 
-    try:
+    if value is None:
+        return ""
 
-        value = float(value)
+    text = str(
+        value
+    ).strip()
 
-        if np.isfinite(value):
-            return value
-
-    except Exception:
-        pass
-
-    return default
-
-
-def _safe_quantile(
-    values,
-    q,
-    default=0.0,
-):
-
-    if values is None:
-        return default
-
-    values = (
-        _to_numeric(
-            pd.Series(values)
-        )
-        .dropna()
+    text = unicodedata.normalize(
+        "NFKD",
+        text,
     )
 
-    if values.empty:
-        return default
+    text = "".join(
+        ch
+        for ch in text
+        if not unicodedata.combining(
+            ch
+        )
+    )
+
+    text = (
+        text
+        .lower()
+        .replace(
+            "_",
+            " ",
+        )
+        .replace(
+            "-",
+            " ",
+        )
+    )
+
+    text = " ".join(
+        text.split()
+    )
+
+    return text
+
+
+# ============================================================
+# FECHAS
+# ============================================================
+
+
+def normalizar_fecha(
+    value,
+):
 
     try:
 
-        value = float(
-            values.quantile(q)
+        return pd.Timestamp(
+            value
+        ).strftime(
+            "%Y-%m-%d"
         )
-
-        if np.isfinite(value):
-            return value
 
     except Exception:
-        pass
 
-    return default
+        return str(
+            value
+        )[:10]
 
 
 # ============================================================
-# NIVEL
+# UTILIDADES JSON
 # ============================================================
 
 
-def _get_level_column(df):
+def _recursive_records(
+    data,
+):
 
-    if (
-        df is None
-        or not isinstance(
-            df,
-            pd.DataFrame,
-        )
-        or df.empty
+    """
+    Busca listas de diccionarios dentro de una respuesta JSON.
+    """
+
+    if isinstance(
+        data,
+        list,
+    ):
+
+        if (
+            data
+            and all(
+                isinstance(
+                    item,
+                    dict,
+                )
+                for item in data
+            )
+        ):
+
+            return data
+
+        for item in data:
+
+            found = (
+                _recursive_records(
+                    item
+                )
+            )
+
+            if found:
+                return found
+
+
+    if isinstance(
+        data,
+        dict,
+    ):
+
+        common_keys = [
+            "rows",
+            "data",
+            "series",
+            "observaciones",
+            "observations",
+            "result",
+            "results",
+            "items",
+            "features",
+        ]
+
+        for key in common_keys:
+
+            if key in data:
+
+                found = (
+                    _recursive_records(
+                        data[
+                            key
+                        ]
+                    )
+                )
+
+                if found:
+                    return found
+
+        for value in data.values():
+
+            found = (
+                _recursive_records(
+                    value
+                )
+            )
+
+            if found:
+                return found
+
+    return []
+
+
+# ============================================================
+# EXTRAER CAMPO
+# ============================================================
+
+
+def _first_value(
+    obj,
+    keys,
+):
+
+    if not isinstance(
+        obj,
+        dict,
     ):
 
         return None
 
-    candidates = [
-        "nivel",
-        "value",
-        "nivel_san_nicolas",
-        "prediction",
-    ]
+    for key in keys:
 
-    for col in candidates:
+        if key in obj:
 
-        if col in df.columns:
-            return col
+            value = obj[
+                key
+            ]
+
+            if value is not None:
+
+                return value
 
     return None
 
 
-def _prepare_level_history(df):
+# ============================================================
+# EXTRAER NOMBRE ESTACIÓN
+# ============================================================
 
-    level_col = (
-        _get_level_column(
-            df
-        )
-    )
 
-    if (
-        level_col is None
-        or "datetime"
-        not in df.columns
-    ):
+def _extract_station_name(
+    record,
+):
 
-        return pd.DataFrame()
-
-    x = df[
+    direct = _first_value(
+        record,
         [
-            "datetime",
-            level_col,
-        ]
-    ].copy()
-
-    x[
-        "datetime"
-    ] = _to_datetime(
-        x[
-            "datetime"
-        ]
+            "site_name",
+            "siteName",
+            "sitename",
+            "station_name",
+            "stationName",
+            "nombre_estacion",
+            "estacion",
+            "nombre",
+            "name",
+        ],
     )
 
-    x[
-        "nivel"
-    ] = _to_numeric(
-        x[
-            level_col
-        ]
-    )
-
-    x = x.dropna(
-        subset=[
-            "datetime",
-            "nivel",
-        ]
-    )
-
-    if x.empty:
-        return pd.DataFrame()
-
-    x[
-        "date"
-    ] = (
-        x[
-            "datetime"
-        ]
-        .dt.normalize()
-    )
-
-    x = (
-        x.groupby(
-            "date",
-            as_index=False,
-        )[
-            "nivel"
-        ]
-        .mean()
-        .rename(
-            columns={
-                "date":
-                    "datetime"
-            }
-        )
-        .sort_values(
-            "datetime"
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-    return x
-
-
-# ============================================================
-# EXÓGENAS
-# ============================================================
-
-
-def _prepare_exogenous(
-    exog_history,
-):
-
-    if (
-        exog_history is None
-        or not isinstance(
-            exog_history,
-            pd.DataFrame,
-        )
-        or exog_history.empty
-        or "datetime"
-        not in exog_history.columns
+    if isinstance(
+        direct,
+        str,
     ):
 
-        return pd.DataFrame()
-
-    x = exog_history.copy()
-
-    x[
-        "datetime"
-    ] = _to_datetime(
-        x[
-            "datetime"
-        ]
-    )
-
-    x = x.dropna(
-        subset=[
-            "datetime"
-        ]
-    )
-
-    x[
-        "date"
-    ] = (
-        x[
-            "datetime"
-        ]
-        .dt.normalize()
-    )
-
-    agg = {}
-
-    if "precip_mm" in x.columns:
-
-        x[
-            "precip_mm"
-        ] = _to_numeric(
-            x[
-                "precip_mm"
-            ]
-        )
-
-        agg[
-            "precip_mm"
-        ] = "sum"
-
-    if "caudal_m3s" in x.columns:
-
-        x[
-            "caudal_m3s"
-        ] = _to_numeric(
-            x[
-                "caudal_m3s"
-            ]
-        )
-
-        agg[
-            "caudal_m3s"
-        ] = "mean"
-
-    if not agg:
-
-        return pd.DataFrame()
-
-    x = (
-        x.groupby(
-            "date",
-            as_index=False,
-        )
-        .agg(
-            agg
-        )
-        .rename(
-            columns={
-                "date":
-                    "datetime"
-            }
-        )
-        .sort_values(
-            "datetime"
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-    return x
+        return direct
 
 
-# ============================================================
-# HISTÓRICO NIVEL
-# ============================================================
+    # --------------------------------------------------------
+    # Posibles estructuras anidadas
+    # --------------------------------------------------------
 
-
-def _historical_level_reference(
-    df,
-    future_dates,
-):
-
-    level = (
-        _prepare_level_history(
-            df
-        )
-    )
-
-    result = pd.DataFrame(
-        {
-            "datetime":
-                pd.to_datetime(
-                    future_dates
-                )
-        }
-    )
-
-    result[
-        "historical_level_max_m"
-    ] = np.nan
-
-    if level.empty:
-
-        return result
-
-    level[
-        "doy"
-    ] = (
-        level[
-            "datetime"
-        ]
-        .dt.dayofyear
-    )
-
-    global_reference = (
-        _safe_quantile(
-            level[
-                "nivel"
-            ],
-            0.95,
-            default=float(
-                level[
-                    "nivel"
-                ].max()
-            ),
-        )
-    )
-
-    values = []
-
-    for future_date in result[
-        "datetime"
+    for key in [
+        "site",
+        "station",
+        "estacion",
     ]:
 
-        doy = int(
-            future_date.dayofyear
+        nested = record.get(
+            key
         )
 
-        distance = np.minimum(
-            np.abs(
-                level[
-                    "doy"
-                ]
-                - doy
-            ),
-            365
-            - np.abs(
-                level[
-                    "doy"
-                ]
-                - doy
-            ),
-        )
+        if isinstance(
+            nested,
+            dict,
+        ):
 
-        seasonal = (
-            level[
-                distance <= 10
-            ][
-                "nivel"
-            ]
-            .dropna()
-        )
-
-        if not seasonal.empty:
-
-            value = float(
-                seasonal.max()
+            value = _first_value(
+                nested,
+                [
+                    "name",
+                    "nombre",
+                    "site_name",
+                    "station_name",
+                ],
             )
 
-        else:
+            if value is not None:
 
-            value = (
-                global_reference
-            )
+                return value
 
-        values.append(
-            float(
-                np.clip(
-                    value,
-                    Y_MIN,
-                    Y_MAX,
-                )
-            )
-        )
-
-    result[
-        "historical_level_max_m"
-    ] = values
-
-    return result
+    return ""
 
 
 # ============================================================
-# LLUVIA HISTÓRICA
+# EXTRAER SERIES ID
 # ============================================================
 
 
-def _historical_rain_reference(
-    exog_history,
-    future_dates,
+def _extract_series_id(
+    record,
 ):
 
-    exog = (
-        _prepare_exogenous(
-            exog_history
-        )
-    )
-
-    result = pd.DataFrame(
-        {
-            "datetime":
-                pd.to_datetime(
-                    future_dates
-                )
-        }
-    )
-
-    result[
-        "rain_historical_max_mm"
-    ] = 0.0
-
-    if (
-        exog.empty
-        or "precip_mm"
-        not in exog.columns
-    ):
-
-        return result
-
-    rain = exog[
+    value = _first_value(
+        record,
         [
-            "datetime",
-            "precip_mm",
-        ]
-    ].copy()
-
-    rain[
-        "precip_mm"
-    ] = _to_numeric(
-        rain[
-            "precip_mm"
-        ]
-    )
-
-    rain = rain.dropna(
-        subset=[
-            "precip_mm"
-        ]
-    )
-
-    if rain.empty:
-
-        return result
-
-    rain[
-        "doy"
-    ] = (
-        rain[
-            "datetime"
-        ]
-        .dt.dayofyear
-    )
-
-    global_reference = (
-        _safe_quantile(
-            rain[
-                "precip_mm"
-            ],
-            0.95,
-            default=0.0,
-        )
-    )
-
-    values = []
-
-    for future_date in result[
-        "datetime"
-    ]:
-
-        doy = int(
-            future_date.dayofyear
-        )
-
-        distance = np.minimum(
-            np.abs(
-                rain[
-                    "doy"
-                ]
-                - doy
-            ),
-            365
-            - np.abs(
-                rain[
-                    "doy"
-                ]
-                - doy
-            ),
-        )
-
-        seasonal = (
-            rain[
-                distance <= 7
-            ][
-                "precip_mm"
-            ]
-            .dropna()
-        )
-
-        if not seasonal.empty:
-
-            value = float(
-                seasonal.max()
-            )
-
-        else:
-
-            value = (
-                global_reference
-            )
-
-        values.append(
-            max(
-                0.0,
-                _safe_float(
-                    value,
-                    0.0,
-                ),
-            )
-        )
-
-    result[
-        "rain_historical_max_mm"
-    ] = values
-
-    return result
-
-
-# ============================================================
-# CAUDAL HISTÓRICO
-# ============================================================
-
-
-def _historical_flow_reference(
-    exog_history,
-    future_dates,
-):
-
-    exog = (
-        _prepare_exogenous(
-            exog_history
-        )
-    )
-
-    result = pd.DataFrame(
-        {
-            "datetime":
-                pd.to_datetime(
-                    future_dates
-                )
-        }
-    )
-
-    result[
-        "flow_historical_max_m3s"
-    ] = np.nan
-
-    if (
-        exog.empty
-        or "caudal_m3s"
-        not in exog.columns
-    ):
-
-        return result
-
-    q = exog[
-        [
-            "datetime",
-            "caudal_m3s",
-        ]
-    ].copy()
-
-    q[
-        "caudal_m3s"
-    ] = _to_numeric(
-        q[
-            "caudal_m3s"
-        ]
-    )
-
-    q = q.dropna(
-        subset=[
-            "caudal_m3s"
-        ]
-    )
-
-    if q.empty:
-
-        return result
-
-    q[
-        "doy"
-    ] = (
-        q[
-            "datetime"
-        ]
-        .dt.dayofyear
-    )
-
-    global_reference = (
-        _safe_quantile(
-            q[
-                "caudal_m3s"
-            ],
-            0.95,
-            default=np.nan,
-        )
-    )
-
-    values = []
-
-    for future_date in result[
-        "datetime"
-    ]:
-
-        doy = int(
-            future_date.dayofyear
-        )
-
-        distance = np.minimum(
-            np.abs(
-                q[
-                    "doy"
-                ]
-                - doy
-            ),
-            365
-            - np.abs(
-                q[
-                    "doy"
-                ]
-                - doy
-            ),
-        )
-
-        seasonal = (
-            q[
-                distance <= 10
-            ][
-                "caudal_m3s"
-            ]
-            .dropna()
-        )
-
-        if not seasonal.empty:
-
-            value = float(
-                seasonal.max()
-            )
-
-        else:
-
-            value = (
-                global_reference
-            )
-
-        values.append(
-            _safe_float(
-                value,
-                np.nan,
-            )
-        )
-
-    result[
-        "flow_historical_max_m3s"
-    ] = values
-
-    return result
-
-
-# ============================================================
-# SEÑAL AGUAS ARRIBA
-# ============================================================
-
-
-def _upstream_signal(
-    upstream_history,
-):
-
-    if (
-        upstream_history is None
-        or not isinstance(
-            upstream_history,
-            pd.DataFrame,
-        )
-        or upstream_history.empty
-    ):
-
-        return 0.0
-
-    level_cols = [
-        col
-        for col
-        in upstream_history.columns
-        if str(
-            col
-        ).startswith(
-            "nivel_"
-        )
-    ]
-
-    signals = []
-
-    for col in level_cols:
-
-        values = (
-            _to_numeric(
-                upstream_history[
-                    col
-                ]
-            )
-            .dropna()
-        )
-
-        if len(values) < 2:
-            continue
-
-        if len(values) >= 7:
-
-            delta = float(
-                values.iloc[-1]
-                - values.iloc[-7]
-            )
-
-        else:
-
-            delta = float(
-                values.iloc[-1]
-                - values.iloc[0]
-            )
-
-        signals.append(
-            delta
-        )
-
-    if not signals:
-
-        return 0.0
-
-    return float(
-        np.clip(
-            np.nanmedian(
-                signals
-            ),
-            -1.5,
-            1.5,
-        )
-    )
-
-
-# ============================================================
-# TENDENCIA LOCAL
-# ============================================================
-
-
-def _recent_level_slope(
-    level_history,
-):
-
-    if (
-        level_history is None
-        or level_history.empty
-    ):
-
-        return 0.0
-
-    values = (
-        _to_numeric(
-            level_history[
-                "nivel"
-            ]
-        )
-        .dropna()
-        .tail(
-            10
-        )
-    )
-
-    if len(values) < 3:
-
-        return 0.0
-
-    x = np.arange(
-        len(values),
-        dtype=float,
-    )
-
-    y = values.to_numpy(
-        dtype=float
+            "series_id",
+            "seriesId",
+            "seriesid",
+            "id",
+            "serie_id",
+            "serieId",
+        ],
     )
 
     try:
 
-        slope = float(
-            np.polyfit(
-                x,
-                y,
-                1,
-            )[0]
+        return int(
+            value
         )
 
     except Exception:
 
-        slope = 0.0
-
-    return float(
-        np.clip(
-            slope,
-            -0.10,
-            0.10,
-        )
-    )
+        return None
 
 
 # ============================================================
-# SEÑAL DE CAUDAL
+# EXTRAER VAR ID
 # ============================================================
 
 
-def _flow_signal(
-    exog_history,
+def _extract_var_id(
+    record,
 ):
 
-    exog = (
-        _prepare_exogenous(
-            exog_history
+    value = _first_value(
+        record,
+        [
+            "var_id",
+            "varId",
+            "varid",
+            "variable_id",
+            "variableId",
+        ],
+    )
+
+    try:
+
+        return int(
+            value
+        )
+
+    except Exception:
+
+        pass
+
+
+    variable = record.get(
+        "variable"
+    )
+
+    if isinstance(
+        variable,
+        dict,
+    ):
+
+        value = _first_value(
+            variable,
+            [
+                "id",
+                "var_id",
+                "varId",
+            ],
+        )
+
+        try:
+
+            return int(
+                value
+            )
+
+        except Exception:
+
+            pass
+
+    return None
+
+
+# ============================================================
+# EXTRAER PROCEDIMIENTO
+# ============================================================
+
+
+def _extract_proc_id(
+    record,
+):
+
+    value = _first_value(
+        record,
+        [
+            "proc_id",
+            "procId",
+            "procid",
+            "procedure_id",
+            "procedureId",
+        ],
+    )
+
+    try:
+
+        return int(
+            value
+        )
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# EXTRAER FECHA FINAL
+# ============================================================
+
+
+def _extract_end_date(
+    record,
+):
+
+    value = _first_value(
+        record,
+        [
+            "date_end",
+            "dateEnd",
+            "to_date",
+            "toDate",
+            "time_end",
+            "timeEnd",
+            "end_date",
+            "endDate",
+            "max_date",
+            "maxDate",
+        ],
+    )
+
+    try:
+
+        return pd.Timestamp(
+            value
+        )
+
+    except Exception:
+
+        return pd.NaT
+
+
+# ============================================================
+# EXTRAER CANTIDAD DE OBSERVACIONES
+# ============================================================
+
+
+def _extract_obs_count(
+    record,
+):
+
+    value = _first_value(
+        record,
+        [
+            "obs_count",
+            "obsCount",
+            "count",
+            "nobs",
+            "observations_count",
+            "observaciones",
+        ],
+    )
+
+    try:
+
+        return int(
+            value
+        )
+
+    except Exception:
+
+        return 0
+
+
+# ============================================================
+# CONSULTAR CATÁLOGO
+# ============================================================
+
+
+def descargar_catalogo():
+
+    params = {
+        "format":
+            "json",
+    }
+
+    response = SESSION.get(
+        CATALOG_URL,
+        params=params,
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    records = (
+        _recursive_records(
+            data
         )
     )
 
-    if (
-        exog.empty
-        or "caudal_m3s"
-        not in exog.columns
-    ):
+    if not records:
 
-        return {
-            "trend": 0.0,
-            "current": np.nan,
-        }
+        raise RuntimeError(
+            "INA no devolvió registros "
+            "en el catálogo de series."
+        )
 
-    q = (
-        _to_numeric(
-            exog[
-                "caudal_m3s"
+    return records
+
+
+# ============================================================
+# COINCIDENCIA DE NOMBRE
+# ============================================================
+
+
+def _station_match_score(
+    station_name,
+    aliases,
+):
+
+    station_norm = (
+        normalizar_texto(
+            station_name
+        )
+    )
+
+    if not station_norm:
+        return 0
+
+    alias_norms = [
+        normalizar_texto(
+            alias
+        )
+        for alias in aliases
+    ]
+
+    score = 0
+
+
+    for alias in alias_norms:
+
+        # Exacta
+        if (
+            station_norm
+            == alias
+        ):
+
+            score = max(
+                score,
+                100,
+            )
+
+
+        # Empieza exactamente
+        elif station_norm.startswith(
+            alias + " "
+        ):
+
+            score = max(
+                score,
+                90,
+            )
+
+
+        # Alias contenido
+        elif alias in station_norm:
+
+            score = max(
+                score,
+                80,
+            )
+
+
+        # Nombre dentro del alias
+        elif station_norm in alias:
+
+            score = max(
+                score,
+                70,
+            )
+
+    return score
+
+
+# ============================================================
+# SELECCIONAR CANDIDATOS
+# ============================================================
+
+
+def buscar_series_estacion(
+    catalog_records,
+    station,
+):
+
+    aliases = STATIONS[
+        station
+    ]
+
+    candidates = []
+
+
+    for record in catalog_records:
+
+        if not isinstance(
+            record,
+            dict,
+        ):
+
+            continue
+
+
+        station_name = (
+            _extract_station_name(
+                record
+            )
+        )
+
+        match_score = (
+            _station_match_score(
+                station_name,
+                aliases,
+            )
+        )
+
+        if match_score <= 0:
+
+            continue
+
+
+        series_id = (
+            _extract_series_id(
+                record
+            )
+        )
+
+        if series_id is None:
+
+            continue
+
+
+        var_id = (
+            _extract_var_id(
+                record
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # Si el catálogo informa varId y no es nivel,
+        # se descarta.
+        # ----------------------------------------------------
+
+        if (
+            var_id is not None
+            and var_id
+            != VAR_ID_NIVEL
+        ):
+
+            continue
+
+
+        proc_id = (
+            _extract_proc_id(
+                record
+            )
+        )
+
+        end_date = (
+            _extract_end_date(
+                record
+            )
+        )
+
+        obs_count = (
+            _extract_obs_count(
+                record
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # Ranking
+        # ----------------------------------------------------
+
+        score = float(
+            match_score
+        )
+
+
+        # Preferencia procedimiento observado
+        if proc_id == 1:
+
+            score += 20
+
+        elif proc_id == 2:
+
+            score += 10
+
+
+        # Preferir series activas/recientes
+        if pd.notna(
+            end_date
+        ):
+
+            days_old = (
+                pd.Timestamp.today()
+                .normalize()
+                - end_date.normalize()
+            ).days
+
+            if days_old <= 30:
+
+                score += 20
+
+            elif days_old <= 365:
+
+                score += 10
+
+            elif days_old <= 3650:
+
+                score += 3
+
+
+        # Preferir series con observaciones
+        if obs_count > 0:
+
+            score += min(
+                np.log10(
+                    obs_count + 1
+                )
+                * 3,
+                15,
+            )
+
+
+        candidates.append(
+            {
+                "series_id":
+                    series_id,
+
+                "station_name":
+                    station_name,
+
+                "var_id":
+                    var_id,
+
+                "proc_id":
+                    proc_id,
+
+                "end_date":
+                    end_date,
+
+                "obs_count":
+                    obs_count,
+
+                "score":
+                    score,
+
+                "record":
+                    record,
+            }
+        )
+
+
+    candidates = sorted(
+        candidates,
+        key=lambda x:
+            x[
+                "score"
+            ],
+        reverse=True,
+    )
+
+
+    # Evitar ids repetidos
+    unique = []
+
+    seen = set()
+
+    for candidate in candidates:
+
+        sid = candidate[
+            "series_id"
+        ]
+
+        if sid in seen:
+            continue
+
+        seen.add(
+            sid
+        )
+
+        unique.append(
+            candidate
+        )
+
+
+    return unique
+
+
+# ============================================================
+# NORMALIZAR OBSERVACIONES A5
+# ============================================================
+
+
+def normalizar_observaciones(
+    data,
+):
+
+    records = (
+        _recursive_records(
+            data
+        )
+    )
+
+    if not records:
+
+        return pd.DataFrame(
+            columns=[
+                "datetime",
+                "value",
             ]
         )
-        .dropna()
+
+
+    rows = []
+
+
+    for record in records:
+
+        if not isinstance(
+            record,
+            dict,
+        ):
+
+            continue
+
+
+        dt = _first_value(
+            record,
+            [
+                "timestart",
+                "timeStart",
+                "timestamp",
+                "datetime",
+                "date",
+                "fecha",
+                "time",
+            ],
+        )
+
+
+        value = _first_value(
+            record,
+            [
+                "valor",
+                "value",
+                "obs_value",
+                "observation",
+                "nivel",
+            ],
+        )
+
+
+        # A veces viene:
+        # {"timestart": ..., "valor": ...}
+        # o estructuras similares.
+        if (
+            dt is None
+            or value is None
+        ):
+
+            continue
+
+
+        rows.append(
+            {
+                "datetime":
+                    dt,
+
+                "value":
+                    value,
+            }
+        )
+
+
+    if not rows:
+
+        return pd.DataFrame(
+            columns=[
+                "datetime",
+                "value",
+            ]
+        )
+
+
+    df = pd.DataFrame(
+        rows
     )
 
-    if q.empty:
 
-        return {
-            "trend": 0.0,
-            "current": np.nan,
-        }
-
-    current = float(
-        q.iloc[-1]
+    df[
+        "datetime"
+    ] = pd.to_datetime(
+        df[
+            "datetime"
+        ],
+        errors="coerce",
+        utc=True,
     )
 
-    if len(q) >= 7:
 
-        base = float(
-            q.iloc[-7]
+    df[
+        "value"
+    ] = pd.to_numeric(
+        df[
+            "value"
+        ],
+        errors="coerce",
+    )
+
+
+    df = df.dropna(
+        subset=[
+            "datetime",
+            "value",
+        ]
+    )
+
+
+    # Niveles plausibles
+    df = df[
+        (
+            df[
+                "value"
+            ]
+            >= -5
         )
-
-    else:
-
-        base = float(
-            q.iloc[0]
+        &
+        (
+            df[
+                "value"
+            ]
+            <= 20
         )
+    ]
 
-    if (
-        np.isfinite(base)
-        and abs(base) > 1e-9
-    ):
 
-        trend = (
-            current
-            - base
-        ) / abs(
-            base
+    df = (
+        df
+        .sort_values(
+            "datetime"
         )
+        .drop_duplicates(
+            subset=[
+                "datetime"
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
 
-    else:
 
-        trend = 0.0
+    return df
 
-    return {
-        "trend":
-            float(
-                np.clip(
-                    trend,
-                    -1.0,
-                    1.0,
-                )
+
+# ============================================================
+# CONSULTAR A5
+# ============================================================
+
+
+def consultar_a5(
+    series_id,
+    start,
+    end,
+):
+
+    params = {
+        "tipo":
+            "puntual",
+
+        "series_id":
+            int(
+                series_id
             ),
 
-        "current":
-            current,
+        "timestart":
+            normalizar_fecha(
+                start
+            ),
+
+        "timeend":
+            normalizar_fecha(
+                end
+            ),
     }
 
 
+    response = SESSION.get(
+        A5_URL,
+        params=params,
+        timeout=45,
+    )
+
+
+    if response.status_code != 200:
+
+        raise RuntimeError(
+            "INA A5 HTTP "
+            f"{response.status_code}"
+        )
+
+
+    data = response.json()
+
+
+    return normalizar_observaciones(
+        data
+    )
+
+
 # ============================================================
-# CONSTRUIR ESCENARIO
+# CONSULTA EN BLOQUES
 # ============================================================
 
 
-def build_stress_scenario(
-    df,
-    models=None,
-    exog_history=None,
-    upstream_history=None,
-    days=STRESS_DAYS,
-    anchor_date=None,
-    anchor_level=None,
-    anchor_day=0,
+def consultar_a5_en_bloques(
+    series_id,
+    start,
+    end,
+    block_years=5,
 ):
+
     """
-    Construye el escenario extendido.
+    Para históricos grandes divide la consulta en bloques.
 
-    anchor_date:
-        fecha desde donde comienza el escenario.
-
-    anchor_level:
-        nivel inicial del escenario.
-
-    anchor_day:
-        número de día dentro de la proyección total.
-
-        Ejemplo:
-        anchor_day=30
-        genera días 31 a 60.
-
-    Si no se informa ancla:
-        mantiene compatibilidad con versiones anteriores
-        y comienza desde el último nivel observado.
+    Esto evita pedir décadas completas en una sola llamada.
     """
 
-    level_history = (
-        _prepare_level_history(
-            df
-        )
-    )
+    start_ts = pd.Timestamp(
+        start
+    ).normalize()
 
-    if level_history.empty:
-
-        return pd.DataFrame()
+    end_ts = pd.Timestamp(
+        end
+    ).normalize()
 
 
-    # ========================================================
-    # PUNTO DE INICIO
-    # ========================================================
+    if start_ts > end_ts:
 
-    last_observed_date = (
-        pd.Timestamp(
-            level_history[
-                "datetime"
-            ].iloc[-1]
-        )
-    )
-
-    last_observed_level = float(
-        level_history[
-            "nivel"
-        ].iloc[-1]
-    )
-
-
-    if anchor_date is None:
-
-        start_date = (
-            last_observed_date
+        return pd.DataFrame(
+            columns=[
+                "datetime",
+                "value",
+            ]
         )
 
-    else:
 
-        start_date = (
-            pd.Timestamp(
-                anchor_date
+    frames = []
+
+    current = start_ts
+
+
+    while current <= end_ts:
+
+        block_end = min(
+            current
+            + pd.DateOffset(
+                years=block_years
             )
-        )
-
-
-    if anchor_level is None:
-
-        start_level = (
-            last_observed_level
-        )
-
-    else:
-
-        start_level = float(
-            anchor_level
-        )
-
-
-    start_level = float(
-        np.clip(
-            start_level,
-            Y_MIN,
-            Y_MAX,
-        )
-    )
-
-
-    days = int(
-        max(
-            days,
-            anchor_day + 1,
-        )
-    )
-
-
-    remaining_days = (
-        days
-        - int(
-            anchor_day
-        )
-    )
-
-
-    if remaining_days <= 0:
-
-        return pd.DataFrame()
-
-
-    future_dates = (
-        pd.date_range(
-            start=(
-                start_date
-                + pd.Timedelta(
-                    days=1
-                )
+            - pd.Timedelta(
+                days=1
             ),
-            periods=
-                remaining_days,
-            freq="D",
-        )
-    )
-
-
-    # ========================================================
-    # REFERENCIAS HISTÓRICAS
-    # ========================================================
-
-    scenario = pd.DataFrame(
-        {
-            "datetime":
-                future_dates
-        }
-    )
-
-
-    level_reference = (
-        _historical_level_reference(
-            df,
-            future_dates,
-        )
-    )
-
-    rain_reference = (
-        _historical_rain_reference(
-            exog_history,
-            future_dates,
-        )
-    )
-
-    flow_reference = (
-        _historical_flow_reference(
-            exog_history,
-            future_dates,
-        )
-    )
-
-
-    scenario = scenario.merge(
-        level_reference,
-        on="datetime",
-        how="left",
-    )
-
-    scenario = scenario.merge(
-        rain_reference,
-        on="datetime",
-        how="left",
-    )
-
-    scenario = scenario.merge(
-        flow_reference,
-        on="datetime",
-        how="left",
-    )
-
-
-    # ========================================================
-    # SEÑALES
-    # ========================================================
-
-    upstream_signal = (
-        _upstream_signal(
-            upstream_history
-        )
-    )
-
-    local_slope = (
-        _recent_level_slope(
-            level_history
-        )
-    )
-
-    flow_signal = (
-        _flow_signal(
-            exog_history
-        )
-    )
-
-
-    rain_reference_value = (
-        _safe_quantile(
-            scenario[
-                "rain_historical_max_mm"
-            ],
-            0.80,
-            default=1.0,
-        )
-    )
-
-    if rain_reference_value <= 0:
-
-        rain_reference_value = (
-            1.0
+            end_ts,
         )
 
 
-    flow_reference_value = (
-        _safe_quantile(
-            scenario[
-                "flow_historical_max_m3s"
-            ],
-            0.50,
-            default=np.nan,
-        )
-    )
+        try:
 
+            part = consultar_a5(
+                series_id=
+                    series_id,
 
-    # ========================================================
-    # CURVA
-    # ========================================================
+                start=
+                    current,
 
-    levels = []
-
-    daily_changes = []
-
-    previous_level = (
-        start_level
-    )
-
-
-    for i, row in scenario.iterrows():
-
-        extension_day = (
-            i + 1
-        )
-
-        total_day = (
-            int(
-                anchor_day
+                end=
+                    block_end,
             )
-            + extension_day
-        )
 
 
-        # ----------------------------------------------------
-        # TENDENCIA HEREDADA
-        #
-        # Tiene mayor peso al comienzo y se amortigua.
-        # ----------------------------------------------------
+            if not part.empty:
 
-        persistence = (
-            local_slope
-            * np.exp(
-                -extension_day
-                / 18.0
-            )
-        )
-
-
-        # ----------------------------------------------------
-        # AGUAS ARRIBA
-        # ----------------------------------------------------
-
-        upstream_component = (
-            0.018
-            * upstream_signal
-            * (
-                1.0
-                - np.exp(
-                    -extension_day
-                    / 10.0
+                frames.append(
+                    part
                 )
+
+
+        except Exception:
+
+            # Una ventana fallida no invalida
+            # automáticamente todo el histórico.
+            pass
+
+
+        current = (
+            block_end
+            + pd.Timedelta(
+                days=1
             )
         )
 
 
-        # ----------------------------------------------------
-        # CAUDAL ACTUAL
-        # ----------------------------------------------------
+    if not frames:
 
-        flow_component = (
-            0.010
-            * flow_signal.get(
-                "trend",
-                0.0,
-            )
+        return pd.DataFrame(
+            columns=[
+                "datetime",
+                "value",
+            ]
         )
 
 
-        # ----------------------------------------------------
-        # CAUDAL HISTÓRICO ESTACIONAL
-        # ----------------------------------------------------
-
-        future_flow = (
-            _safe_float(
-                row.get(
-                    "flow_historical_max_m3s"
-                ),
-                np.nan,
-            )
-        )
-
-        if (
-            np.isfinite(
-                future_flow
-            )
-            and np.isfinite(
-                flow_reference_value
-            )
-            and flow_reference_value > 0
-        ):
-
-            flow_ratio = (
-                future_flow
-                / flow_reference_value
-            )
-
-            historical_flow_component = (
-                0.008
-                * np.clip(
-                    flow_ratio - 1.0,
-                    -0.5,
-                    1.5,
-                )
-            )
-
-        else:
-
-            historical_flow_component = (
-                0.0
-            )
-
-
-        # ----------------------------------------------------
-        # LLUVIA HISTÓRICA ESTACIONAL
-        # ----------------------------------------------------
-
-        future_rain = max(
-            0.0,
-            _safe_float(
-                row.get(
-                    "rain_historical_max_mm"
-                ),
-                0.0,
-            ),
-        )
-
-        rain_ratio = (
-            future_rain
-            / rain_reference_value
-        )
-
-        rain_component = (
-            0.006
-            * np.clip(
-                rain_ratio,
-                0.0,
-                3.0,
-            )
-        )
-
-
-        # ----------------------------------------------------
-        # CAMBIO PROPUESTO
-        # ----------------------------------------------------
-
-        raw_change = (
-            persistence
-            + upstream_component
-            + flow_component
-            + historical_flow_component
-            + rain_component
-        )
-
-
-        # ----------------------------------------------------
-        # REFERENCIA HISTÓRICA
-        #
-        # Se usa como atracción suave, NO como valor objetivo
-        # obligatorio.
-        # ----------------------------------------------------
-
-        historical_level = (
-            _safe_float(
-                row.get(
-                    "historical_level_max_m"
-                ),
-                previous_level,
-            )
-        )
-
-
-        difference_to_history = (
-            historical_level
-            - previous_level
-        )
-
-
-        historical_component = (
-            difference_to_history
-            * 0.008
-        )
-
-
-        raw_change += (
-            historical_component
-        )
-
-
-        # ====================================================
-        # LÍMITES DE VARIACIÓN
-        #
-        # Evita caídas o aumentos exagerados.
-        #
-        # Para horizonte 31-60 preferimos una transición
-        # progresiva.
-        # ====================================================
-
-        max_drop = -0.035
-        max_rise = 0.080
-
-
-        # Si aguas arriba está claramente creciendo,
-        # evitamos una caída fuerte.
-        if upstream_signal > 0.10:
-
-            max_drop = -0.015
-
-
-        # Si el caudal está creciendo,
-        # también limitamos la caída.
-        if (
-            flow_signal.get(
-                "trend",
-                0.0,
-            )
-            > 0.05
-        ):
-
-            max_drop = max(
-                max_drop,
-                -0.012,
-            )
-
-
-        daily_change = float(
-            np.clip(
-                raw_change,
-                max_drop,
-                max_rise,
-            )
-        )
-
-
-        # ----------------------------------------------------
-        # SUAVIZADO RESPECTO AL DÍA ANTERIOR
-        # ----------------------------------------------------
-
-        if daily_changes:
-
-            previous_change = (
-                daily_changes[-1]
-            )
-
-            daily_change = (
-                0.65
-                * previous_change
-                + 0.35
-                * daily_change
-            )
-
-
-        proposed_level = (
-            previous_level
-            + daily_change
-        )
-
-
-        proposed_level = float(
-            np.clip(
-                proposed_level,
-                Y_MIN,
-                Y_MAX,
-            )
-        )
-
-
-        levels.append(
-            proposed_level
-        )
-
-        daily_changes.append(
-            daily_change
-        )
-
-        previous_level = (
-            proposed_level
-        )
-
-
-    # ========================================================
-    # RESULTADO
-    # ========================================================
-
-    scenario[
-        "stress_level"
-    ] = levels
-
-
-    scenario[
-        "daily_change"
-    ] = daily_changes
-
-
-    scenario[
-        "scenario_day"
-    ] = np.arange(
-        int(
-            anchor_day
-        ) + 1,
-        days + 1,
+    df = pd.concat(
+        frames,
+        ignore_index=True,
     )
 
 
-    scenario[
-        "upstream_signal"
-    ] = upstream_signal
-
-
-    scenario[
-        "current_flow_m3s"
-    ] = (
-        flow_signal.get(
-            "current",
-            np.nan,
+    df = (
+        df
+        .sort_values(
+            "datetime"
         )
-    )
-
-
-    scenario[
-        "scenario_type"
-    ] = (
-        "historical_hydrological"
-    )
-
-
-    scenario[
-        "anchor_level"
-    ] = (
-        start_level
-    )
-
-
-    return scenario
-
-
-# ============================================================
-# API PARA APP.PY
-# ============================================================
-
-
-def get_stress_scenario(
-    df,
-    models=None,
-    exog_history=None,
-    upstream_history=None,
-    days=STRESS_DAYS,
-    anchor_date=None,
-    anchor_level=None,
-    anchor_day=0,
-):
-
-    return build_stress_scenario(
-        df=df,
-        models=models,
-        exog_history=
-            exog_history,
-        upstream_history=
-            upstream_history,
-        days=days,
-        anchor_date=
-            anchor_date,
-        anchor_level=
-            anchor_level,
-        anchor_day=
-            anchor_day,
-    )
-
-
-# ============================================================
-# RENDER OPCIONAL
-# ============================================================
-
-
-def render_stress_scenario(
-    df,
-    models=None,
-    exog_history=None,
-    upstream_history=None,
-    days=STRESS_DAYS,
-    anchor_date=None,
-    anchor_level=None,
-    anchor_day=0,
-):
-
-    st.subheader(
-        "⚠️ Escenario hidrológico extendido"
-    )
-
-
-    scenario = (
-        build_stress_scenario(
-            df=df,
-            models=models,
-            exog_history=
-                exog_history,
-            upstream_history=
-                upstream_history,
-            days=days,
-            anchor_date=
-                anchor_date,
-            anchor_level=
-                anchor_level,
-            anchor_day=
-                anchor_day,
-        )
-    )
-
-
-    if scenario.empty:
-
-        st.info(
-            "No hay suficientes datos "
-            "para construir el escenario."
-        )
-
-        return scenario
-
-
-    level_history = (
-        _prepare_level_history(
-            df
-        )
-    )
-
-
-    observed_level = float(
-        level_history[
-            "nivel"
-        ].iloc[-1]
-    )
-
-
-    first_level = float(
-        scenario[
-            "anchor_level"
-        ].iloc[0]
-    )
-
-
-    final_level = float(
-        scenario[
-            "stress_level"
-        ].iloc[-1]
-    )
-
-
-    maximum_level = float(
-        scenario[
-            "stress_level"
-        ].max()
-    )
-
-
-    c1, c2 = st.columns(
-        2
-    )
-
-
-    c1.metric(
-        "Nivel inicio escenario",
-        f"{first_level:.2f} m",
-    )
-
-
-    c2.metric(
-        "Nivel final",
-        f"{final_level:.2f} m",
-        f"{final_level - first_level:+.2f} m",
-    )
-
-
-    c3, c4 = st.columns(
-        2
-    )
-
-
-    c3.metric(
-        "Máximo escenario",
-        f"{maximum_level:.2f} m",
-    )
-
-
-    c4.metric(
-        "Nivel observado actual",
-        f"{observed_level:.2f} m",
-    )
-
-
-    fig = go.Figure()
-
-
-    fig.add_trace(
-        go.Scatter(
-            x=scenario[
+        .drop_duplicates(
+            subset=[
                 "datetime"
             ],
-            y=scenario[
-                "stress_level"
-            ],
-            mode="lines+markers",
-            name="Escenario",
+            keep="last",
+        )
+        .reset_index(
+            drop=True
         )
     )
 
+
+    return df
+
+
+# ============================================================
+# NORMALIZACIÓN DIARIA
+# ============================================================
+
+
+def convertir_diario(
+    df,
+    output_column,
+):
 
     if (
-        "historical_level_max_m"
-        in scenario.columns
+        df is None
+        or df.empty
     ):
 
-        fig.add_trace(
-            go.Scatter(
-                x=scenario[
-                    "datetime"
-                ],
-                y=scenario[
-                    "historical_level_max_m"
-                ],
-                mode="lines",
-                line=dict(
-                    dash="dot"
-                ),
-                name="Máximo histórico estacional",
-            )
+        return pd.DataFrame(
+            columns=[
+                "datetime",
+                output_column,
+            ]
         )
 
 
-    fig.update_layout(
-        height=420,
-        hovermode="x unified",
-        margin=dict(
-            l=10,
-            r=10,
-            t=25,
-            b=10,
+    x = df[
+        [
+            "datetime",
+            "value",
+        ]
+    ].copy()
+
+
+    x[
+        "datetime"
+    ] = pd.to_datetime(
+        x[
+            "datetime"
+        ],
+        errors="coerce",
+        utc=True,
+    )
+
+
+    x[
+        "value"
+    ] = pd.to_numeric(
+        x[
+            "value"
+        ],
+        errors="coerce",
+    )
+
+
+    x = x.dropna(
+        subset=[
+            "datetime",
+            "value",
+        ]
+    )
+
+
+    if x.empty:
+
+        return pd.DataFrame(
+            columns=[
+                "datetime",
+                output_column,
+            ]
+        )
+
+
+    x[
+        "date"
+    ] = (
+        x[
+            "datetime"
+        ]
+        .dt.floor(
+            "D"
+        )
+    )
+
+
+    # Para nivel, usamos mediana diaria.
+    daily = (
+        x.groupby(
+            "date",
+            as_index=False,
+        )[
+            "value"
+        ]
+        .median()
+        .rename(
+            columns={
+                "date":
+                    "datetime",
+
+                "value":
+                    output_column,
+            }
+        )
+    )
+
+
+    daily = (
+        daily
+        .sort_values(
+            "datetime"
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+    return daily
+
+
+# ============================================================
+# VERIFICAR CANDIDATO
+# ============================================================
+
+
+def verificar_candidato(
+    candidate,
+    start,
+    end,
+):
+
+    """
+    Hace una consulta corta para verificar que la serie
+    realmente devuelve observaciones.
+    """
+
+    series_id = candidate[
+        "series_id"
+    ]
+
+
+    end_ts = pd.Timestamp(
+        end
+    )
+
+
+    # Ventana de validación.
+    test_start = max(
+        pd.Timestamp(
+            start
+        ),
+        end_ts
+        - pd.Timedelta(
+            days=120
         ),
     )
 
 
-    fig.update_yaxes(
-        title_text="Nivel (m)",
-        range=[
-            Y_MIN,
-            Y_MAX,
-        ],
-        dtick=0.5,
+    try:
+
+        df = consultar_a5(
+            series_id=
+                series_id,
+
+            start=
+                test_start,
+
+            end=
+                end_ts,
+        )
+
+        return (
+            not df.empty,
+            len(
+                df
+            ),
+        )
+
+
+    except Exception:
+
+        return (
+            False,
+            0,
+        )
+
+
+# ============================================================
+# ELEGIR SERIE
+# ============================================================
+
+
+def seleccionar_serie(
+    catalog_records,
+    station,
+    start,
+    end,
+):
+
+    candidates = (
+        buscar_series_estacion(
+            catalog_records,
+            station,
+        )
     )
 
 
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
+    if not candidates:
+
+        return (
+            None,
+            []
+        )
+
+
+    checked = []
+
+
+    # Solo probamos los mejores candidatos
+    # para no hacer demasiadas llamadas.
+    for candidate in candidates[
+        :5
+    ]:
+
+        ok, test_records = (
+            verificar_candidato(
+                candidate,
+                start,
+                end,
+            )
+        )
+
+
+        candidate = (
+            candidate.copy()
+        )
+
+        candidate[
+            "verified"
+        ] = ok
+
+        candidate[
+            "test_records"
+        ] = test_records
+
+
+        checked.append(
+            candidate
+        )
+
+
+        if ok:
+
+            return (
+                candidate,
+                checked,
+            )
+
+
+    return (
+        None,
+        checked,
     )
 
 
-    return scenario
+# ============================================================
+# OBTENER UNA ESTACIÓN
+# ============================================================
+
+
+def obtener_estacion(
+    catalog_records,
+    station,
+    start,
+    end,
+):
+
+    output_column = (
+        OUTPUT_COLUMNS[
+            station
+        ]
+    )
+
+
+    selected, checked = (
+        seleccionar_serie(
+            catalog_records=
+                catalog_records,
+
+            station=
+                station,
+
+            start=
+                start,
+
+            end=
+                end,
+        )
+    )
+
+
+    if selected is None:
+
+        return (
+            pd.DataFrame(
+                columns=[
+                    "datetime",
+                    output_column,
+                ]
+            ),
+            {
+                "status":
+                    "sin_serie",
+
+                "series_id":
+                    None,
+
+                "records":
+                    0,
+
+                "candidates_checked":
+                    len(
+                        checked
+                    ),
+            },
+        )
+
+
+    series_id = (
+        selected[
+            "series_id"
+        ]
+    )
+
+
+    # ========================================================
+    # CORRIENTES
+    #
+    # Histórico extendido independiente del rango elegido.
+    # ========================================================
+
+    if station == "Corrientes":
+
+        query_start = (
+            CORRIENTES_HISTORY_START
+        )
+
+        query_end = (
+            end
+        )
+
+
+        df_obs = (
+            consultar_a5_en_bloques(
+                series_id=
+                    series_id,
+
+                start=
+                    query_start,
+
+                end=
+                    query_end,
+
+                block_years=5,
+            )
+        )
+
+
+    else:
+
+        query_start = (
+            start
+        )
+
+        query_end = (
+            end
+        )
+
+
+        try:
+
+            df_obs = (
+                consultar_a5(
+                    series_id=
+                        series_id,
+
+                    start=
+                        query_start,
+
+                    end=
+                        query_end,
+                )
+            )
+
+        except Exception:
+
+            df_obs = (
+                pd.DataFrame(
+                    columns=[
+                        "datetime",
+                        "value",
+                    ]
+                )
+            )
+
+
+    daily = (
+        convertir_diario(
+            df_obs,
+            output_column,
+        )
+    )
+
+
+    meta = {
+        "status":
+            (
+                "ok"
+                if not daily.empty
+                else "sin_datos"
+            ),
+
+        "series_id":
+            series_id,
+
+        "station_name":
+            selected.get(
+                "station_name",
+                station,
+            ),
+
+        "var_id":
+            selected.get(
+                "var_id"
+            ),
+
+        "proc_id":
+            selected.get(
+                "proc_id"
+            ),
+
+        "records":
+            len(
+                daily
+            ),
+
+        "query_start":
+            normalizar_fecha(
+                query_start
+            ),
+
+        "query_end":
+            normalizar_fecha(
+                query_end
+            ),
+
+        "catalog_score":
+            selected.get(
+                "score"
+            ),
+
+        "candidates_checked":
+            len(
+                checked
+            ),
+    }
+
+
+    if not daily.empty:
+
+        meta[
+            "first_date"
+        ] = (
+            daily[
+                "datetime"
+            ]
+            .min()
+            .strftime(
+                "%Y-%m-%d"
+            )
+        )
+
+        meta[
+            "last_date"
+        ] = (
+            daily[
+                "datetime"
+            ]
+            .max()
+            .strftime(
+                "%Y-%m-%d"
+            )
+        )
+
+
+    return (
+        daily,
+        meta,
+    )
+
+
+# ============================================================
+# FUNCIÓN PRINCIPAL
+# ============================================================
+
+
+def get_upstream_history(
+    start,
+    end,
+):
+
+    """
+    Devuelve:
+
+    (
+        upstream_history,
+        metadata
+    )
+
+    upstream_history contiene:
+
+    datetime
+    nivel_corrientes
+    nivel_goya
+    nivel_la_paz
+    nivel_parana
+    nivel_diamante
+    nivel_rosario
+    nivel_villa_constitucion
+
+    Corrientes puede contener un historial mucho más largo
+    que las demás estaciones.
+    """
+
+
+    start = normalizar_fecha(
+        start
+    )
+
+    end = normalizar_fecha(
+        end
+    )
+
+
+    # ========================================================
+    # CATÁLOGO
+    # ========================================================
+
+    try:
+
+        catalog_records = (
+            descargar_catalogo()
+        )
+
+    except Exception as exc:
+
+        return (
+            pd.DataFrame(),
+            {
+                "_error":
+                    (
+                        "No fue posible descargar "
+                        "el catálogo INA: "
+                        + str(
+                            exc
+                        )
+                    )
+            },
+        )
+
+
+    station_frames = []
+
+    metadata = {}
+
+
+    # ========================================================
+    # CADA ESTACIÓN
+    # ========================================================
+
+    for station in STATIONS:
+
+        try:
+
+            df_station, meta = (
+                obtener_estacion(
+                    catalog_records=
+                        catalog_records,
+
+                    station=
+                        station,
+
+                    start=
+                        start,
+
+                    end=
+                        end,
+                )
+            )
+
+
+        except Exception as exc:
+
+            df_station = (
+                pd.DataFrame()
+            )
+
+            meta = {
+                "status":
+                    "error",
+
+                "series_id":
+                    None,
+
+                "records":
+                    0,
+
+                "error":
+                    str(
+                        exc
+                    ),
+            }
+
+
+        metadata[
+            station
+        ] = meta
+
+
+        if (
+            isinstance(
+                df_station,
+                pd.DataFrame,
+            )
+            and not df_station.empty
+        ):
+
+            station_frames.append(
+                df_station
+            )
+
+
+    # ========================================================
+    # UNIR ESTACIONES
+    # ========================================================
+
+    if not station_frames:
+
+        return (
+            pd.DataFrame(),
+            metadata,
+        )
+
+
+    result = (
+        station_frames[0]
+        .copy()
+    )
+
+
+    for frame in station_frames[
+        1:
+    ]:
+
+        result = result.merge(
+            frame,
+            on="datetime",
+            how="outer",
+        )
+
+
+    result = (
+        result
+        .sort_values(
+            "datetime"
+        )
+        .drop_duplicates(
+            subset=[
+                "datetime"
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+    # ========================================================
+    # ASEGURAR TODAS LAS COLUMNAS
+    # ========================================================
+
+    for col in OUTPUT_COLUMNS.values():
+
+        if col not in result.columns:
+
+            result[
+                col
+            ] = np.nan
+
+
+    ordered_cols = [
+        "datetime",
+        "nivel_corrientes",
+        "nivel_goya",
+        "nivel_la_paz",
+        "nivel_parana",
+        "nivel_diamante",
+        "nivel_rosario",
+        "nivel_villa_constitucion",
+    ]
+
+
+    result = result[
+        ordered_cols
+    ]
+
+
+    return (
+        result,
+        metadata,
+    )
+
+
+# ============================================================
+# DIAGNÓSTICO OPCIONAL
+# ============================================================
+
+
+def diagnostic(
+    start,
+    end,
+):
+
+    df, meta = (
+        get_upstream_history(
+            start,
+            end,
+        )
+    )
+
+
+    summary = []
+
+
+    for station in STATIONS:
+
+        info = (
+            meta.get(
+                station,
+                {}
+            )
+        )
+
+
+        summary.append(
+            {
+                "station":
+                    station,
+
+                "status":
+                    info.get(
+                        "status"
+                    ),
+
+                "series_id":
+                    info.get(
+                        "series_id"
+                    ),
+
+                "records":
+                    info.get(
+                        "records",
+                        0,
+                    ),
+
+                "first_date":
+                    info.get(
+                        "first_date"
+                    ),
+
+                "last_date":
+                    info.get(
+                        "last_date"
+                    ),
+
+                "query_start":
+                    info.get(
+                        "query_start"
+                    ),
+
+                "query_end":
+                    info.get(
+                        "query_end"
+                    ),
+            }
+        )
+
+
+    return {
+        "rows":
+            len(
+                df
+            ),
+
+        "stations":
+            pd.DataFrame(
+                summary
+            ),
+
+        "metadata":
+            meta,
+    }
