@@ -1,38 +1,28 @@
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # src/upstream.py
-# V11.9 COMPLETO
+# V11.9.1 COMPLETO
 #
-# OBJETIVOS
+# CAMBIOS V11.9.1
 # ------------------------------------------------------------
-# 1. Encontrar automáticamente las series INA de NIVEL
-#    para las estaciones aguas arriba.
+# - Corrige conflicto de timezone:
+#       datetime64[us]
+#       vs
+#       datetime64[us, UTC]
 #
-# 2. No inventar series_id.
+# - Todas las fechas entregadas por este módulo quedan
+#   normalizadas SIN timezone.
 #
-# 3. Usar catálogo oficial A5 GeoJSON.
-#
-# 4. Validar cada serie mediante getObservaciones.
-#
-# 5. Descargar:
-#       Corrientes -> historial ampliado
-#       resto      -> período solicitado
-#
-# 6. Entregar diagnóstico completo por estación.
-#
-# 7. Fallo aislado:
-#    si una estación falla, las demás continúan.
-#
-# 8. Compatible con app.py V11.8.
+# - Mantiene:
+#       catálogo A5 GeoJSON
+#       detección automática series
+#       validación por getObservaciones
+#       historial ampliado Corrientes
+#       diagnóstico por estación
 # ============================================================
 
 
 import unicodedata
-
-from datetime import (
-    datetime,
-    timedelta,
-)
 
 from functools import lru_cache
 
@@ -45,17 +35,14 @@ import requests
 # CONFIGURACIÓN INA
 # ============================================================
 
-
 A5_BASE_URL = (
     "https://alerta.ina.gob.ar/a5"
 )
-
 
 A5_SERIES_GEOJSON_URL = (
     A5_BASE_URL
     + "/obs/puntual/series"
 )
-
 
 A5_OBSERVATIONS_URL = (
     A5_BASE_URL
@@ -65,51 +52,35 @@ A5_OBSERVATIONS_URL = (
 
 # ============================================================
 # VARIABLE NIVEL
-#
-# La serie 36 de San Nicolás utiliza var_id = 2.
-# Buscamos prioritariamente la misma variable.
 # ============================================================
-
 
 VAR_ID_NIVEL = 2
 
 
 # ============================================================
 # HISTORIAL CORRIENTES
-#
-# Se utiliza una fecha suficientemente amplia.
-# No significa que INA tenga datos desde 1900.
-#
-# El catálogo define el timestart real de cada serie y
-# posteriormente limitamos la consulta a esa disponibilidad.
 # ============================================================
-
 
 DEFAULT_HISTORY_FLOOR = "1900-01-01"
 
 
 # ============================================================
-# TAMAÑO DE BLOQUE PARA HISTÓRICOS
-#
-# Evitamos pedir décadas completas en una sola consulta.
+# BLOQUES HISTÓRICOS
 # ============================================================
-
 
 HISTORY_BLOCK_YEARS = 5
 
 
 # ============================================================
-# TIMEOUT HTTP
+# HTTP
 # ============================================================
-
 
 REQUEST_TIMEOUT = 45
 
 
 # ============================================================
-# ESTACIONES DE INTERÉS
+# ESTACIONES
 # ============================================================
-
 
 STATIONS = {
     "Corrientes": {
@@ -185,13 +156,12 @@ STATIONS = {
 # SESIÓN HTTP
 # ============================================================
 
-
 SESSION = requests.Session()
 
 SESSION.headers.update(
     {
         "User-Agent":
-            "Parana-San-Nicolas-Hydrology/11.9",
+            "Parana-San-Nicolas-Hydrology/11.9.1",
 
         "Accept":
             "application/json",
@@ -202,7 +172,6 @@ SESSION.headers.update(
 # ============================================================
 # UTILIDADES
 # ============================================================
-
 
 def normalizar_texto(
     value,
@@ -272,13 +241,11 @@ def _safe_int(
         if value is None:
             return default
 
-        value = int(
+        return int(
             float(
                 value
             )
         )
-
-        return value
 
     except Exception:
 
@@ -325,10 +292,34 @@ def _safe_datetime(
     return result
 
 
-# ============================================================
-# DESCARGAR CATÁLOGO GEOJSON
-# ============================================================
+def _to_naive_datetime_series(
+    series,
+):
 
+    # --------------------------------------------------------
+    # CONVERSIÓN UNIFICADA
+    #
+    # Siempre:
+    # 1. interpreta la fecha
+    # 2. normaliza temporalmente a UTC
+    # 3. elimina timezone
+    #
+    # Resultado:
+    # datetime64[ns]
+    # --------------------------------------------------------
+
+    return pd.to_datetime(
+        series,
+        errors="coerce",
+        utc=True,
+    ).dt.tz_localize(
+        None
+    )
+
+
+# ============================================================
+# CATÁLOGO GEOJSON
+# ============================================================
 
 @lru_cache(
     maxsize=1
@@ -397,11 +388,6 @@ def descargar_catalogo_geojson():
 
         row = properties.copy()
 
-        # ----------------------------------------------------
-        # Si series_id no viene en properties,
-        # utilizamos id del feature.
-        # ----------------------------------------------------
-
         if row.get(
             "series_id"
         ) is None:
@@ -457,10 +443,6 @@ def descargar_catalogo_geojson():
         raise ValueError(
             "El catálogo INA está vacío."
         )
-
-    # --------------------------------------------------------
-    # Normalización
-    # --------------------------------------------------------
 
     if "series_id" in catalog.columns:
 
@@ -543,9 +525,8 @@ def descargar_catalogo_geojson():
 
 
 # ============================================================
-# SCORE DE COINCIDENCIA DE ESTACIÓN
+# SCORE ESTACIÓN
 # ============================================================
-
 
 def _station_match_score(
     station_name,
@@ -570,20 +551,12 @@ def _station_match_score(
         if not alias_norm:
             continue
 
-        # ----------------------------------------------------
-        # Exacto
-        # ----------------------------------------------------
-
         if (
             station_norm
             == alias_norm
         ):
 
             score = 1000
-
-        # ----------------------------------------------------
-        # "Corrientes - Puerto ..."
-        # ----------------------------------------------------
 
         elif station_norm.startswith(
             alias_norm
@@ -599,20 +572,12 @@ def _station_match_score(
 
             score = 900
 
-        # ----------------------------------------------------
-        # "- Corrientes"
-        # ----------------------------------------------------
-
         elif station_norm.endswith(
             " "
             + alias_norm
         ):
 
             score = 850
-
-        # ----------------------------------------------------
-        # contiene palabra
-        # ----------------------------------------------------
 
         elif (
             " "
@@ -643,14 +608,8 @@ def _station_match_score(
 
 
 # ============================================================
-# DESCARTAR ESTACIONES METEOROLÓGICAS / AJENAS
-#
-# Ejemplo:
-# "RMET – Santo Tomé – Corrientes"
-#
-# Contiene Corrientes pero NO corresponde al nivel del Paraná.
+# PENALIZAR SERIES NO HIDROMÉTRICAS
 # ============================================================
-
 
 def _penalizacion_nombre(
     station_name,
@@ -683,9 +642,8 @@ def _penalizacion_nombre(
 
 
 # ============================================================
-# BUSCAR CANDIDATOS DE NIVEL
+# BUSCAR CANDIDATOS
 # ============================================================
-
 
 def buscar_candidatos_estacion(
     catalog,
@@ -717,9 +675,9 @@ def buscar_candidatos_estacion(
 
     x = catalog.copy()
 
-    # ========================================================
-    # FILTRAR VARIABLE NIVEL
-    # ========================================================
+    # --------------------------------------------------------
+    # NIVEL
+    # --------------------------------------------------------
 
     if "var_id" in x.columns:
 
@@ -732,9 +690,13 @@ def buscar_candidatos_estacion(
 
         return x
 
-    # ========================================================
+    # --------------------------------------------------------
     # SCORE NOMBRE
-    # ========================================================
+    # --------------------------------------------------------
+
+    if "nombre" not in x.columns:
+
+        return pd.DataFrame()
 
     x[
         "_station_score"
@@ -771,10 +733,6 @@ def buscar_candidatos_estacion(
         ]
     )
 
-    # --------------------------------------------------------
-    # Descartar coincidencias débiles
-    # --------------------------------------------------------
-
     x = x[
         x["_station_score"]
         >= 700
@@ -784,11 +742,9 @@ def buscar_candidatos_estacion(
 
         return x
 
-    # ========================================================
+    # --------------------------------------------------------
     # PROCEDIMIENTO
-    #
-    # Preferimos proc_id = 1.
-    # ========================================================
+    # --------------------------------------------------------
 
     x[
         "_proc_score"
@@ -806,9 +762,9 @@ def buscar_candidatos_estacion(
             "_proc_score",
         ] = 50
 
-    # ========================================================
+    # --------------------------------------------------------
     # DISPONIBILIDAD
-    # ========================================================
+    # --------------------------------------------------------
 
     x[
         "_availability_score"
@@ -848,9 +804,9 @@ def buscar_candidatos_estacion(
             "_availability_score",
         ] = 10
 
-    # ========================================================
+    # --------------------------------------------------------
     # CANTIDAD
-    # ========================================================
+    # --------------------------------------------------------
 
     if "count" in x.columns:
 
@@ -864,9 +820,12 @@ def buscar_candidatos_estacion(
 
         x[
             "_count_score"
-        ] = np.log1p(
-            count_values
-        ) * 5
+        ] = (
+            np.log1p(
+                count_values
+            )
+            * 5
+        )
 
     else:
 
@@ -874,9 +833,9 @@ def buscar_candidatos_estacion(
             "_count_score"
         ] = 0
 
-    # ========================================================
-    # FECHA RECIENTE
-    # ========================================================
+    # --------------------------------------------------------
+    # RECIENCIA
+    # --------------------------------------------------------
 
     if "timeend" in x.columns:
 
@@ -918,9 +877,9 @@ def buscar_candidatos_estacion(
             "_recent_score"
         ] = 0
 
-    # ========================================================
-    # SCORE TOTAL
-    # ========================================================
+    # --------------------------------------------------------
+    # TOTAL
+    # --------------------------------------------------------
 
     x[
         "_total_score"
@@ -942,16 +901,30 @@ def buscar_candidatos_estacion(
         ]
     )
 
+    sort_columns = [
+        "_total_score"
+    ]
+
+    ascending = [
+        False
+    ]
+
+    if "count" in x.columns:
+
+        sort_columns.append(
+            "count"
+        )
+
+        ascending.append(
+            False
+        )
+
     x = x.sort_values(
-        [
-            "_total_score",
-            "count",
-        ],
-        ascending=[
-            False,
-            False,
-        ],
-        na_position="last",
+        sort_columns,
+        ascending=
+            ascending,
+        na_position=
+            "last",
     )
 
     return x.reset_index(
@@ -960,9 +933,8 @@ def buscar_candidatos_estacion(
 
 
 # ============================================================
-# EXTRAER REGISTROS A5
+# BUSCAR OBSERVACIONES EN JSON
 # ============================================================
-
 
 def _buscar_lista_observaciones(
     data,
@@ -973,9 +945,7 @@ def _buscar_lista_observaciones(
         list,
     ):
 
-        if (
-            len(data) == 0
-        ):
+        if len(data) == 0:
 
             return []
 
@@ -986,10 +956,6 @@ def _buscar_lista_observaciones(
             )
             for item in data
         ):
-
-            # ------------------------------------------------
-            # Detectar lista con estructura de observaciones
-            # ------------------------------------------------
 
             sample_keys = set()
 
@@ -1024,13 +990,17 @@ def _buscar_lista_observaciones(
                 )
             )
 
-            if result is not None:
-
-                if len(
+            if (
+                isinstance(
+                    result,
+                    list,
+                )
+                and len(
                     result
-                ) > 0:
+                ) > 0
+            ):
 
-                    return result
+                return result
 
         return []
 
@@ -1059,16 +1029,12 @@ def _buscar_lista_observaciones(
                     )
                 )
 
-                if result is not None:
+                if isinstance(
+                    result,
+                    list,
+                ):
 
-                    if (
-                        isinstance(
-                            result,
-                            list,
-                        )
-                    ):
-
-                        return result
+                    return result
 
         for value in data.values():
 
@@ -1078,19 +1044,17 @@ def _buscar_lista_observaciones(
                 )
             )
 
-            if result is not None:
+            if (
+                isinstance(
+                    result,
+                    list,
+                )
+                and len(
+                    result
+                ) > 0
+            ):
 
-                if (
-                    isinstance(
-                        result,
-                        list,
-                    )
-                    and len(
-                        result
-                    ) > 0
-                ):
-
-                    return result
+                return result
 
     return []
 
@@ -1098,7 +1062,6 @@ def _buscar_lista_observaciones(
 # ============================================================
 # NORMALIZAR OBSERVACIONES
 # ============================================================
-
 
 def normalizar_observaciones(
     data,
@@ -1147,6 +1110,7 @@ def normalizar_observaciones(
             record,
             dict,
         ):
+
             continue
 
         dt = None
@@ -1182,11 +1146,6 @@ def normalizar_observaciones(
                 ]
 
                 break
-
-        # ----------------------------------------------------
-        # Algunos formatos pueden tener valor dentro de
-        # observation/value.
-        # ----------------------------------------------------
 
         if (
             value is None
@@ -1239,10 +1198,6 @@ def normalizar_observaciones(
             value
         )
 
-        # ----------------------------------------------------
-        # Rango amplio pero físicamente razonable.
-        # ----------------------------------------------------
-
         if (
             value < -5
             or value > 20
@@ -1293,9 +1248,8 @@ def normalizar_observaciones(
 
 
 # ============================================================
-# CONSULTAR OBSERVACIONES A5
+# CONSULTAR A5
 # ============================================================
-
 
 def consultar_a5(
     series_id,
@@ -1362,7 +1316,6 @@ def consultar_a5(
 # VALIDAR SERIE
 # ============================================================
 
-
 def validar_serie(
     row,
     requested_start,
@@ -1378,8 +1331,12 @@ def validar_serie(
     if series_id is None:
 
         return {
-            "ok": False,
-            "records": 0,
+            "ok":
+                False,
+
+            "records":
+                0,
+
             "error":
                 "series_id inválido",
         }
@@ -1400,12 +1357,6 @@ def validar_serie(
         )
     )
 
-    req_start = pd.to_datetime(
-        requested_start,
-        errors="coerce",
-        utc=True,
-    )
-
     req_end = pd.to_datetime(
         requested_end,
         errors="coerce",
@@ -1419,14 +1370,6 @@ def validar_serie(
         req_end = pd.Timestamp.now(
             tz="UTC"
         )
-
-    # ========================================================
-    # VENTANA DE VALIDACIÓN
-    #
-    # Preferimos revisar cerca del final real de la serie.
-    # Esto evita descartar una serie histórica válida sólo
-    # porque el usuario seleccionó un período sin datos.
-    # ========================================================
 
     validation_end = (
         catalog_end
@@ -1473,9 +1416,11 @@ def validar_serie(
     except Exception as exc:
 
         return {
-            "ok": False,
+            "ok":
+                False,
 
-            "records": 0,
+            "records":
+                0,
 
             "error":
                 str(exc),
@@ -1515,7 +1460,6 @@ def validar_serie(
 # SELECCIONAR SERIE
 # ============================================================
 
-
 def seleccionar_serie(
     catalog,
     station,
@@ -1552,13 +1496,6 @@ def seleccionar_serie(
 
     attempts = []
 
-    # --------------------------------------------------------
-    # Validamos hasta los mejores 12 candidatos.
-    #
-    # Es más amplio que versiones anteriores porque algunas
-    # localidades tienen varias redes/procedimientos.
-    # --------------------------------------------------------
-
     for index, row in (
         candidates
         .head(12)
@@ -1566,7 +1503,8 @@ def seleccionar_serie(
     ):
 
         result = validar_serie(
-            row=row,
+            row=
+                row,
             requested_start=
                 requested_start,
             requested_end=
@@ -1692,9 +1630,8 @@ def seleccionar_serie(
 
 
 # ============================================================
-# CONSULTA HISTÓRICA POR BLOQUES
+# CONSULTAR EN BLOQUES
 # ============================================================
-
 
 def consultar_a5_en_bloques(
     series_id,
@@ -1774,10 +1711,6 @@ def consultar_a5_en_bloques(
 
         except Exception:
 
-            # ------------------------------------------------
-            # Un bloque vacío o fallido NO interrumpe toda
-            # la descarga histórica.
-            # ------------------------------------------------
             pass
 
         cursor = (
@@ -1821,9 +1754,11 @@ def consultar_a5_en_bloques(
 
 
 # ============================================================
-# CONVERTIR A SERIE DIARIA
+# CONVERTIR A DIARIO
+#
+# CORRECCIÓN PRINCIPAL V11.9.1:
+# datetime queda SIN timezone.
 # ============================================================
-
 
 def convertir_diario(
     df,
@@ -1867,10 +1802,15 @@ def convertir_diario(
         ]
     ].copy()
 
-    x["datetime"] = pd.to_datetime(
-        x["datetime"],
-        errors="coerce",
-        utc=True,
+    # ========================================================
+    # IMPORTANTE
+    # quitar timezone antes de entregar datos al modelo
+    # ========================================================
+
+    x["datetime"] = (
+        _to_naive_datetime_series(
+            x["datetime"]
+        )
     )
 
     x["value"] = pd.to_numeric(
@@ -1901,11 +1841,6 @@ def convertir_diario(
         )
     )
 
-    # --------------------------------------------------------
-    # Mediana diaria:
-    # más robusta ante observaciones horarias anómalas.
-    # --------------------------------------------------------
-
     daily = (
         x
         .groupby(
@@ -1927,13 +1862,25 @@ def convertir_diario(
         )
     )
 
+    # --------------------------------------------------------
+    # SEGUNDA PROTECCIÓN
+    # --------------------------------------------------------
+
+    daily[
+        "datetime"
+    ] = pd.to_datetime(
+        daily[
+            "datetime"
+        ],
+        errors="coerce",
+    )
+
     return daily
 
 
 # ============================================================
-# OBTENER UNA ESTACIÓN
+# OBTENER ESTACIÓN
 # ============================================================
-
 
 def obtener_estacion(
     station,
@@ -2013,10 +1960,6 @@ def obtener_estacion(
             metadata,
         )
 
-    # ========================================================
-    # DATOS DE SERIE
-    # ========================================================
-
     series_id = _safe_int(
         selected_row.get(
             "series_id"
@@ -2055,16 +1998,11 @@ def obtener_estacion(
         )
     )
 
-    # ========================================================
-    # RANGO DE CONSULTA
-    # ========================================================
+    # --------------------------------------------------------
+    # RANGO
+    # --------------------------------------------------------
 
     if station == "Corrientes":
-
-        # ----------------------------------------------------
-        # Corrientes:
-        # usar TODO lo que indique el catálogo como disponible.
-        # ----------------------------------------------------
 
         history_floor = pd.Timestamp(
             DEFAULT_HISTORY_FLOOR,
@@ -2101,11 +2039,6 @@ def obtener_estacion(
 
     else:
 
-        # ----------------------------------------------------
-        # Resto:
-        # período requerido por la aplicación.
-        # ----------------------------------------------------
-
         query_start = (
             requested_start_dt
         )
@@ -2131,10 +2064,6 @@ def obtener_estacion(
                 query_end,
                 catalog_end,
             )
-
-    # ========================================================
-    # SI NO HAY SOLAPAMIENTO
-    # ========================================================
 
     if (
         pd.isna(
@@ -2202,9 +2131,9 @@ def obtener_estacion(
             metadata,
         )
 
-    # ========================================================
-    # DESCARGAR
-    # ========================================================
+    # --------------------------------------------------------
+    # DESCARGA
+    # --------------------------------------------------------
 
     try:
 
@@ -2277,18 +2206,10 @@ def obtener_estacion(
             metadata,
         )
 
-    # ========================================================
-    # DIARIO
-    # ========================================================
-
     daily = convertir_diario(
         raw,
         output_column,
     )
-
-    # ========================================================
-    # METADATOS
-    # ========================================================
 
     if not daily.empty:
 
@@ -2465,12 +2386,56 @@ def obtener_estacion(
 
 # ============================================================
 # COMBINAR ESTACIONES
+#
+# SEGUNDA CORRECCIÓN PRINCIPAL V11.9.1:
+# blindaje completo de datetime antes de cada merge.
 # ============================================================
-
 
 def _merge_station_frames(
     frames,
 ):
+
+    normalized_frames = []
+
+    for frame in frames:
+
+        if (
+            isinstance(
+                frame,
+                pd.DataFrame,
+            )
+            and not frame.empty
+            and "datetime"
+            in frame.columns
+        ):
+
+            temp = frame.copy()
+
+            temp[
+                "datetime"
+            ] = _to_naive_datetime_series(
+                temp[
+                    "datetime"
+                ]
+            )
+
+            temp = temp.dropna(
+                subset=[
+                    "datetime"
+                ]
+            )
+
+            normalized_frames.append(
+                temp
+            )
+
+        else:
+
+            normalized_frames.append(
+                frame
+            )
+
+    frames = normalized_frames
 
     valid_frames = [
         frame
@@ -2501,13 +2466,37 @@ def _merge_station_frames(
             .copy()
         )
 
+        # ----------------------------------------------------
+        # BLINDAJE PRIMER FRAME
+        # ----------------------------------------------------
+
+        result[
+            "datetime"
+        ] = _to_naive_datetime_series(
+            result[
+                "datetime"
+            ]
+        )
+
         for frame in valid_frames[1:]:
+
+            temp = frame.copy()
+
+            temp[
+                "datetime"
+            ] = _to_naive_datetime_series(
+                temp[
+                    "datetime"
+                ]
+            )
 
             result = pd.merge(
                 result,
-                frame,
-                on="datetime",
-                how="outer",
+                temp,
+                on=
+                    "datetime",
+                how=
+                    "outer",
             )
 
         result = (
@@ -2526,7 +2515,7 @@ def _merge_station_frames(
         )
 
     # --------------------------------------------------------
-    # Garantizar todas las columnas.
+    # GARANTIZAR COLUMNAS
     # --------------------------------------------------------
 
     for config in STATIONS.values():
@@ -2556,15 +2545,35 @@ def _merge_station_frames(
 
             result[col] = np.nan
 
-    return result[
+    result = result[
         desired_columns
     ]
+
+    # --------------------------------------------------------
+    # GARANTÍA FINAL
+    #
+    # Ningún timezone sale de upstream.py
+    # --------------------------------------------------------
+
+    if (
+        "datetime"
+        in result.columns
+    ):
+
+        result[
+            "datetime"
+        ] = _to_naive_datetime_series(
+            result[
+                "datetime"
+            ]
+        )
+
+    return result
 
 
 # ============================================================
 # FUNCIÓN PRINCIPAL
 # ============================================================
-
 
 def get_upstream_history(
     start,
@@ -2603,10 +2612,6 @@ def get_upstream_history(
             "a la fecha final."
         )
 
-    # ========================================================
-    # CATÁLOGO
-    # ========================================================
-
     catalog = (
         descargar_catalogo_geojson()
     )
@@ -2614,10 +2619,6 @@ def get_upstream_history(
     frames = []
 
     metadata = {}
-
-    # ========================================================
-    # ESTACIONES
-    # ========================================================
 
     for station in STATIONS.keys():
 
@@ -2688,10 +2689,6 @@ def get_upstream_history(
             station
         ] = meta
 
-    # ========================================================
-    # COMBINAR
-    # ========================================================
-
     result = (
         _merge_station_frames(
             frames
@@ -2708,7 +2705,6 @@ def get_upstream_history(
 # DIAGNÓSTICO
 # ============================================================
 
-
 def diagnostic(
     start,
     end,
@@ -2716,7 +2712,7 @@ def diagnostic(
 
     report = {
         "version":
-            "V11.9",
+            "V11.9.1",
 
         "catalog_url":
             A5_SERIES_GEOJSON_URL,
@@ -2744,10 +2740,6 @@ def diagnostic(
             {},
     }
 
-    # ========================================================
-    # CATÁLOGO
-    # ========================================================
-
     try:
 
         catalog = (
@@ -2770,10 +2762,6 @@ def diagnostic(
 
         return report
 
-    # ========================================================
-    # CADA ESTACIÓN
-    # ========================================================
-
     for station in STATIONS:
 
         candidates = (
@@ -2792,6 +2780,18 @@ def diagnostic(
                 .head(10)
                 .iterrows()
             ):
+
+                start_value = (
+                    row.get(
+                        "timestart"
+                    )
+                )
+
+                end_value = (
+                    row.get(
+                        "timeend"
+                    )
+                )
 
                 candidate_list.append(
                     {
@@ -2831,20 +2831,15 @@ def diagnostic(
 
                         "start":
                             (
-                                row.get(
-                                    "timestart"
+                                pd.Timestamp(
+                                    start_value
                                 ).strftime(
                                     "%Y-%m-%d"
                                 )
                                 if (
-                                    row.get(
-                                        "timestart"
-                                    )
-                                    is not None
+                                    start_value is not None
                                     and not pd.isna(
-                                        row.get(
-                                            "timestart"
-                                        )
+                                        start_value
                                     )
                                 )
                                 else None
@@ -2852,20 +2847,15 @@ def diagnostic(
 
                         "end":
                             (
-                                row.get(
-                                    "timeend"
+                                pd.Timestamp(
+                                    end_value
                                 ).strftime(
                                     "%Y-%m-%d"
                                 )
                                 if (
-                                    row.get(
-                                        "timeend"
-                                    )
-                                    is not None
+                                    end_value is not None
                                     and not pd.isna(
-                                        row.get(
-                                            "timeend"
-                                        )
+                                        end_value
                                     )
                                 )
                                 else None
@@ -2897,9 +2887,8 @@ def diagnostic(
 
 
 # ============================================================
-# DIAGNÓSTICO EN TABLA
+# TABLA DIAGNÓSTICA
 # ============================================================
-
 
 def diagnostic_table(
     start,
@@ -2941,6 +2930,9 @@ def diagnostic_table(
                     "Hasta":
                         "—",
 
+                    "Tipo fecha":
+                        "—",
+
                     "Error":
                         str(exc),
                 }
@@ -2948,6 +2940,23 @@ def diagnostic_table(
         )
 
     rows = []
+
+    datetime_type = (
+        str(
+            history[
+                "datetime"
+            ].dtype
+        )
+        if (
+            isinstance(
+                history,
+                pd.DataFrame,
+            )
+            and "datetime"
+            in history.columns
+        )
+        else "—"
+    )
 
     for station in STATIONS:
 
@@ -3022,6 +3031,9 @@ def diagnostic_table(
                         "catalog_candidates",
                         0,
                     ),
+
+                "Tipo fecha":
+                    datetime_type,
 
                 "Error":
                     (
