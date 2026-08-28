@@ -7,22 +7,40 @@ import streamlit as st
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # src/stress_ui.py
-# BASE V11.0
-# ESCENARIO HIPOTÉTICO 60 DÍAS
+# V11.6
+#
+# ESCENARIO HIDROLÓGICO 60 DÍAS
+#
+# Objetivos:
+# - Mantener compatibilidad con app.py actual
+# - Generar escenario 60 días
+# - Devolver DataFrame para gráfico unificado
+# - Usar máximos históricos disponibles
+# - Evitar precipitaciones máximas artificialmente en cero
+# - Incorporar señal de caudal
+# - Incorporar señal de niveles aguas arriba
+#
+# IMPORTANTE:
+# Este módulo NO consulta INA directamente.
+# Trabaja solamente con los datos que recibe.
 # ============================================================
+
 
 STRESS_DAYS = 60
 
 Y_MIN = 0.0
 Y_MAX = 7.0
-Y_STEP = 0.5
 
 
 # ============================================================
 # UTILIDADES
 # ============================================================
 
+
 def _to_numeric(series):
+    """
+    Convierte una Serie a valores numéricos.
+    """
 
     return pd.to_numeric(
         series,
@@ -30,58 +48,734 @@ def _to_numeric(series):
     )
 
 
+def _to_datetime(series):
+    """
+    Convierte fechas a datetime sin zona horaria.
+    """
+
+    x = pd.to_datetime(
+        series,
+        errors="coerce",
+        utc=True,
+    )
+
+    return x.dt.tz_localize(None)
+
+
+def _safe_float(value, default=np.nan):
+
+    try:
+
+        value = float(value)
+
+        if np.isfinite(value):
+            return value
+
+    except Exception:
+        pass
+
+    return default
+
+
+# ============================================================
+# IDENTIFICAR COLUMNA DE NIVEL
+# ============================================================
+
+
 def _get_level_column(df):
 
     if (
-        isinstance(df, pd.DataFrame)
-        and "nivel" in df.columns
+        df is None
+        or not isinstance(df, pd.DataFrame)
+        or df.empty
     ):
-        return "nivel"
+        return None
 
-    if (
-        isinstance(df, pd.DataFrame)
-        and "value" in df.columns
-    ):
-        return "value"
+    candidates = [
+        "nivel",
+        "value",
+        "nivel_san_nicolas",
+        "prediction",
+    ]
+
+    for col in candidates:
+
+        if col in df.columns:
+            return col
 
     return None
 
 
+# ============================================================
+# CUANTIL SEGURO
+# ============================================================
+
+
 def _safe_quantile(
-    series,
+    values,
     q,
+    default=0.0,
 ):
 
-    values = _to_numeric(
-        series
+    if values is None:
+        return default
+
+    s = _to_numeric(
+        pd.Series(values)
     ).dropna()
 
-    if values.empty:
-        return None
+    if s.empty:
+        return default
 
-    return float(
-        values.quantile(q)
+    try:
+
+        value = float(
+            s.quantile(q)
+        )
+
+        if np.isfinite(value):
+            return value
+
+    except Exception:
+        pass
+
+    return default
+
+
+# ============================================================
+# PREPARAR NIVEL SAN NICOLÁS
+# ============================================================
+
+
+def _prepare_level_history(df):
+
+    level_col = _get_level_column(
+        df
     )
 
+    if (
+        level_col is None
+        or "datetime" not in df.columns
+    ):
+        return pd.DataFrame()
+
+    x = df[
+        [
+            "datetime",
+            level_col,
+        ]
+    ].copy()
+
+    x["datetime"] = _to_datetime(
+        x["datetime"]
+    )
+
+    x["nivel"] = _to_numeric(
+        x[level_col]
+    )
+
+    x = x.dropna(
+        subset=[
+            "datetime",
+            "nivel",
+        ]
+    )
+
+    if x.empty:
+        return pd.DataFrame()
+
+    x["date"] = (
+        x["datetime"]
+        .dt.normalize()
+    )
+
+    x = (
+        x.groupby(
+            "date",
+            as_index=False,
+        )["nivel"]
+        .mean()
+        .rename(
+            columns={
+                "date":
+                    "datetime"
+            }
+        )
+        .sort_values(
+            "datetime"
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    return x
+
 
 # ============================================================
-# SEÑAL DE ESTACIONES AGUAS ARRIBA
+# PREPARAR EXÓGENAS
 # ============================================================
+
+
+def _prepare_exogenous(
+    exog_history,
+):
+
+    if (
+        exog_history is None
+        or not isinstance(
+            exog_history,
+            pd.DataFrame,
+        )
+        or exog_history.empty
+        or "datetime"
+        not in exog_history.columns
+    ):
+        return pd.DataFrame()
+
+    x = exog_history.copy()
+
+    x["datetime"] = _to_datetime(
+        x["datetime"]
+    )
+
+    x = x.dropna(
+        subset=[
+            "datetime"
+        ]
+    )
+
+    x["date"] = (
+        x["datetime"]
+        .dt.normalize()
+    )
+
+    agg = {}
+
+    if "precip_mm" in x.columns:
+
+        x["precip_mm"] = _to_numeric(
+            x["precip_mm"]
+        )
+
+        agg["precip_mm"] = "sum"
+
+    if "caudal_m3s" in x.columns:
+
+        x["caudal_m3s"] = _to_numeric(
+            x["caudal_m3s"]
+        )
+
+        agg["caudal_m3s"] = "mean"
+
+    if not agg:
+        return pd.DataFrame()
+
+    x = (
+        x.groupby(
+            "date",
+            as_index=False,
+        )
+        .agg(
+            agg
+        )
+        .rename(
+            columns={
+                "date":
+                    "datetime"
+            }
+        )
+        .sort_values(
+            "datetime"
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    return x
+
+
+# ============================================================
+# MÁXIMO HISTÓRICO DE LLUVIA PARA FECHAS FUTURAS
+# ============================================================
+
+
+def _historical_rain_calendar(
+    exog_history,
+    future_dates,
+):
+
+    """
+    Para cada fecha futura busca el máximo histórico
+    registrado para el mismo día del año.
+
+    Si no existe dato para ese día exacto:
+    utiliza una ventana estacional de ±7 días.
+
+    Si tampoco existe:
+    utiliza un máximo histórico de referencia.
+
+    Esto evita colocar automáticamente cero cuando
+    simplemente falta información histórica.
+    """
+
+    exog = _prepare_exogenous(
+        exog_history
+    )
+
+    result = pd.DataFrame(
+        {
+            "datetime":
+                pd.to_datetime(
+                    future_dates
+                )
+        }
+    )
+
+    result[
+        "rain_historical_max_mm"
+    ] = 0.0
+
+    if (
+        exog.empty
+        or "precip_mm"
+        not in exog.columns
+    ):
+        return result
+
+    rain = exog[
+        [
+            "datetime",
+            "precip_mm",
+        ]
+    ].copy()
+
+    rain["precip_mm"] = (
+        _to_numeric(
+            rain[
+                "precip_mm"
+            ]
+        )
+    )
+
+    rain = rain.dropna(
+        subset=[
+            "precip_mm"
+        ]
+    )
+
+    if rain.empty:
+        return result
+
+    rain["doy"] = (
+        rain[
+            "datetime"
+        ].dt.dayofyear
+    )
+
+    global_reference = (
+        _safe_quantile(
+            rain[
+                "precip_mm"
+            ],
+            0.95,
+            default=0.0,
+        )
+    )
+
+    values = []
+
+    for future_date in result[
+        "datetime"
+    ]:
+
+        doy = int(
+            future_date.dayofyear
+        )
+
+        exact = rain[
+            rain[
+                "doy"
+            ]
+            == doy
+        ][
+            "precip_mm"
+        ].dropna()
+
+        if not exact.empty:
+
+            value = float(
+                exact.max()
+            )
+
+            values.append(
+                max(
+                    value,
+                    0.0,
+                )
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # Ventana estacional ±7 días
+        # ----------------------------------------------------
+
+        distance = np.minimum(
+            np.abs(
+                rain[
+                    "doy"
+                ]
+                - doy
+            ),
+            365
+            - np.abs(
+                rain[
+                    "doy"
+                ]
+                - doy
+            ),
+        )
+
+        seasonal = rain[
+            distance <= 7
+        ][
+            "precip_mm"
+        ].dropna()
+
+        if not seasonal.empty:
+
+            value = float(
+                seasonal.max()
+            )
+
+        else:
+
+            value = (
+                global_reference
+            )
+
+        values.append(
+            max(
+                _safe_float(
+                    value,
+                    0.0,
+                ),
+                0.0,
+            )
+        )
+
+    result[
+        "rain_historical_max_mm"
+    ] = values
+
+    return result
+
+
+# ============================================================
+# MÁXIMO HISTÓRICO DE CAUDAL PARA FECHAS FUTURAS
+# ============================================================
+
+
+def _historical_flow_calendar(
+    exog_history,
+    future_dates,
+):
+
+    """
+    Busca caudal máximo histórico para el mismo
+    día del año.
+
+    Si no existe, utiliza ventana estacional ±10 días.
+    """
+
+    exog = _prepare_exogenous(
+        exog_history
+    )
+
+    result = pd.DataFrame(
+        {
+            "datetime":
+                pd.to_datetime(
+                    future_dates
+                )
+        }
+    )
+
+    result[
+        "flow_historical_max_m3s"
+    ] = np.nan
+
+    if (
+        exog.empty
+        or "caudal_m3s"
+        not in exog.columns
+    ):
+        return result
+
+    q = exog[
+        [
+            "datetime",
+            "caudal_m3s",
+        ]
+    ].copy()
+
+    q["caudal_m3s"] = (
+        _to_numeric(
+            q[
+                "caudal_m3s"
+            ]
+        )
+    )
+
+    q = q.dropna(
+        subset=[
+            "caudal_m3s"
+        ]
+    )
+
+    if q.empty:
+        return result
+
+    q["doy"] = (
+        q[
+            "datetime"
+        ].dt.dayofyear
+    )
+
+    global_reference = (
+        _safe_quantile(
+            q[
+                "caudal_m3s"
+            ],
+            0.95,
+            default=np.nan,
+        )
+    )
+
+    values = []
+
+    for future_date in result[
+        "datetime"
+    ]:
+
+        doy = int(
+            future_date.dayofyear
+        )
+
+        exact = q[
+            q[
+                "doy"
+            ]
+            == doy
+        ][
+            "caudal_m3s"
+        ].dropna()
+
+        if not exact.empty:
+
+            values.append(
+                float(
+                    exact.max()
+                )
+            )
+
+            continue
+
+        distance = np.minimum(
+            np.abs(
+                q[
+                    "doy"
+                ]
+                - doy
+            ),
+            365
+            - np.abs(
+                q[
+                    "doy"
+                ]
+                - doy
+            ),
+        )
+
+        seasonal = q[
+            distance <= 10
+        ][
+            "caudal_m3s"
+        ].dropna()
+
+        if not seasonal.empty:
+
+            value = float(
+                seasonal.max()
+            )
+
+        else:
+
+            value = (
+                global_reference
+            )
+
+        values.append(
+            _safe_float(
+                value,
+                np.nan,
+            )
+        )
+
+    result[
+        "flow_historical_max_m3s"
+    ] = values
+
+    return result
+
+
+# ============================================================
+# ENVOLVENTE HISTÓRICA DE NIVEL
+# ============================================================
+
+
+def _historical_level_envelope(
+    df,
+    future_dates,
+):
+
+    """
+    Máximo histórico de San Nicolás para la misma
+    época del año.
+
+    No es el pronóstico.
+    Es una referencia superior histórica.
+    """
+
+    level = _prepare_level_history(
+        df
+    )
+
+    result = pd.DataFrame(
+        {
+            "datetime":
+                pd.to_datetime(
+                    future_dates
+                )
+        }
+    )
+
+    result[
+        "historical_level_max_m"
+    ] = np.nan
+
+    if level.empty:
+        return result
+
+    level["doy"] = (
+        level[
+            "datetime"
+        ].dt.dayofyear
+    )
+
+    global_max = float(
+        level[
+            "nivel"
+        ].max()
+    )
+
+    values = []
+
+    for future_date in result[
+        "datetime"
+    ]:
+
+        doy = int(
+            future_date.dayofyear
+        )
+
+        exact = level[
+            level[
+                "doy"
+            ]
+            == doy
+        ][
+            "nivel"
+        ].dropna()
+
+        if not exact.empty:
+
+            value = float(
+                exact.max()
+            )
+
+        else:
+
+            distance = np.minimum(
+                np.abs(
+                    level[
+                        "doy"
+                    ]
+                    - doy
+                ),
+                365
+                - np.abs(
+                    level[
+                        "doy"
+                    ]
+                    - doy
+                ),
+            )
+
+            seasonal = level[
+                distance <= 10
+            ][
+                "nivel"
+            ].dropna()
+
+            if not seasonal.empty:
+
+                value = float(
+                    seasonal.max()
+                )
+
+            else:
+
+                value = global_max
+
+        values.append(
+            float(
+                np.clip(
+                    value,
+                    Y_MIN,
+                    Y_MAX,
+                )
+            )
+        )
+
+    result[
+        "historical_level_max_m"
+    ] = values
+
+    return result
+
+
+# ============================================================
+# SEÑAL AGUAS ARRIBA
+# ============================================================
+
 
 def _upstream_signal(
     upstream_history,
 ):
 
-    result = {
-        "mean_delta_3":
-            0.0,
+    """
+    Genera una señal agregada de tendencia de
+    las estaciones aguas arriba.
 
-        "mean_delta_7":
-            0.0,
+    Valor positivo:
+    predominio creciente.
 
-        "available":
-            0,
-    }
+    Valor negativo:
+    predominio descendente.
+    """
 
     if (
         upstream_history is None
@@ -91,20 +785,21 @@ def _upstream_signal(
         )
         or upstream_history.empty
     ):
-
-        return result
+        return 0.0
 
     level_cols = [
         col
         for col
         in upstream_history.columns
-        if col.startswith(
+        if str(col).startswith(
             "nivel_"
         )
     ]
 
-    deltas_3 = []
-    deltas_7 = []
+    if not level_cols:
+        return 0.0
+
+    signals = []
 
     for col in level_cols:
 
@@ -117,277 +812,84 @@ def _upstream_signal(
             .dropna()
         )
 
-        if values.empty:
+        if len(values) < 2:
             continue
 
-        result[
-            "available"
-        ] += 1
+        # ----------------------------------------------------
+        # Cambio reciente
+        # ----------------------------------------------------
 
-        if len(values) >= 4:
+        if len(values) >= 7:
 
-            deltas_3.append(
-                float(
-                    values.iloc[-1]
-                    - values.iloc[-4]
-                )
+            recent = float(
+                values.iloc[-1]
+                - values.iloc[-7]
             )
 
-        if len(values) >= 8:
+        else:
 
-            deltas_7.append(
-                float(
-                    values.iloc[-1]
-                    - values.iloc[-8]
-                )
+            recent = float(
+                values.iloc[-1]
+                - values.iloc[0]
             )
 
-    if deltas_3:
-
-        result[
-            "mean_delta_3"
-        ] = float(
-            np.mean(
-                deltas_3
-            )
+        signals.append(
+            recent
         )
 
-    if deltas_7:
+    if not signals:
+        return 0.0
 
-        result[
-            "mean_delta_7"
-        ] = float(
-            np.mean(
-                deltas_7
-            )
+    signal = float(
+        np.nanmedian(
+            signals
         )
+    )
 
-    return result
+    return float(
+        np.clip(
+            signal,
+            -1.5,
+            1.5,
+        )
+    )
 
 
 # ============================================================
-# NIVEL HISTÓRICO PARA MISMA FECHA
+# SEÑAL DE CAUDAL
 # ============================================================
 
-def _historical_level_envelope(
-    df,
-    future_dates,
-):
 
-    level_col = _get_level_column(
-        df
-    )
-
-    if (
-        level_col is None
-        or "datetime" not in df.columns
-    ):
-
-        return pd.DataFrame()
-
-    hist = df.copy()
-
-    hist[
-        "datetime"
-    ] = pd.to_datetime(
-        hist[
-            "datetime"
-        ],
-        errors="coerce",
-        utc=True,
-    )
-
-    hist[
-        level_col
-    ] = _to_numeric(
-        hist[
-            level_col
-        ]
-    )
-
-    hist = hist.dropna(
-        subset=[
-            "datetime",
-            level_col,
-        ]
-    )
-
-    if hist.empty:
-        return pd.DataFrame()
-
-    hist[
-        "month_day"
-    ] = (
-        hist[
-            "datetime"
-        ]
-        .dt.strftime(
-            "%m-%d"
-        )
-    )
-
-    daily = (
-        hist
-        .groupby(
-            "month_day"
-        )[
-            level_col
-        ]
-        .agg(
-            level_min_historical=
-                "min",
-
-            level_max_historical=
-                "max",
-
-            level_mean_historical=
-                "mean",
-        )
-        .reset_index()
-    )
-
-    result = pd.DataFrame(
-        {
-            "datetime":
-                pd.to_datetime(
-                    future_dates,
-                    utc=True,
-                )
-        }
-    )
-
-    result[
-        "month_day"
-    ] = (
-        result[
-            "datetime"
-        ]
-        .dt.strftime(
-            "%m-%d"
-        )
-    )
-
-    result = result.merge(
-        daily,
-        on="month_day",
-        how="left",
-    )
-
-    return result
-
-
-# ============================================================
-# LLUVIA HISTÓRICA ALTA
-# ============================================================
-
-def _rain_stress(
+def _flow_signal(
     exog_history,
 ):
 
-    result = {
-        "daily_high":
-            0.0,
-
-        "max":
-            0.0,
-
-        "p95":
-            0.0,
-    }
+    exog = _prepare_exogenous(
+        exog_history
+    )
 
     if (
-        exog_history is None
-        or not isinstance(
-            exog_history,
-            pd.DataFrame,
-        )
-        or exog_history.empty
-        or "precip_mm"
-        not in exog_history.columns
-    ):
-
-        return result
-
-    rain = (
-        _to_numeric(
-            exog_history[
-                "precip_mm"
-            ]
-        )
-        .dropna()
-    )
-
-    if rain.empty:
-        return result
-
-    rain = rain.clip(
-        lower=0.0
-    )
-
-    result[
-        "max"
-    ] = float(
-        rain.max()
-    )
-
-    result[
-        "p95"
-    ] = float(
-        rain.quantile(
-            0.95
-        )
-    )
-
-    result[
-        "daily_high"
-    ] = max(
-        result[
-            "p95"
-        ],
-        0.0,
-    )
-
-    return result
-
-
-# ============================================================
-# CAUDAL HISTÓRICO ALTO
-# ============================================================
-
-def _flow_stress(
-    exog_history,
-):
-
-    result = {
-        "current":
-            None,
-
-        "high":
-            None,
-
-        "max":
-            None,
-
-        "ratio":
-            1.0,
-    }
-
-    if (
-        exog_history is None
-        or not isinstance(
-            exog_history,
-            pd.DataFrame,
-        )
-        or exog_history.empty
+        exog.empty
         or "caudal_m3s"
-        not in exog_history.columns
+        not in exog.columns
     ):
+        return {
+            "current":
+                np.nan,
 
-        return result
+            "historical_high":
+                np.nan,
+
+            "ratio":
+                1.0,
+
+            "trend":
+                0.0,
+        }
 
     q = (
         _to_numeric(
-            exog_history[
+            exog[
                 "caudal_m3s"
             ]
         )
@@ -395,523 +897,904 @@ def _flow_stress(
     )
 
     if q.empty:
-        return result
+
+        return {
+            "current":
+                np.nan,
+
+            "historical_high":
+                np.nan,
+
+            "ratio":
+                1.0,
+
+            "trend":
+                0.0,
+        }
 
     current = float(
         q.iloc[-1]
     )
 
-    high = float(
-        q.quantile(
-            0.98
+    historical_high = (
+        _safe_quantile(
+            q,
+            0.95,
+            default=current,
         )
     )
 
-    max_value = float(
-        q.max()
-    )
+    if (
+        historical_high
+        and historical_high > 0
+    ):
 
-    result[
-        "current"
-    ] = current
-
-    result[
-        "high"
-    ] = high
-
-    result[
-        "max"
-    ] = max_value
-
-    if current > 0:
-
-        result[
-            "ratio"
-        ] = max(
-            high / current,
-            1.0,
+        ratio = (
+            current
+            / historical_high
         )
 
-    return result
+    else:
+
+        ratio = 1.0
+
+    if len(q) >= 7:
+
+        base = float(
+            q.iloc[-7]
+        )
+
+        if base != 0:
+
+            trend = (
+                current
+                - base
+            ) / abs(base)
+
+        else:
+
+            trend = 0.0
+
+    elif len(q) >= 2:
+
+        base = float(
+            q.iloc[0]
+        )
+
+        if base != 0:
+
+            trend = (
+                current
+                - base
+            ) / abs(base)
+
+        else:
+
+            trend = 0.0
+
+    else:
+
+        trend = 0.0
+
+    return {
+        "current":
+            current,
+
+        "historical_high":
+            historical_high,
+
+        "ratio":
+            float(
+                np.clip(
+                    ratio,
+                    0.2,
+                    2.0,
+                )
+            ),
+
+        "trend":
+            float(
+                np.clip(
+                    trend,
+                    -1.0,
+                    1.0,
+                )
+            ),
+    }
+
+
+# ============================================================
+# SEÑAL DE LLUVIA
+# ============================================================
+
+
+def _rain_signal(
+    exog_history,
+):
+
+    exog = _prepare_exogenous(
+        exog_history
+    )
+
+    if (
+        exog.empty
+        or "precip_mm"
+        not in exog.columns
+    ):
+        return {
+            "recent_7d":
+                0.0,
+
+            "recent_15d":
+                0.0,
+
+            "historical_high_15d":
+                0.0,
+
+            "ratio":
+                0.0,
+        }
+
+    rain = (
+        _to_numeric(
+            exog[
+                "precip_mm"
+            ]
+        )
+        .fillna(
+            0.0
+        )
+    )
+
+    recent_7d = float(
+        rain.tail(
+            7
+        ).sum()
+    )
+
+    recent_15d = float(
+        rain.tail(
+            15
+        ).sum()
+    )
+
+    rolling_15 = (
+        rain
+        .rolling(
+            15,
+            min_periods=1,
+        )
+        .sum()
+    )
+
+    historical_high = (
+        _safe_quantile(
+            rolling_15,
+            0.95,
+            default=recent_15d,
+        )
+    )
+
+    if historical_high > 0:
+
+        ratio = (
+            recent_15d
+            / historical_high
+        )
+
+    else:
+
+        ratio = 0.0
+
+    return {
+        "recent_7d":
+            recent_7d,
+
+        "recent_15d":
+            recent_15d,
+
+        "historical_high_15d":
+            historical_high,
+
+        "ratio":
+            float(
+                np.clip(
+                    ratio,
+                    0.0,
+                    2.0,
+                )
+            ),
+    }
+
+
+# ============================================================
+# PENDIENTE RECIENTE DEL NIVEL
+# ============================================================
+
+
+def _recent_level_slope(
+    level_history,
+):
+
+    if (
+        level_history is None
+        or level_history.empty
+    ):
+        return 0.0
+
+    values = (
+        _to_numeric(
+            level_history[
+                "nivel"
+            ]
+        )
+        .dropna()
+        .tail(
+            10
+        )
+    )
+
+    if len(values) < 3:
+        return 0.0
+
+    y = values.to_numpy(
+        dtype=float
+    )
+
+    x = np.arange(
+        len(y),
+        dtype=float,
+    )
+
+    try:
+
+        slope = float(
+            np.polyfit(
+                x,
+                y,
+                1,
+            )[0]
+        )
+
+    except Exception:
+
+        slope = 0.0
+
+    return float(
+        np.clip(
+            slope,
+            -0.15,
+            0.15,
+        )
+    )
 
 
 # ============================================================
 # CONSTRUIR ESCENARIO 60 DÍAS
 # ============================================================
 
-def _build_stress_curve(
+
+def build_stress_scenario(
     df,
-    exog_history,
-    upstream_history,
+    models=None,
+    exog_history=None,
+    upstream_history=None,
+    days=STRESS_DAYS,
 ):
+    """
+    Construye y DEVUELVE la serie completa del escenario.
 
-    level_col = _get_level_column(
-        df
-    )
+    Esta función no dibuja.
 
-    if (
-        level_col is None
-        or "datetime" not in df.columns
-    ):
+    Resultado:
+    DataFrame con columnas:
 
-        return pd.DataFrame(), {}
+    datetime
+    stress_level
+    historical_level_max_m
+    rain_historical_max_mm
+    flow_historical_max_m3s
+    upstream_signal
+    scenario_day
+    """
 
-    data = df.copy()
-
-    data[
-        "datetime"
-    ] = pd.to_datetime(
-        data[
-            "datetime"
-        ],
-        errors="coerce",
-        utc=True,
-    )
-
-    data[
-        level_col
-    ] = _to_numeric(
-        data[
-            level_col
-        ]
-    )
-
-    data = (
-        data
-        .dropna(
-            subset=[
-                "datetime",
-                level_col,
-            ]
-        )
-        .sort_values(
-            "datetime"
+    level_history = (
+        _prepare_level_history(
+            df
         )
     )
 
-    if data.empty:
+    if level_history.empty:
+        return pd.DataFrame()
 
-        return pd.DataFrame(), {}
+    days = int(
+        max(
+            1,
+            days,
+        )
+    )
 
-    level_current = float(
-        data[
-            level_col
+    last_date = pd.Timestamp(
+        level_history[
+            "datetime"
         ].iloc[-1]
     )
 
-    last_date = (
-        data[
-            "datetime"
+    current_level = float(
+        level_history[
+            "nivel"
         ].iloc[-1]
     )
 
     future_dates = pd.date_range(
-        start=
+        start=(
             last_date
             + pd.Timedelta(
                 days=1
-            ),
-        periods=
-            STRESS_DAYS,
+            )
+        ),
+        periods=days,
         freq="D",
     )
 
-    envelope = (
+
+    # ========================================================
+    # REFERENCIAS HISTÓRICAS
+    # ========================================================
+
+    level_envelope = (
         _historical_level_envelope(
-            data,
+            df,
             future_dates,
         )
     )
 
-    rain_info = (
-        _rain_stress(
-            exog_history
+    rain_calendar = (
+        _historical_rain_calendar(
+            exog_history,
+            future_dates,
         )
     )
 
-    flow_info = (
-        _flow_stress(
-            exog_history
+    flow_calendar = (
+        _historical_flow_calendar(
+            exog_history,
+            future_dates,
         )
     )
 
-    upstream_info = (
-        _upstream_signal(
-            upstream_history
-        )
+
+    scenario = pd.DataFrame(
+        {
+            "datetime":
+                future_dates
+        }
     )
+
+    scenario = scenario.merge(
+        level_envelope,
+        on="datetime",
+        how="left",
+    )
+
+    scenario = scenario.merge(
+        rain_calendar,
+        on="datetime",
+        how="left",
+    )
+
+    scenario = scenario.merge(
+        flow_calendar,
+        on="datetime",
+        how="left",
+    )
+
 
     # ========================================================
-    # OBJETIVO DE NIVEL
+    # SEÑALES ACTUALES
     # ========================================================
 
-    historical_target = (
+    upstream = _upstream_signal(
+        upstream_history
+    )
+
+    flow = _flow_signal(
+        exog_history
+    )
+
+    rain = _rain_signal(
+        exog_history
+    )
+
+    local_slope = (
+        _recent_level_slope(
+            level_history
+        )
+    )
+
+
+    # ========================================================
+    # NORMALIZAR REFERENCIAS FUTURAS
+    # ========================================================
+
+    rain_values = (
+        _to_numeric(
+            scenario[
+                "rain_historical_max_mm"
+            ]
+        )
+        .fillna(
+            0.0
+        )
+    )
+
+    rain_scale = (
         _safe_quantile(
-            data[
-                level_col
-            ],
-            0.98,
+            rain_values,
+            0.90,
+            default=1.0,
         )
     )
-
-    if historical_target is None:
-
-        historical_target = (
-            level_current
-        )
-
-    historical_target = max(
-        historical_target,
-        level_current,
-    )
-
-    # --------------------------------------------------------
-    # IMPACTO POR CAUDAL
-    # --------------------------------------------------------
-
-    flow_effect = 0.0
 
     if (
-        flow_info[
-            "current"
-        ] is not None
-        and flow_info[
-            "high"
-        ] is not None
-        and flow_info[
-            "current"
-        ] > 0
+        not np.isfinite(
+            rain_scale
+        )
+        or rain_scale <= 0
     ):
+        rain_scale = 1.0
 
-        flow_effect = (
-            min(
-                max(
-                    flow_info[
-                        "ratio"
-                    ]
-                    - 1.0,
-                    0.0,
-                ),
-                1.0,
-            )
-            * 0.65
+
+    flow_values = (
+        _to_numeric(
+            scenario[
+                "flow_historical_max_m3s"
+            ]
         )
-
-    # --------------------------------------------------------
-    # IMPACTO POR LLUVIA
-    # --------------------------------------------------------
-
-    rain_effect = min(
-        rain_info[
-            "daily_high"
-        ]
-        / 100.0,
-        0.45,
     )
 
-    # --------------------------------------------------------
-    # IMPACTO AGUAS ARRIBA
-    # --------------------------------------------------------
-
-    upstream_effect = float(
-        np.clip(
-            (
-                upstream_info[
-                    "mean_delta_3"
-                ]
-                * 0.30
-                +
-                upstream_info[
-                    "mean_delta_7"
-                ]
-                * 0.15
+    flow_reference = (
+        _safe_quantile(
+            flow_values,
+            0.50,
+            default=flow.get(
+                "historical_high",
+                np.nan,
             ),
-            -0.40,
-            0.80,
         )
     )
 
-    target = (
-        level_current
-        + 0.60
-        * max(
-            historical_target
-            - level_current,
-            0.0,
-        )
-        + flow_effect
-        + rain_effect
-        + max(
-            upstream_effect,
-            0.0,
-        )
-    )
-
-    target = float(
-        np.clip(
-            target,
-            Y_MIN,
-            Y_MAX,
-        )
-    )
 
     # ========================================================
-    # TRAYECTORIA AMORTIGUADA
+    # CURVA DEL ESCENARIO
     # ========================================================
 
     levels = []
 
-    current = (
-        level_current
+    previous_level = (
+        current_level
     )
 
-    for i in range(
-        STRESS_DAYS
-    ):
+    for i, row in scenario.iterrows():
 
-        # crecimiento rápido al inicio,
-        # luego se estabiliza
-        progress = (
+        day = i + 1
+
+
+        # ----------------------------------------------------
+        # 1. Persistencia de tendencia local
+        # Se va amortiguando con el tiempo.
+        # ----------------------------------------------------
+
+        local_component = (
+            local_slope
+            * np.exp(
+                -day / 15.0
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # 2. Influencia aguas arriba
+        #
+        # No se aplica totalmente el primer día.
+        # Aumenta gradualmente para simular propagación.
+        # ----------------------------------------------------
+
+        propagation_factor = (
             1.0
             - np.exp(
-                -(i + 1)
-                / 18.0
+                -day / 9.0
             )
         )
 
-        theoretical = (
-            level_current
-            + (
-                target
-                - level_current
-            )
-            * progress
+        upstream_component = (
+            0.025
+            * upstream
+            * propagation_factor
         )
 
-        # limitar cambio diario
-        max_step = 0.12
 
-        next_level = float(
+        # ----------------------------------------------------
+        # 3. Caudal
+        # ----------------------------------------------------
+
+        flow_component = 0.0
+
+        q_future = _safe_float(
+            row.get(
+                "flow_historical_max_m3s"
+            ),
+            np.nan,
+        )
+
+        if (
+            np.isfinite(
+                q_future
+            )
+            and np.isfinite(
+                flow_reference
+            )
+            and flow_reference > 0
+        ):
+
+            flow_ratio_future = (
+                q_future
+                / flow_reference
+            )
+
+            flow_component = (
+                0.018
+                * (
+                    flow_ratio_future
+                    - 1.0
+                )
+            )
+
+        flow_component += (
+            0.012
+            * flow.get(
+                "trend",
+                0.0,
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # 4. Lluvia histórica máxima estacional
+        # ----------------------------------------------------
+
+        rain_future = max(
+            _safe_float(
+                row.get(
+                    "rain_historical_max_mm"
+                ),
+                0.0,
+            ),
+            0.0,
+        )
+
+        rain_ratio_future = (
+            rain_future
+            / rain_scale
+        )
+
+        rain_component = (
+            0.012
+            * np.clip(
+                rain_ratio_future,
+                0.0,
+                3.0,
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # 5. Lluvia reciente
+        # ----------------------------------------------------
+
+        recent_rain_component = (
+            0.006
+            * rain.get(
+                "ratio",
+                0.0,
+            )
+            * np.exp(
+                -day / 10.0
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # Cambio diario combinado
+        # ----------------------------------------------------
+
+        daily_change = (
+            local_component
+            + upstream_component
+            + flow_component
+            + rain_component
+            + recent_rain_component
+        )
+
+
+        # ----------------------------------------------------
+        # Límite de cambio diario para evitar saltos físicos
+        # irreales en este escenario experimental.
+        # ----------------------------------------------------
+
+        daily_change = float(
             np.clip(
-                theoretical,
-                current
-                - max_step,
-                current
-                + max_step,
+                daily_change,
+                -0.12,
+                0.16,
             )
         )
 
-        next_level = float(
+
+        proposed_level = (
+            previous_level
+            + daily_change
+        )
+
+
+        # ----------------------------------------------------
+        # Referencia histórica de nivel
+        #
+        # Acercamos progresivamente la proyección al máximo
+        # histórico estacional, pero no copiamos directamente
+        # ese máximo.
+        # ----------------------------------------------------
+
+        historical_target = (
+            _safe_float(
+                row.get(
+                    "historical_level_max_m"
+                ),
+                previous_level,
+            )
+        )
+
+        if (
+            historical_target
+            > proposed_level
+        ):
+
+            historical_pull = (
+                (
+                    historical_target
+                    - proposed_level
+                )
+                * 0.015
+            )
+
+            proposed_level += (
+                historical_pull
+            )
+
+
+        # ----------------------------------------------------
+        # Límite físico/gráfico
+        # ----------------------------------------------------
+
+        proposed_level = float(
             np.clip(
-                next_level,
+                proposed_level,
                 Y_MIN,
                 Y_MAX,
             )
         )
 
         levels.append(
-            next_level
+            proposed_level
         )
 
-        current = (
-            next_level
+        previous_level = (
+            proposed_level
         )
 
-    scenario = pd.DataFrame(
-        {
-            "datetime":
-                future_dates,
 
-            "stress_level":
-                levels,
-        }
+    scenario[
+        "stress_level"
+    ] = levels
+
+    scenario[
+        "scenario_day"
+    ] = np.arange(
+        1,
+        len(
+            scenario
+        ) + 1,
     )
 
-    if not envelope.empty:
+    scenario[
+        "upstream_signal"
+    ] = upstream
 
-        scenario = scenario.merge(
-            envelope[
-                [
-                    "datetime",
-                    "level_min_historical",
-                    "level_max_historical",
-                    "level_mean_historical",
-                ]
-            ],
-            on="datetime",
-            how="left",
-        )
+    scenario[
+        "current_flow_m3s"
+    ] = flow.get(
+        "current",
+        np.nan,
+    )
 
-    metadata = {
-        "level_current":
-            level_current,
+    scenario[
+        "recent_rain_15d_mm"
+    ] = rain.get(
+        "recent_15d",
+        0.0,
+    )
 
-        "level_target":
-            target,
+    scenario[
+        "scenario_type"
+    ] = "historical_stress"
 
-        "level_historical_p98":
-            historical_target,
+    return scenario
 
-        "rain":
-            rain_info,
 
-        "flow":
-            flow_info,
+# ============================================================
+# ALIAS PARA COMPATIBILIDAD FUTURA
+# ============================================================
 
-        "upstream":
-            upstream_info,
-    }
 
-    return (
-        scenario,
-        metadata,
+def get_stress_scenario(
+    df,
+    models=None,
+    exog_history=None,
+    upstream_history=None,
+    days=STRESS_DAYS,
+):
+
+    return build_stress_scenario(
+        df=df,
+        models=models,
+        exog_history=
+            exog_history,
+        upstream_history=
+            upstream_history,
+        days=days,
     )
 
 
 # ============================================================
-# UI PRINCIPAL
+# RENDER DEL ESCENARIO
 # ============================================================
+
 
 def render_stress_scenario(
     df,
     models=None,
     exog_history=None,
     upstream_history=None,
+    days=STRESS_DAYS,
 ):
+    """
+    Mantiene compatibilidad con app.py actual.
+
+    Además de mostrar el escenario, DEVUELVE
+    el DataFrame calculado.
+    """
 
     st.subheader(
-        "⚠️ Escenario hipotético · 60 días"
+        "⚠️ Escenario hidrológico histórico · 60 días"
     )
 
     st.caption(
-        "Simulación de tipo “qué pasa si” basada en "
-        "niveles históricamente elevados, lluvia intensa, "
-        "caudal alto y señales de estaciones aguas arriba. "
-        "No constituye un pronóstico oficial."
+        "Escenario experimental que combina nivel actual, "
+        "tendencia reciente, niveles aguas arriba, caudal "
+        "y máximos históricos estacionales de precipitación "
+        "y caudal."
     )
 
-    scenario, meta = (
-        _build_stress_curve(
-            df=df,
-            exog_history=
-                exog_history,
-            upstream_history=
-                upstream_history,
-        )
+
+    scenario = build_stress_scenario(
+        df=df,
+        models=models,
+        exog_history=
+            exog_history,
+        upstream_history=
+            upstream_history,
+        days=days,
     )
 
-    if (
-        scenario is None
-        or scenario.empty
-        or not meta
-    ):
+
+    if scenario.empty:
 
         st.info(
-            "No hay datos suficientes para construir "
-            "el escenario de 60 días."
+            "No hay suficientes datos para generar "
+            "el escenario histórico de 60 días."
         )
 
-        return
+        return scenario
 
-    level_current = meta[
-        "level_current"
-    ]
-
-    level_target = meta[
-        "level_target"
-    ]
-
-    rain_info = meta[
-        "rain"
-    ]
-
-    flow_info = meta[
-        "flow"
-    ]
-
-    upstream_info = meta[
-        "upstream"
-    ]
 
     # ========================================================
     # MÉTRICAS
     # ========================================================
 
-    m1, m2, m3, m4 = (
-        st.columns(
-            4
+    level_history = (
+        _prepare_level_history(
+            df
         )
     )
 
-    m1.metric(
-        "Nivel de partida",
-        f"{level_current:.2f} m",
+    current_level = float(
+        level_history[
+            "nivel"
+        ].iloc[-1]
     )
 
-    m2.metric(
+    projected_end = float(
+        scenario[
+            "stress_level"
+        ].iloc[-1]
+    )
+
+    projected_max = float(
+        scenario[
+            "stress_level"
+        ].max()
+    )
+
+    growth = (
+        projected_end
+        - current_level
+    )
+
+
+    c1, c2 = st.columns(
+        2
+    )
+
+    c1.metric(
+        "Nivel actual",
+        f"{current_level:.2f} m",
+    )
+
+    c2.metric(
         "Nivel estimado día 60",
-        f"{scenario['stress_level'].iloc[-1]:.2f} m",
-        (
-            f"{scenario['stress_level'].iloc[-1] - level_current:+.2f} m"
-        ),
+        f"{projected_end:.2f} m",
+        f"{growth:+.2f} m",
     )
 
-    m3.metric(
-        "Lluvia histórica alta",
-        f"{rain_info['daily_high']:.1f} mm/día",
+
+    c3, c4 = st.columns(
+        2
     )
 
-    if (
-        flow_info[
-            "high"
-        ] is not None
-    ):
+    c3.metric(
+        "Máximo escenario",
+        f"{projected_max:.2f} m",
+    )
 
-        flow_text = (
-            f"{flow_info['high']:,.0f} m³/s"
+    upstream_signal = float(
+        scenario[
+            "upstream_signal"
+        ].iloc[0]
+    )
+
+    if upstream_signal > 0.05:
+
+        upstream_text = (
+            "↑ Creciente"
+        )
+
+    elif upstream_signal < -0.05:
+
+        upstream_text = (
+            "↓ Descendente"
         )
 
     else:
 
-        flow_text = (
-            "Sin dato"
+        upstream_text = (
+            "→ Estable"
         )
 
-    m4.metric(
-        "Caudal histórico alto",
-        flow_text,
+    c4.metric(
+        "Señal aguas arriba",
+        upstream_text,
     )
 
-    # ========================================================
-    # SEGUNDA FILA DE MÉTRICAS
-    # ========================================================
-
-    s1, s2, s3 = st.columns(
-        3
-    )
-
-    s1.metric(
-        "Objetivo de estrés",
-        f"{level_target:.2f} m",
-    )
-
-    s2.metric(
-        "Estaciones aguas arriba",
-        upstream_info[
-            "available"
-        ],
-    )
-
-    upstream_delta = (
-        upstream_info[
-            "mean_delta_3"
-        ]
-    )
-
-    s3.metric(
-        "Variación media aguas arriba · 3 días",
-        f"{upstream_delta:+.2f} m",
-    )
 
     # ========================================================
     # GRÁFICO
@@ -919,68 +1802,33 @@ def render_stress_scenario(
 
     fig = go.Figure()
 
+
     # --------------------------------------------------------
-    # MÁXIMO HISTÓRICO MISMA FECHA
+    # Nivel observado reciente
     # --------------------------------------------------------
 
-    if (
-        "level_max_historical"
-        in scenario.columns
-        and scenario[
-            "level_max_historical"
-        ].notna().any()
-    ):
-
-        fig.add_trace(
-            go.Scatter(
-                x=scenario[
-                    "datetime"
-                ],
-                y=scenario[
-                    "level_max_historical"
-                ],
-                mode=
-                    "lines",
-                name=
-                    "Máximo histórico misma fecha",
-                line=dict(
-                    dash="dash",
-                ),
-            )
+    recent = (
+        level_history.tail(
+            60
         )
+    )
 
-    # --------------------------------------------------------
-    # MÍNIMO HISTÓRICO MISMA FECHA
-    # --------------------------------------------------------
-
-    if (
-        "level_min_historical"
-        in scenario.columns
-        and scenario[
-            "level_min_historical"
-        ].notna().any()
-    ):
-
-        fig.add_trace(
-            go.Scatter(
-                x=scenario[
-                    "datetime"
-                ],
-                y=scenario[
-                    "level_min_historical"
-                ],
-                mode=
-                    "lines",
-                name=
-                    "Mínimo histórico misma fecha",
-                line=dict(
-                    dash="dot",
-                ),
-            )
+    fig.add_trace(
+        go.Scatter(
+            x=recent[
+                "datetime"
+            ],
+            y=recent[
+                "nivel"
+            ],
+            mode="lines",
+            name="Observado",
         )
+    )
+
 
     # --------------------------------------------------------
-    # ESCENARIO
+    # Escenario
     # --------------------------------------------------------
 
     fig.add_trace(
@@ -991,33 +1839,50 @@ def render_stress_scenario(
             y=scenario[
                 "stress_level"
             ],
-            mode=
-                "lines+markers",
-            name=
-                "Escenario de estrés",
-            line=dict(
-                width=3,
-            ),
+            mode="lines+markers",
+            name="Escenario 60 días",
         )
     )
 
+
     # --------------------------------------------------------
-    # NIVEL DE PARTIDA
+    # Máximo histórico estacional
     # --------------------------------------------------------
 
-    fig.add_hline(
-        y=
-            level_current,
-        line_dash=
-            "dot",
-        annotation_text=
-            "Nivel actual",
-    )
+    if (
+        "historical_level_max_m"
+        in scenario.columns
+    ):
+
+        fig.add_trace(
+            go.Scatter(
+                x=scenario[
+                    "datetime"
+                ],
+                y=scenario[
+                    "historical_level_max_m"
+                ],
+                mode="lines",
+                line=dict(
+                    dash="dot"
+                ),
+                name=(
+                    "Máximo histórico "
+                    "misma época"
+                ),
+            )
+        )
+
 
     fig.update_layout(
-        height=470,
-        hovermode=
-            "x unified",
+        height=420,
+        hovermode="x unified",
+        margin=dict(
+            l=10,
+            r=10,
+            t=30,
+            b=10,
+        ),
         legend=dict(
             orientation="h",
             y=1.08,
@@ -1025,102 +1890,162 @@ def render_stress_scenario(
     )
 
     fig.update_xaxes(
-        title_text=
-            "Fecha",
-        tickformat=
-            "%d/%m",
+        tickformat="%d/%m",
     )
 
     fig.update_yaxes(
-        title_text=
-            "Nivel hidrométrico (m)",
+        title_text="Nivel (m)",
         range=[
             Y_MIN,
             Y_MAX,
         ],
-        dtick=
-            Y_STEP,
+        dtick=0.5,
     )
+
 
     st.plotly_chart(
         fig,
         use_container_width=True,
     )
 
+
     # ========================================================
-    # TABLA
+    # LLUVIAS MÁXIMAS HISTÓRICAS
     # ========================================================
 
-    with st.expander(
-        "📋 Ver escenario día por día"
+    if (
+        "rain_historical_max_mm"
+        in scenario.columns
     ):
 
-        table = scenario.copy()
+        with st.expander(
+            "🌧️ Máximos históricos de precipitación utilizados"
+        ):
 
-        table[
-            "datetime"
-        ] = pd.to_datetime(
-            table[
+            rain_table = scenario[
+                [
+                    "datetime",
+                    "rain_historical_max_mm",
+                ]
+            ].copy()
+
+            rain_table[
                 "datetime"
-            ]
-        ).dt.strftime(
-            "%d/%m/%Y"
-        )
-
-        rename_map = {
-            "datetime":
-                "Fecha",
-
-            "stress_level":
-                "Nivel escenario (m)",
-
-            "level_min_historical":
-                "Mínimo histórico (m)",
-
-            "level_max_historical":
-                "Máximo histórico (m)",
-
-            "level_mean_historical":
-                "Promedio histórico (m)",
-        }
-
-        table = table.rename(
-            columns=
-                rename_map
-        )
-
-        numeric_cols = [
-            col
-            for col
-            in table.columns
-            if col != "Fecha"
-        ]
-
-        for col in numeric_cols:
-
-            table[
-                col
-            ] = pd.to_numeric(
-                table[
-                    col
-                ],
-                errors="coerce",
-            ).round(
-                2
+            ] = (
+                rain_table[
+                    "datetime"
+                ]
+                .dt.strftime(
+                    "%d/%m/%Y"
+                )
             )
 
-        st.dataframe(
-            table,
-            use_container_width=True,
-            hide_index=True,
-        )
+            rain_table = (
+                rain_table.rename(
+                    columns={
+                        "datetime":
+                            "Fecha",
+
+                        "rain_historical_max_mm":
+                            "Máx. histórico lluvia (mm)",
+                    }
+                )
+            )
+
+            rain_table[
+                "Máx. histórico lluvia (mm)"
+            ] = (
+                rain_table[
+                    "Máx. histórico lluvia (mm)"
+                ]
+                .round(
+                    1
+                )
+            )
+
+            st.dataframe(
+                rain_table,
+                use_container_width=True,
+                hide_index=True,
+            )
+
 
     # ========================================================
-    # ACLARACIÓN
+    # CAUDALES MÁXIMOS HISTÓRICOS
     # ========================================================
 
-    st.info(
-        "Este escenario no predice que los máximos históricos "
-        "vayan a repetirse. Los utiliza como condición de estrés "
-        "para analizar la respuesta potencial del nivel del río."
+    if (
+        "flow_historical_max_m3s"
+        in scenario.columns
+        and scenario[
+            "flow_historical_max_m3s"
+        ].notna().any()
+    ):
+
+        with st.expander(
+            "💧 Máximos históricos de caudal utilizados"
+        ):
+
+            flow_table = scenario[
+                [
+                    "datetime",
+                    "flow_historical_max_m3s",
+                ]
+            ].copy()
+
+            flow_table[
+                "datetime"
+            ] = (
+                flow_table[
+                    "datetime"
+                ]
+                .dt.strftime(
+                    "%d/%m/%Y"
+                )
+            )
+
+            flow_table = (
+                flow_table.rename(
+                    columns={
+                        "datetime":
+                            "Fecha",
+
+                        "flow_historical_max_m3s":
+                            "Máx. histórico caudal (m³/s)",
+                    }
+                )
+            )
+
+            flow_table[
+                "Máx. histórico caudal (m³/s)"
+            ] = (
+                flow_table[
+                    "Máx. histórico caudal (m³/s)"
+                ]
+                .round(
+                    0
+                )
+            )
+
+            st.dataframe(
+                flow_table,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+    st.caption(
+        "El escenario de 60 días es una simulación "
+        "experimental basada en condiciones históricas "
+        "y no constituye un pronóstico oficial."
     )
+
+
+    # ========================================================
+    # MUY IMPORTANTE
+    #
+    # Ahora app.py podrá recibir esta serie y utilizarla
+    # dentro del gráfico único 15 + 30 + 60 días.
+    # ========================================================
+
+    return scenario
