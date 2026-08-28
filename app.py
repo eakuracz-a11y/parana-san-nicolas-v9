@@ -9,9 +9,7 @@ from datetime import (
     datetime,
 )
 
-from src.ina import (
-    observed,
-)
+from src.ina import observed
 
 from src.model import (
     train,
@@ -19,26 +17,26 @@ from src.model import (
     resumen_niveles_estaciones,
 )
 
-from src.exogenous import (
-    get_exogenous_data,
-)
+from src.exogenous import get_exogenous_data
 
 from src.upstream import (
     get_upstream_history,
 )
 
-from src.stress_ui import (
-    render_stress_scenario,
-)
+from src.stress_ui import render_stress_scenario
 
 
 # ============================================================
 # PARANÁ · SAN NICOLÁS
-# APP V11.2
-# PROPAGACIÓN HIDROLÓGICA
+# APP V11.2 MOBILE
+#
+# Mejora principal:
+# - Selector de período visible en pantalla principal
+# - Mejor visualización en celular
+# - Sidebar solo informativo
 # ============================================================
 
-APP_VERSION = "V11.2"
+APP_VERSION = "V11.2 Mobile"
 
 FORECAST_DAYS = 15
 TREND_DAYS = 30
@@ -56,25 +54,30 @@ st.set_page_config(
     page_title="Paraná · San Nicolás",
     page_icon="🌊",
     layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
 
 # ============================================================
-# ESTILO
+# CSS
 # ============================================================
 
 st.markdown(
     """
     <style>
 
+    /* =======================================================
+       GENERAL
+       ======================================================= */
+
     .block-container {
-        padding-top: 1.25rem;
+        padding-top: 1rem;
         padding-bottom: 3rem;
-        max-width: 1550px;
+        max-width: 1500px;
     }
 
     [data-testid="stMetricValue"] {
-        font-size: 1.50rem;
+        font-size: 1.40rem;
     }
 
     [data-testid="stMetricLabel"] {
@@ -82,13 +85,106 @@ st.markdown(
     }
 
     div[data-testid="stAlert"] {
-        padding-top: 0.65rem;
-        padding-bottom: 0.65rem;
+        padding-top: 0.55rem;
+        padding-bottom: 0.55rem;
     }
 
-    .small-note {
-        font-size: 0.82rem;
-        color: #6b7280;
+    div[data-testid="stButton"] > button {
+        min-height: 3rem;
+        border-radius: 0.65rem;
+        font-weight: 600;
+    }
+
+    /* =======================================================
+       SELECTOR DE PERÍODO
+       ======================================================= */
+
+    .period-title {
+        font-size: 1.15rem;
+        font-weight: 650;
+        margin-top: 0.25rem;
+        margin-bottom: 0.15rem;
+    }
+
+    .period-help {
+        font-size: 0.88rem;
+        opacity: 0.75;
+        margin-bottom: 0.5rem;
+    }
+
+    /* =======================================================
+       TABLAS
+       ======================================================= */
+
+    [data-testid="stDataFrame"] {
+        overflow-x: auto;
+    }
+
+    /* =======================================================
+       CELULAR
+       ======================================================= */
+
+    @media (max-width: 768px) {
+
+        .block-container {
+            padding-top: 0.60rem !important;
+            padding-left: 0.70rem !important;
+            padding-right: 0.70rem !important;
+            padding-bottom: 2rem !important;
+        }
+
+        h1 {
+            font-size: 1.55rem !important;
+            line-height: 1.15 !important;
+            margin-bottom: 0.35rem !important;
+        }
+
+        h2 {
+            font-size: 1.28rem !important;
+        }
+
+        h3 {
+            font-size: 1.10rem !important;
+        }
+
+        p {
+            font-size: 0.90rem;
+        }
+
+        [data-testid="stMetricValue"] {
+            font-size: 1.10rem !important;
+        }
+
+        [data-testid="stMetricLabel"] {
+            font-size: 0.70rem !important;
+        }
+
+        [data-testid="stMetricDelta"] {
+            font-size: 0.70rem !important;
+        }
+
+        div[data-testid="stButton"] > button {
+            min-height: 3.2rem !important;
+            font-size: 1rem !important;
+            width: 100% !important;
+        }
+
+        div[data-testid="stDateInput"] input {
+            font-size: 0.95rem !important;
+        }
+
+        div[data-testid="stAlert"] {
+            font-size: 0.82rem !important;
+        }
+
+        .period-title {
+            font-size: 1.05rem !important;
+        }
+
+        .period-help {
+            font-size: 0.78rem !important;
+        }
+
     }
 
     </style>
@@ -101,118 +197,170 @@ st.markdown(
 # ENCABEZADO
 # ============================================================
 
-st.title(
-    "🌊 PARANÁ · SAN NICOLÁS"
-)
+st.title("🌊 PARANÁ · SAN NICOLÁS")
 
 st.caption(
-    f"{APP_VERSION} · Modelo experimental de propagación hidrológica"
+    f"{APP_VERSION} · Monitoreo y pronóstico experimental"
 )
 
 st.markdown(
     """
-    Seguimiento del río Paraná en **San Nicolás de los Arroyos**.
-
-    El modelo integra:
-
-    **nivel observado · estaciones aguas arriba · propagación histórica ·
-    caudal · precipitación**
+    Nivel del río Paraná en **San Nicolás de los Arroyos**,
+    incorporando información hidrológica, precipitación,
+    caudal y estaciones aguas arriba.
     """
 )
 
 
 # ============================================================
-# SIDEBAR
+# SELECTOR DE PERÍODO
+#
+# IMPORTANTE:
+# ahora está en la pantalla principal.
+# En celular no es necesario abrir el sidebar.
 # ============================================================
 
-st.sidebar.header(
-    "Consulta"
+st.markdown(
+    '<div class="period-title">📅 Período de análisis</div>',
+    unsafe_allow_html=True,
 )
 
-fecha_hasta = date.today()
+st.markdown(
+    """
+    <div class="period-help">
+    Seleccioná las fechas y presioná Actualizar modelo.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-fecha_desde = (
-    fecha_hasta
-    - timedelta(
-        days=365
+
+fecha_hasta_default = date.today()
+
+fecha_desde_default = (
+    fecha_hasta_default
+    - timedelta(days=365)
+)
+
+
+# ------------------------------------------------------------
+# Las columnas se apilan automáticamente en celular
+# ------------------------------------------------------------
+
+fecha_col1, fecha_col2 = st.columns(
+    2,
+    gap="small",
+)
+
+with fecha_col1:
+
+    desde = st.date_input(
+        "Desde",
+        value=fecha_desde_default,
+        format="DD/MM/YYYY",
+        key="fecha_desde_principal",
     )
-)
 
 
-desde = st.sidebar.date_input(
-    "Desde",
-    value=fecha_desde,
-    format="DD/MM/YYYY",
-)
+with fecha_col2:
+
+    hasta = st.date_input(
+        "Hasta",
+        value=fecha_hasta_default,
+        format="DD/MM/YYYY",
+        key="fecha_hasta_principal",
+    )
 
 
-hasta = st.sidebar.date_input(
-    "Hasta",
-    value=fecha_hasta,
-    format="DD/MM/YYYY",
-)
-
-
-actualizar = st.sidebar.button(
+actualizar = st.button(
     "🔄 Actualizar modelo",
     use_container_width=True,
     type="primary",
 )
 
 
-st.sidebar.divider()
+# ============================================================
+# INFORMACIÓN RÁPIDA
+# ============================================================
+
+info1, info2, info3 = st.columns(3)
+
+info1.caption(
+    "Pronóstico: 15 días"
+)
+
+info2.caption(
+    "Tendencia: 30 días"
+)
+
+info3.caption(
+    "Escenario: 60 días"
+)
+
+
+st.divider()
+
+
+# ============================================================
+# SIDEBAR
+#
+# Queda solamente como panel secundario.
+# ============================================================
+
+st.sidebar.title(
+    "🌊 Paraná"
+)
 
 st.sidebar.subheader(
-    "Horizontes"
+    "San Nicolás"
 )
 
-st.sidebar.write(
-    "Pronóstico principal: **15 días**"
+st.sidebar.caption(
+    f"Versión {APP_VERSION}"
 )
 
-st.sidebar.write(
-    "Tendencia extendida: **30 días**"
+st.sidebar.divider()
+
+st.sidebar.markdown(
+    """
+    **Horizontes**
+
+    • Pronóstico: 15 días  
+    • Tendencia: 30 días  
+    • Escenario histórico: 60 días
+    """
 )
 
-st.sidebar.write(
-    "Escenario hipotético: **60 días**"
+st.sidebar.divider()
+
+st.sidebar.markdown(
+    """
+    **Fuentes**
+
+    Nivel:
+    INA A5
+
+    Precipitación:
+    Open-Meteo
+
+    Variables hidrológicas:
+    INA
+    """
 )
-
-
-st.sidebar.subheader(
-    "Modelo"
-)
-
-st.sidebar.write(
-    "Propagación de niveles aguas arriba"
-)
-
-st.sidebar.write(
-    "Relación histórica Corrientes → San Nicolás"
-)
-
-st.sidebar.write(
-    "Escala fija: **0–7 m**"
-)
-
 
 st.sidebar.divider()
 
 st.sidebar.caption(
-    "Nivel: INA A5"
+    "Escala de nivel: 0 a 7 m"
 )
 
 st.sidebar.caption(
-    "Lluvia: Open-Meteo"
-)
-
-st.sidebar.caption(
-    "Modelo: experimental"
+    "Modelo experimental"
 )
 
 
 # ============================================================
-# PREPARAR DATOS
+# FUNCIONES AUXILIARES
 # ============================================================
 
 def preparar_datos(df):
@@ -283,54 +431,84 @@ def preparar_datos(df):
 
 
 # ============================================================
-# TEXTO TENDENCIA
+# TENDENCIA
 # ============================================================
 
-def texto_tendencia(delta):
+def texto_tendencia(
+    delta,
+):
 
     if delta is None:
+
         return "Sin comparación"
 
     try:
 
-        delta = float(delta)
+        delta = float(
+            delta
+        )
 
     except Exception:
 
         return "Sin comparación"
 
-    if not np.isfinite(delta):
+    if not np.isfinite(
+        delta
+    ):
+
         return "Sin comparación"
 
     if delta > 0.01:
+
         return "↑ Creciendo"
 
     if delta < -0.01:
+
         return "↓ Bajando"
 
     return "→ Estable"
 
 
 # ============================================================
-# NOMBRE DE ESTACIÓN
+# NORMALIZAR ESTACIÓN
 # ============================================================
 
-def normalizar_estacion(texto):
+def normalizar_estacion(
+    texto,
+):
 
     return (
         str(texto)
         .lower()
-        .replace("á", "a")
-        .replace("é", "e")
-        .replace("í", "i")
-        .replace("ó", "o")
-        .replace("ú", "u")
-        .replace(" ", "_")
+        .replace(
+            "á",
+            "a",
+        )
+        .replace(
+            "é",
+            "e",
+        )
+        .replace(
+            "í",
+            "i",
+        )
+        .replace(
+            "ó",
+            "o",
+        )
+        .replace(
+            "ú",
+            "u",
+        )
+        .replace(
+            " ",
+            "_",
+        )
     )
 
 
 # ============================================================
-# TABLA NIVELES AGUAS ARRIBA
+# TABLA AGUAS ARRIBA
 # ============================================================
 
 def construir_tabla_upstream(
@@ -344,6 +522,7 @@ def construir_tabla_upstream(
         upstream_meta,
         dict,
     ):
+
         return pd.DataFrame()
 
     for station, info in upstream_meta.items():
@@ -366,8 +545,7 @@ def construir_tabla_upstream(
                 pd.DataFrame,
             )
             and not upstream_history.empty
-            and col
-            in upstream_history.columns
+            and col in upstream_history.columns
         ):
 
             temp = upstream_history[
@@ -385,7 +563,9 @@ def construir_tabla_upstream(
             temp = (
                 temp
                 .dropna(
-                    subset=[col]
+                    subset=[
+                        col
+                    ]
                 )
                 .sort_values(
                     "datetime"
@@ -399,7 +579,9 @@ def construir_tabla_upstream(
                 )
 
                 fecha_ultima = (
-                    temp["datetime"].iloc[-1]
+                    temp[
+                        "datetime"
+                    ].iloc[-1]
                 )
 
                 if len(temp) >= 2:
@@ -414,13 +596,19 @@ def construir_tabla_upstream(
                     )
 
         series_id = None
+        status = None
 
         if isinstance(
             info,
             dict,
         ):
+
             series_id = info.get(
                 "series_id"
+            )
+
+            status = info.get(
+                "status"
             )
 
         rows.append(
@@ -428,37 +616,18 @@ def construir_tabla_upstream(
                 "Estación":
                     station,
 
-                "Nivel actual (m)":
+                "Nivel actual":
                     (
-                        round(
-                            actual,
-                            2,
-                        )
-                        if actual
-                        is not None
-                        else np.nan
+                        f"{actual:.2f} m"
+                        if actual is not None
+                        else "—"
                     ),
 
-                "Medición anterior (m)":
+                "Variación":
                     (
-                        round(
-                            anterior,
-                            2,
-                        )
-                        if anterior
-                        is not None
-                        else np.nan
-                    ),
-
-                "Variación (m)":
-                    (
-                        round(
-                            variacion,
-                            2,
-                        )
-                        if variacion
-                        is not None
-                        else np.nan
+                        f"{variacion:+.2f} m"
+                        if variacion is not None
+                        else "—"
                     ),
 
                 "Tendencia":
@@ -466,12 +635,11 @@ def construir_tabla_upstream(
                         texto_tendencia(
                             variacion
                         )
-                        if actual
-                        is not None
+                        if actual is not None
                         else "Sin datos"
                     ),
 
-                "Última fecha":
+                "Fecha":
                     (
                         pd.to_datetime(
                             fecha_ultima
@@ -480,11 +648,23 @@ def construir_tabla_upstream(
                         )
                         if fecha_ultima
                         is not None
-                        else ""
+                        else "—"
                     ),
 
-                "Serie INA":
-                    series_id,
+                "Serie":
+                    (
+                        series_id
+                        if series_id
+                        is not None
+                        else "—"
+                    ),
+
+                "Estado":
+                    (
+                        status
+                        if status
+                        else "—"
+                    ),
             }
         )
 
@@ -494,7 +674,7 @@ def construir_tabla_upstream(
 
 
 # ============================================================
-# EXTENSIÓN A 30 DÍAS
+# EXTENDER PRONÓSTICO A 30 DÍAS
 # ============================================================
 
 def extender_pronostico_30(
@@ -510,6 +690,7 @@ def extender_pronostico_30(
         )
         or forecast.empty
     ):
+
         return pd.DataFrame()
 
     f = forecast.copy()
@@ -532,6 +713,7 @@ def extender_pronostico_30(
     )
 
     if f.empty:
+
         return pd.DataFrame()
 
     result = f.copy()
@@ -544,10 +726,16 @@ def extender_pronostico_30(
         f["prediction"].iloc[-1]
     )
 
+    # --------------------------------------------------------
+    # Tendencia del pronóstico
+    # --------------------------------------------------------
+
     if len(f) >= 5:
 
         recent = (
-            f["prediction"]
+            f[
+                "prediction"
+            ]
             .tail(5)
             .to_numpy(
                 dtype=float
@@ -566,23 +754,25 @@ def extender_pronostico_30(
 
     else:
 
-        niveles = (
+        recent = (
             pd.to_numeric(
-                df["nivel"],
+                df[
+                    "nivel"
+                ],
                 errors="coerce",
             )
             .dropna()
             .tail(7)
         )
 
-        if len(niveles) >= 3:
+        if len(recent) >= 3:
 
             slope = float(
                 np.polyfit(
                     np.arange(
-                        len(niveles)
+                        len(recent)
                     ),
-                    niveles.to_numpy(
+                    recent.to_numpy(
                         dtype=float
                     ),
                     1,
@@ -592,6 +782,10 @@ def extender_pronostico_30(
         else:
 
             slope = 0.0
+
+    # --------------------------------------------------------
+    # Limitar extrapolación
+    # --------------------------------------------------------
 
     slope = float(
         np.clip(
@@ -604,7 +798,7 @@ def extender_pronostico_30(
     extra = []
 
     for step in range(
-        16,
+        FORECAST_DAYS + 1,
         TREND_DAYS + 1,
     ):
 
@@ -672,233 +866,18 @@ def extender_pronostico_30(
 
 
 # ============================================================
-# RELACIÓN CORRIENTES → SAN NICOLÁS
-# ============================================================
-
-def construir_relacion_corrientes(
-    df,
-    upstream_history,
-    relation_summary,
-):
-
-    if (
-        df is None
-        or df.empty
-        or upstream_history is None
-        or upstream_history.empty
-        or "nivel_corrientes"
-        not in upstream_history.columns
-    ):
-        return (
-            pd.DataFrame(),
-            None,
-            None,
-        )
-
-    lag = None
-    correlation = None
-
-    if (
-        isinstance(
-            relation_summary,
-            pd.DataFrame,
-        )
-        and not relation_summary.empty
-        and "estacion"
-        in relation_summary.columns
-    ):
-
-        temp_summary = (
-            relation_summary.copy()
-        )
-
-        mask = (
-            temp_summary[
-                "estacion"
-            ]
-            .astype(str)
-            .str.lower()
-            ==
-            "corrientes"
-        )
-
-        if mask.any():
-
-            row = (
-                temp_summary[
-                    mask
-                ].iloc[0]
-            )
-
-            lag_value = row.get(
-                "mejor_lag_dias"
-            )
-
-            corr_value = row.get(
-                "correlacion"
-            )
-
-            if pd.notna(
-                lag_value
-            ):
-                lag = int(
-                    lag_value
-                )
-
-            if pd.notna(
-                corr_value
-            ):
-                correlation = float(
-                    corr_value
-                )
-
-    if lag is None:
-        lag = 7
-
-    sn = df[
-        [
-            "datetime",
-            "nivel",
-        ]
-    ].copy()
-
-    sn["datetime"] = pd.to_datetime(
-        sn["datetime"],
-        errors="coerce",
-        utc=True,
-    )
-
-    sn["datetime"] = (
-        sn["datetime"]
-        .dt.tz_localize(None)
-        .dt.normalize()
-    )
-
-    sn = (
-        sn
-        .groupby(
-            "datetime",
-            as_index=False,
-        )["nivel"]
-        .mean()
-    )
-
-    corr = upstream_history[
-        [
-            "datetime",
-            "nivel_corrientes",
-        ]
-    ].copy()
-
-    corr["datetime"] = pd.to_datetime(
-        corr["datetime"],
-        errors="coerce",
-    ).dt.normalize()
-
-    corr[
-        "nivel_corrientes"
-    ] = pd.to_numeric(
-        corr[
-            "nivel_corrientes"
-        ],
-        errors="coerce",
-    )
-
-    corr = (
-        corr
-        .dropna(
-            subset=[
-                "datetime",
-                "nivel_corrientes",
-            ]
-        )
-        .groupby(
-            "datetime",
-            as_index=False,
-        )[
-            "nivel_corrientes"
-        ]
-        .mean()
-        .sort_values(
-            "datetime"
-        )
-    )
-
-    # El nivel de Corrientes observado hoy
-    # se compara con San Nicolás varios días después.
-    corr[
-        "datetime_sn"
-    ] = (
-        corr[
-            "datetime"
-        ]
-        + pd.to_timedelta(
-            lag,
-            unit="D",
-        )
-    )
-
-    relation = sn.merge(
-        corr[
-            [
-                "datetime_sn",
-                "nivel_corrientes",
-            ]
-        ],
-        left_on=
-            "datetime",
-        right_on=
-            "datetime_sn",
-        how="inner",
-    )
-
-    relation = relation.dropna(
-        subset=[
-            "nivel",
-            "nivel_corrientes",
-        ]
-    )
-
-    if (
-        correlation is None
-        and len(relation) >= 10
-    ):
-
-        correlation = relation[
-            "nivel"
-        ].corr(
-            relation[
-                "nivel_corrientes"
-            ]
-        )
-
-        if pd.notna(
-            correlation
-        ):
-            correlation = float(
-                correlation
-            )
-
-    return (
-        relation,
-        lag,
-        correlation,
-    )
-
-
-# ============================================================
-# VALIDAR FECHAS
+# VALIDACIÓN FECHAS
 # ============================================================
 
 if desde > hasta:
 
-    st.sidebar.error(
-        "La fecha Desde no puede ser posterior a Hasta."
+    st.error(
+        "⚠️ La fecha inicial no puede ser posterior a la fecha final."
     )
 
 
 # ============================================================
-# ACTUALIZACIÓN
+# ACTUALIZAR DATOS
 # ============================================================
 
 if actualizar:
@@ -919,8 +898,9 @@ if actualizar:
             "%Y-%m-%d"
         )
 
+
         # ====================================================
-        # SAN NICOLÁS - INA A5
+        # SAN NICOLÁS
         # ====================================================
 
         with st.spinner(
@@ -939,13 +919,12 @@ if actualizar:
 
             except Exception as exc:
 
-                df_ina = (
-                    pd.DataFrame()
-                )
+                df_ina = pd.DataFrame()
 
                 error_ina = str(
                     exc
                 )
+
 
         if error_ina:
 
@@ -969,7 +948,7 @@ if actualizar:
             else:
 
                 # ============================================
-                # VARIABLES EXTERNAS
+                # PRECIPITACIÓN + CAUDAL
                 # ============================================
 
                 with st.spinner(
@@ -990,13 +969,9 @@ if actualizar:
 
                     except Exception as exc:
 
-                        exog_history = (
-                            pd.DataFrame()
-                        )
+                        exog_history = pd.DataFrame()
 
-                        exog_future = (
-                            pd.DataFrame()
-                        )
+                        exog_future = pd.DataFrame()
 
                         exog_meta = {}
 
@@ -1004,6 +979,7 @@ if actualizar:
                             "Variables externas parcialmente "
                             f"disponibles: {exc}"
                         )
+
 
                 # ============================================
                 # AGUAS ARRIBA
@@ -1015,13 +991,49 @@ if actualizar:
 
                     try:
 
-                        (
-                            upstream_history,
-                            upstream_meta,
-                        ) = get_upstream_history(
-                            inicio,
-                            fin,
+                        upstream_result = (
+                            get_upstream_history(
+                                inicio,
+                                fin,
+                            )
                         )
+
+                        # ------------------------------------
+                        # Compatible con upstream que devuelve:
+                        # (dataframe, metadata)
+                        # o solamente dataframe
+                        # ------------------------------------
+
+                        if (
+                            isinstance(
+                                upstream_result,
+                                tuple,
+                            )
+                            and len(
+                                upstream_result
+                            ) >= 2
+                        ):
+
+                            upstream_history = (
+                                upstream_result[0]
+                            )
+
+                            upstream_meta = (
+                                upstream_result[1]
+                            )
+
+                        else:
+
+                            upstream_history = (
+                                upstream_result
+                                if isinstance(
+                                    upstream_result,
+                                    pd.DataFrame,
+                                )
+                                else pd.DataFrame()
+                            )
+
+                            upstream_meta = {}
 
                     except Exception as exc:
 
@@ -1032,17 +1044,18 @@ if actualizar:
                         upstream_meta = {}
 
                         st.warning(
-                            "No fue posible obtener todas "
-                            "las estaciones aguas arriba. "
-                            f"{exc}"
+                            "No fue posible recuperar "
+                            "todas las estaciones aguas arriba. "
+                            f"Detalle: {exc}"
                         )
 
+
                 # ============================================
-                # MODELO
+                # ENTRENAR MODELO
                 # ============================================
 
                 with st.spinner(
-                    "Analizando propagación y entrenando modelo..."
+                    "Entrenando modelo..."
                 ):
 
                     try:
@@ -1061,8 +1074,7 @@ if actualizar:
                         forecast = predict(
                             df=df,
                             models=models,
-                            days=
-                                FORECAST_DAYS,
+                            days=FORECAST_DAYS,
                             exog_future=
                                 exog_future,
                         )
@@ -1074,16 +1086,10 @@ if actualizar:
                             )
                         )
 
-                        relation_summary = (
-                            models.get(
-                                "relation_summary",
-                                pd.DataFrame(),
-                            )
-                        )
-
                     except Exception as exc:
 
                         models = {}
+
                         metrics = {}
 
                         forecast = (
@@ -1094,17 +1100,14 @@ if actualizar:
                             pd.DataFrame()
                         )
 
-                        relation_summary = (
-                            pd.DataFrame()
-                        )
-
                         st.error(
                             "No fue posible generar el modelo. "
                             f"Detalle: {exc}"
                         )
 
+
                 # ============================================
-                # SESSION STATE
+                # GUARDAR
                 # ============================================
 
                 st.session_state[
@@ -1148,10 +1151,6 @@ if actualizar:
                 ] = upstream_meta
 
                 st.session_state[
-                    "relation_summary"
-                ] = relation_summary
-
-                st.session_state[
                     "actualizado"
                 ] = datetime.now()
 
@@ -1167,13 +1166,13 @@ if actualizar:
 if "datos" not in st.session_state:
 
     st.info(
-        "Seleccione el período y presione "
+        "👆 Seleccioná el período arriba y presioná "
         "**Actualizar modelo**."
     )
 
 
 # ============================================================
-# RESULTADOS
+# MOSTRAR RESULTADOS
 # ============================================================
 
 else:
@@ -1223,22 +1222,19 @@ else:
         {},
     )
 
-    relation_summary = st.session_state.get(
-        "relation_summary",
-        pd.DataFrame(),
-    )
-
     actualizado = st.session_state.get(
         "actualizado"
     )
 
 
     # ========================================================
-    # SITUACIÓN SAN NICOLÁS
+    # NIVEL ACTUAL SAN NICOLÁS
     # ========================================================
 
     niveles = pd.to_numeric(
-        df["nivel"],
+        df[
+            "nivel"
+        ],
         errors="coerce",
     ).dropna()
 
@@ -1249,6 +1245,7 @@ else:
         )
 
         st.stop()
+
 
     nivel_actual = float(
         niveles.iloc[-1]
@@ -1266,16 +1263,27 @@ else:
         )
 
     ultima_fecha = (
-        df["datetime"].iloc[-1]
+        df[
+            "datetime"
+        ].iloc[-1]
     )
+
+
+    # ========================================================
+    # SITUACIÓN ACTUAL
+    # ========================================================
 
     st.subheader(
-        "📊 Situación observada · San Nicolás"
+        "📊 Situación actual"
     )
 
-    c1, c2, c3, c4, c5 = st.columns(
-        5
-    )
+
+    # --------------------------------------------------------
+    # Primera fila
+    # Más cómodo para celular que 5 columnas juntas
+    # --------------------------------------------------------
+
+    c1, c2 = st.columns(2)
 
     c1.metric(
         "Nivel actual",
@@ -1289,13 +1297,22 @@ else:
     )
 
     c2.metric(
-        "Mínimo",
-        f"{niveles.min():.2f} m",
+        "Tendencia",
+        texto_tendencia(
+            delta_actual
+        ),
     )
 
+
+    # --------------------------------------------------------
+    # Segunda fila
+    # --------------------------------------------------------
+
+    c3, c4, c5 = st.columns(3)
+
     c3.metric(
-        "Máximo",
-        f"{niveles.max():.2f} m",
+        "Mínimo",
+        f"{niveles.min():.2f} m",
     )
 
     c4.metric(
@@ -1304,11 +1321,10 @@ else:
     )
 
     c5.metric(
-        "Tendencia",
-        texto_tendencia(
-            delta_actual
-        ),
+        "Máximo",
+        f"{niveles.max():.2f} m",
     )
+
 
     st.caption(
         "Última observación INA: "
@@ -1325,23 +1341,26 @@ else:
     # ========================================================
 
     st.subheader(
-        "📈 Nivel observado y pronóstico · 15 días"
+        "📈 Pronóstico · 15 días"
     )
+
 
     fig = go.Figure()
 
+
     fig.add_trace(
         go.Scatter(
-            x=df["datetime"],
-            y=df["nivel"],
+            x=df[
+                "datetime"
+            ],
+            y=df[
+                "nivel"
+            ],
             mode="lines",
-            name=
-                "Nivel observado INA",
-            line=dict(
-                width=3,
-            ),
+            name="Observado",
         )
     )
+
 
     if (
         isinstance(
@@ -1359,20 +1378,16 @@ else:
                 y=forecast[
                     "prediction"
                 ],
-                mode=
-                    "lines+markers",
-                name=
-                    "Pronóstico 15 días",
-                line=dict(
-                    width=3,
-                ),
+                mode="lines+markers",
+                name="Pronóstico",
             )
         )
 
+
         if (
-            "lower"
+            "upper"
             in forecast.columns
-            and "upper"
+            and "lower"
             in forecast.columns
         ):
 
@@ -1386,7 +1401,7 @@ else:
                     ],
                     mode="lines",
                     line=dict(
-                        width=0,
+                        width=0
                     ),
                     showlegend=False,
                     hoverinfo="skip",
@@ -1403,28 +1418,34 @@ else:
                     ],
                     mode="lines",
                     line=dict(
-                        width=0,
+                        width=0
                     ),
                     fill="tonexty",
-                    name=
-                        "Incertidumbre",
+                    name="Incertidumbre",
                 )
             )
 
+
     fig.update_layout(
-        height=490,
-        hovermode=
-            "x unified",
+        height=420,
+        hovermode="x unified",
+        margin=dict(
+            l=10,
+            r=10,
+            t=35,
+            b=10,
+        ),
         legend=dict(
             orientation="h",
-            y=1.07,
+            y=1.08,
         ),
     )
 
+
     fig.update_xaxes(
         tickformat="%d/%m",
-        title_text="Fecha",
     )
+
 
     fig.update_yaxes(
         title_text="Nivel (m)",
@@ -1435,6 +1456,7 @@ else:
         dtick=Y_STEP,
     )
 
+
     st.plotly_chart(
         fig,
         use_container_width=True,
@@ -1442,12 +1464,13 @@ else:
 
 
     # ========================================================
-    # NIVELES AGUAS ARRIBA
+    # AGUAS ARRIBA
     # ========================================================
 
     st.subheader(
-        "🌊 Niveles aguas arriba"
+        "🌊 Estaciones aguas arriba"
     )
+
 
     tabla_upstream = (
         construir_tabla_upstream(
@@ -1455,6 +1478,7 @@ else:
             upstream_meta,
         )
     )
+
 
     if not tabla_upstream.empty:
 
@@ -1467,23 +1491,32 @@ else:
     else:
 
         st.info(
-            "No se recuperaron niveles aguas arriba."
+            "Todavía no se recuperaron niveles "
+            "de las estaciones aguas arriba."
         )
 
 
     # ========================================================
-    # PROPAGACIÓN HACIA SAN NICOLÁS
+    # RELACIÓN / PROPAGACIÓN
     # ========================================================
 
-    st.subheader(
-        "🛰️ Propagación hacia San Nicolás"
+    relation_summary = (
+        models.get(
+            "relation_summary",
+            pd.DataFrame(),
+        )
+        if isinstance(
+            models,
+            dict,
+        )
+        else pd.DataFrame()
     )
 
-    st.caption(
-        "El retardo representa el número de días con que "
-        "la señal histórica de una estación aguas arriba "
-        "presenta la mejor asociación con San Nicolás."
+
+    st.subheader(
+        "🛰️ Propagación aguas arriba → San Nicolás"
     )
+
 
     if (
         isinstance(
@@ -1497,50 +1530,31 @@ else:
             relation_summary.copy()
         )
 
-        rename = {
-            "estacion":
-                "Estación",
-
-            "nivel_actual":
-                "Nivel actual (m)",
-
-            "nivel_anterior":
-                "Nivel anterior (m)",
-
-            "variacion":
-                "Variación (m)",
-
-            "mejor_lag_dias":
-                "Retardo estimado (días)",
-
-            "correlacion":
-                "Correlación histórica",
-        }
 
         tabla_relacion = (
             tabla_relacion.rename(
-                columns=rename
+                columns={
+                    "estacion":
+                        "Estación",
+
+                    "nivel_actual":
+                        "Nivel actual",
+
+                    "nivel_anterior":
+                        "Nivel anterior",
+
+                    "variacion":
+                        "Variación",
+
+                    "mejor_lag_dias":
+                        "Retardo estimado",
+
+                    "correlacion":
+                        "Correlación",
+                }
             )
         )
 
-        for col in [
-            "Nivel actual (m)",
-            "Nivel anterior (m)",
-            "Variación (m)",
-            "Correlación histórica",
-        ]:
-
-            if col in tabla_relacion.columns:
-
-                tabla_relacion[col] = (
-                    pd.to_numeric(
-                        tabla_relacion[
-                            col
-                        ],
-                        errors="coerce",
-                    )
-                    .round(2)
-                )
 
         st.dataframe(
             tabla_relacion,
@@ -1551,331 +1565,10 @@ else:
     else:
 
         st.info(
-            "Todavía no existen suficientes datos "
-            "para calcular relaciones de propagación."
+            "Cuando tengamos datos suficientes "
+            "de las estaciones aguas arriba se calculará "
+            "el tiempo de propagación hacia San Nicolás."
         )
-
-
-    # ========================================================
-    # CORRIENTES → SAN NICOLÁS
-    # ========================================================
-
-    st.subheader(
-        "📡 Relación histórica · Corrientes → San Nicolás"
-    )
-
-    (
-        corr_relation,
-        corr_lag,
-        corr_value,
-    ) = construir_relacion_corrientes(
-        df,
-        upstream_history,
-        relation_summary,
-    )
-
-    corr_actual = None
-    corr_delta = None
-
-    if (
-        isinstance(
-            upstream_history,
-            pd.DataFrame,
-        )
-        and "nivel_corrientes"
-        in upstream_history.columns
-    ):
-
-        corr_values = (
-            pd.to_numeric(
-                upstream_history[
-                    "nivel_corrientes"
-                ],
-                errors="coerce",
-            )
-            .dropna()
-        )
-
-        if not corr_values.empty:
-
-            corr_actual = float(
-                corr_values.iloc[-1]
-            )
-
-            if len(corr_values) >= 2:
-
-                corr_delta = (
-                    corr_actual
-                    - float(
-                        corr_values.iloc[-2]
-                    )
-                )
-
-    rc1, rc2, rc3, rc4 = (
-        st.columns(
-            4
-        )
-    )
-
-    rc1.metric(
-        "Nivel Corrientes",
-        (
-            f"{corr_actual:.2f} m"
-            if corr_actual
-            is not None
-            else "Sin dato"
-        ),
-        (
-            f"{corr_delta:+.2f} m"
-            if corr_delta
-            is not None
-            else None
-        ),
-    )
-
-    rc2.metric(
-        "Retardo estimado",
-        (
-            f"{corr_lag} días"
-            if corr_lag
-            is not None
-            else "Sin dato"
-        ),
-    )
-
-    rc3.metric(
-        "Correlación histórica",
-        (
-            f"{corr_value:.2f}"
-            if corr_value
-            is not None
-            and np.isfinite(
-                corr_value
-            )
-            else "Sin dato"
-        ),
-    )
-
-    rc4.metric(
-        "Tendencia Corrientes",
-        texto_tendencia(
-            corr_delta
-        ),
-    )
-
-
-    # ========================================================
-    # GRÁFICO CORRIENTES / SAN NICOLÁS
-    # ========================================================
-
-    if (
-        not corr_relation.empty
-        and len(
-            corr_relation
-        ) >= 10
-    ):
-
-        relation_fig = go.Figure()
-
-        relation_fig.add_trace(
-            go.Scatter(
-                x=corr_relation[
-                    "nivel_corrientes"
-                ],
-                y=corr_relation[
-                    "nivel"
-                ],
-                mode="markers",
-                name=
-                    "Observaciones históricas",
-                hovertemplate=(
-                    "Corrientes: %{x:.2f} m"
-                    "<br>"
-                    "San Nicolás: %{y:.2f} m"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-        try:
-
-            x_values = (
-                corr_relation[
-                    "nivel_corrientes"
-                ]
-                .to_numpy(
-                    dtype=float
-                )
-            )
-
-            y_values = (
-                corr_relation[
-                    "nivel"
-                ]
-                .to_numpy(
-                    dtype=float
-                )
-            )
-
-            slope, intercept = (
-                np.polyfit(
-                    x_values,
-                    y_values,
-                    1,
-                )
-            )
-
-            x_line = np.linspace(
-                np.nanmin(
-                    x_values
-                ),
-                np.nanmax(
-                    x_values
-                ),
-                100,
-            )
-
-            y_line = (
-                intercept
-                + slope
-                * x_line
-            )
-
-            relation_fig.add_trace(
-                go.Scatter(
-                    x=x_line,
-                    y=y_line,
-                    mode="lines",
-                    name=
-                        "Relación histórica",
-                )
-            )
-
-        except Exception:
-
-            pass
-
-        relation_fig.update_layout(
-            height=420,
-            xaxis_title=(
-                "Nivel Corrientes (m) "
-                f"· desplazado {corr_lag} días"
-            ),
-            yaxis_title=
-                "Nivel San Nicolás (m)",
-        )
-
-        relation_fig.update_yaxes(
-            range=[
-                Y_MIN,
-                Y_MAX,
-            ],
-            dtick=Y_STEP,
-        )
-
-        st.plotly_chart(
-            relation_fig,
-            use_container_width=True,
-        )
-
-        st.caption(
-            "La relación se calcula desplazando las observaciones "
-            "de Corrientes según el retardo histórico estimado. "
-            "La correlación indica asociación estadística y no "
-            "implica por sí sola causalidad."
-        )
-
-
-    # ========================================================
-    # GRÁFICO TEMPORAL AGUAS ARRIBA
-    # ========================================================
-
-    if (
-        isinstance(
-            upstream_history,
-            pd.DataFrame,
-        )
-        and not upstream_history.empty
-    ):
-
-        level_cols = [
-            col
-            for col
-            in upstream_history.columns
-            if col.startswith(
-                "nivel_"
-            )
-        ]
-
-        if level_cols:
-
-            with st.expander(
-                "📈 Evolución de todas las estaciones aguas arriba",
-                expanded=False,
-            ):
-
-                upstream_fig = (
-                    go.Figure()
-                )
-
-                for col in level_cols:
-
-                    station_name = (
-                        col
-                        .replace(
-                            "nivel_",
-                            "",
-                        )
-                        .replace(
-                            "_",
-                            " ",
-                        )
-                        .title()
-                    )
-
-                    upstream_fig.add_trace(
-                        go.Scatter(
-                            x=upstream_history[
-                                "datetime"
-                            ],
-                            y=upstream_history[
-                                col
-                            ],
-                            mode="lines",
-                            name=
-                                station_name,
-                        )
-                    )
-
-                upstream_fig.update_layout(
-                    height=480,
-                    hovermode=
-                        "x unified",
-                    legend=dict(
-                        orientation="h",
-                        y=1.08,
-                    ),
-                )
-
-                upstream_fig.update_xaxes(
-                    tickformat="%d/%m",
-                )
-
-                upstream_fig.update_yaxes(
-                    title_text=
-                        "Nivel (m)",
-                    range=[
-                        Y_MIN,
-                        Y_MAX,
-                    ],
-                    dtick=
-                        Y_STEP,
-                )
-
-                st.plotly_chart(
-                    upstream_fig,
-                    use_container_width=True,
-                )
 
 
     # ========================================================
@@ -1886,6 +1579,7 @@ else:
         "📆 Tendencia extendida · 30 días"
     )
 
+
     if (
         isinstance(
             forecast30,
@@ -1894,13 +1588,13 @@ else:
         and not forecast30.empty
     ):
 
-        trend_fig = (
-            go.Figure()
-        )
+        trend_fig = go.Figure()
+
 
         recent = df.tail(
             30
         )
+
 
         trend_fig.add_trace(
             go.Scatter(
@@ -1911,14 +1605,15 @@ else:
                     "nivel"
                 ],
                 mode="lines",
-                name=
-                    "Observado",
+                name="Observado",
             )
         )
 
+
         f15 = forecast30.head(
-            15
+            FORECAST_DAYS
         )
+
 
         trend_fig.add_trace(
             go.Scatter(
@@ -1928,18 +1623,16 @@ else:
                 y=f15[
                     "prediction"
                 ],
-                mode=
-                    "lines+markers",
-                name=
-                    "Modelo 1–15 días",
+                mode="lines+markers",
+                name="Pronóstico 1–15 días",
             )
         )
 
-        f16_30 = (
-            forecast30.iloc[
-                15:
-            ]
-        )
+
+        f16_30 = forecast30.iloc[
+            FORECAST_DAYS:
+        ]
+
 
         if not f16_30.empty:
 
@@ -1951,39 +1644,36 @@ else:
                     y=f16_30[
                         "prediction"
                     ],
-                    mode=
-                        "lines+markers",
+                    mode="lines+markers",
                     line=dict(
-                        dash="dot",
+                        dash="dot"
                     ),
-                    name=
-                        "Tendencia 16–30 días",
+                    name="Tendencia 16–30 días",
                 )
             )
 
+
         trend_fig.update_layout(
-            height=420,
-            hovermode=
-                "x unified",
-            legend=dict(
-                orientation="h",
-                y=1.08,
+            height=390,
+            hovermode="x unified",
+            margin=dict(
+                l=10,
+                r=10,
+                t=30,
+                b=10,
             ),
         )
 
-        trend_fig.update_xaxes(
-            tickformat="%d/%m",
-        )
 
         trend_fig.update_yaxes(
-            title_text=
-                "Nivel (m)",
+            title_text="Nivel (m)",
             range=[
                 Y_MIN,
                 Y_MAX,
             ],
             dtick=Y_STEP,
         )
+
 
         st.plotly_chart(
             trend_fig,
@@ -1992,12 +1682,13 @@ else:
 
 
     # ========================================================
-    # PRECIPITACIÓN
+    # LLUVIA
     # ========================================================
 
     st.subheader(
         "🌧️ Precipitación prevista · 15 días"
     )
+
 
     if (
         isinstance(
@@ -2017,6 +1708,7 @@ else:
             .copy()
         )
 
+
         rain[
             "precip_mm"
         ] = pd.to_numeric(
@@ -2028,22 +1720,26 @@ else:
             0.0
         )
 
-        p1, p2, p3 = st.columns(
-            3
+
+        r1, r2 = st.columns(
+            2
         )
 
-        p1.metric(
-            "Acumulado previsto",
+
+        r1.metric(
+            "Acumulado",
             f"{rain['precip_mm'].sum():.1f} mm",
         )
 
-        p2.metric(
+
+        r2.metric(
             "Máximo diario",
             f"{rain['precip_mm'].max():.1f} mm",
         )
 
-        p3.metric(
-            "Días ≥ 1 mm",
+
+        st.metric(
+            "Días con lluvia ≥ 1 mm",
             int(
                 (
                     rain[
@@ -2054,7 +1750,9 @@ else:
             ),
         )
 
+
         rain_fig = go.Figure()
+
 
         rain_fig.add_trace(
             go.Bar(
@@ -2064,20 +1762,22 @@ else:
                 y=rain[
                     "precip_mm"
                 ],
-                name=
-                    "Precipitación",
+                name="Precipitación",
             )
         )
 
+
         rain_fig.update_layout(
-            height=310,
-            yaxis_title=
-                "mm/día",
+            height=280,
+            yaxis_title="mm/día",
+            margin=dict(
+                l=10,
+                r=10,
+                t=25,
+                b=10,
+            ),
         )
 
-        rain_fig.update_xaxes(
-            tickformat="%d/%m",
-        )
 
         st.plotly_chart(
             rain_fig,
@@ -2099,11 +1799,13 @@ else:
         "💧 Caudal"
     )
 
+
     if (
         isinstance(
             exog_history,
             pd.DataFrame,
         )
+        and not exog_history.empty
         and "caudal_m3s"
         in exog_history.columns
     ):
@@ -2115,6 +1817,7 @@ else:
             ]
         ].copy()
 
+
         q[
             "caudal_m3s"
         ] = pd.to_numeric(
@@ -2124,53 +1827,18 @@ else:
             errors="coerce",
         )
 
+
         q = q.dropna(
             subset=[
                 "caudal_m3s"
             ]
         )
 
+
         if not q.empty:
 
-            q_actual = float(
-                q[
-                    "caudal_m3s"
-                ].iloc[-1]
-            )
-
-            q_delta = None
-
-            if len(q) >= 2:
-
-                q_delta = (
-                    q_actual
-                    - float(
-                        q[
-                            "caudal_m3s"
-                        ].iloc[-2]
-                    )
-                )
-
-            q1, q2 = st.columns(
-                2
-            )
-
-            q1.metric(
-                "Caudal actual",
-                f"{q_actual:,.0f} m³/s",
-            )
-
-            q2.metric(
-                "Variación",
-                (
-                    f"{q_delta:+,.0f} m³/s"
-                    if q_delta
-                    is not None
-                    else "Sin comparación"
-                ),
-            )
-
             q_fig = go.Figure()
+
 
             q_fig.add_trace(
                 go.Scatter(
@@ -2181,20 +1849,22 @@ else:
                         "caudal_m3s"
                     ],
                     mode="lines",
-                    name=
-                        "Caudal",
+                    name="Caudal",
                 )
             )
 
+
             q_fig.update_layout(
-                height=340,
-                yaxis_title=
-                    "m³/s",
+                height=300,
+                yaxis_title="m³/s",
+                margin=dict(
+                    l=10,
+                    r=10,
+                    t=25,
+                    b=10,
+                ),
             )
 
-            q_fig.update_xaxes(
-                tickformat="%d/%m",
-            )
 
             st.plotly_chart(
                 q_fig,
@@ -2204,18 +1874,18 @@ else:
         else:
 
             st.info(
-                "No hay caudal válido disponible."
+                "No hay valores válidos de caudal."
             )
 
     else:
 
         st.info(
-            "No se encontró una serie de caudal."
+            "No se encontró serie de caudal."
         )
 
 
     # ========================================================
-    # ESCENARIO 60 DÍAS
+    # ESCENARIO DE ESTRÉS 60 DÍAS
     # ========================================================
 
     try:
@@ -2232,22 +1902,31 @@ else:
     except Exception as exc:
 
         st.warning(
-            "No fue posible construir el escenario de 60 días. "
-            f"{exc}"
+            "No fue posible construir "
+            "el escenario de 60 días. "
+            f"Detalle: {exc}"
         )
 
 
     # ========================================================
-    # MODELO / IMPORTANCIA
+    # DIAGNÓSTICO DEL MODELO
     # ========================================================
 
     with st.expander(
         "🧠 Diagnóstico del modelo"
     ):
 
-        rmse = metrics.get(
-            "RMSE"
+        rmse = (
+            metrics.get(
+                "RMSE"
+            )
+            if isinstance(
+                metrics,
+                dict,
+            )
+            else None
         )
+
 
         if rmse is not None:
 
@@ -2256,65 +1935,73 @@ else:
                 f"{float(rmse):.3f} m",
             )
 
-        st.write(
-            "**Usa precipitación:**",
-            (
-                "Sí"
-                if models.get(
-                    "uses_rain",
-                    False,
-                )
-                else "No"
-            ),
-        )
 
-        st.write(
-            "**Usa caudal:**",
-            (
-                "Sí"
-                if models.get(
-                    "uses_caudal",
-                    False,
-                )
-                else "No"
-            ),
-        )
-
-        st.write(
-            "**Usa niveles aguas arriba:**",
-            (
-                "Sí"
-                if models.get(
-                    "uses_upstream",
-                    False,
-                )
-                else "No"
-            ),
-        )
-
-        importance = models.get(
-            "importance"
-        )
-
-        if (
-            isinstance(
-                importance,
-                pd.DataFrame,
-            )
-            and not importance.empty
+        if isinstance(
+            models,
+            dict,
         ):
 
-            st.markdown(
-                "#### Variables más influyentes"
+            st.write(
+                "**Precipitación:**",
+                (
+                    "Incluida"
+                    if models.get(
+                        "uses_rain",
+                        False,
+                    )
+                    else "No disponible"
+                ),
             )
 
-            st.dataframe(
-                importance.head(
-                    20
+            st.write(
+                "**Caudal:**",
+                (
+                    "Incluido"
+                    if models.get(
+                        "uses_caudal",
+                        False,
+                    )
+                    else "No disponible"
                 ),
-                use_container_width=True,
-                hide_index=True,
             )
+
+            st.write(
+                "**Estaciones aguas arriba:**",
+                (
+                    "Incluidas"
+                    if models.get(
+                        "uses_upstream",
+                        False,
+                    )
+                    else "No disponibles"
+                ),
+            )
+
+
+            importance = models.get(
+                "importance"
+            )
+
+
+            if (
+                isinstance(
+                    importance,
+                    pd.DataFrame,
+                )
+                and not importance.empty
+            ):
+
+                st.markdown(
+                    "#### Variables más influyentes"
+                )
+
+                st.dataframe(
+                    importance.head(
+                        20
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
 
     # ========================================================
@@ -2324,7 +2011,7 @@ else:
     if actualizado:
 
         st.caption(
-            "Última actualización: "
+            "Última actualización de la aplicación: "
             f"{actualizado.strftime('%d/%m/%Y %H:%M')}"
         )
 
@@ -2336,13 +2023,16 @@ else:
 st.divider()
 
 st.caption(
-    f"Paraná · San Nicolás {APP_VERSION} | "
-    "Nivel observado: INA A5 | "
-    "Modelo experimental propio"
+    f"Paraná · San Nicolás · {APP_VERSION}"
+)
+
+st.caption(
+    "Nivel observado: INA A5 · "
+    "Pronóstico experimental"
 )
 
 st.warning(
-    "La información y las proyecciones son experimentales. "
-    "No reemplazan alertas ni pronósticos emitidos por "
+    "Las proyecciones son experimentales y no reemplazan "
+    "alertas, mediciones ni pronósticos emitidos por "
     "organismos oficiales."
 )
