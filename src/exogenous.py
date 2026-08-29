@@ -1,55 +1,54 @@
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # src/exogenous.py
-# V11.10.2 COMPLETO
+# V11.11 COMPLETO
 #
-# VARIABLES EXÓGENAS MULTIESTACIÓN
+# MOTOR EXÓGENO HIDROLÓGICO MULTIESTACIÓN
 #
-# CAMBIO PRINCIPAL V11.10.2
+# OBJETIVOS V11.11
 # ------------------------------------------------------------
-# VALIDACIÓN HIDROLÓGICA DE CAUDALES INA
+# 1. Lluvias históricas y pronosticadas para todo el corredor.
 #
-# - var_id = 4 -> Caudal
-# - Coincidencia real de estación
-# - Preferencia por río Paraná
-# - Penalización de tributarios / canales / arroyos
-# - Validación con observaciones reales
-# - Validación de magnitud para el Paraná troncal
-# - Mediana reciente mínima configurable
-# - Comparación aproximada con caudales vecinos
-# - No inventa caudales donde no existe serie confiable
-# - Selecciona como caudal principal la estación más próxima
-#   a San Nicolás QUE SUPERE TODAS LAS VALIDACIONES
+# 2. Caudales INA A5 var_id = 4.
 #
-# PRECIPITACIÓN:
-# - Corrientes
-# - Goya
-# - La Paz
-# - Paraná
-# - Diamante
-# - Rosario
-# - Villa Constitución
-# - San Nicolás
+# 3. Validación estricta de series del Paraná troncal.
 #
-# CAUDAL:
-# - q_corrientes
-# - q_goya
-# - q_la_paz
-# - q_parana
-# - q_diamante
-# - q_rosario
-# - q_villa_constitucion
-# - q_san_nicolas
+# 4. Reconstrucción controlada de caudales faltantes:
 #
-# COMPATIBILIDAD:
-# - precip_mm
-# - caudal_m3s
+#       observado
+#       interpolado
+#       estimado_vecinos
+#       estimado_ratio_historico
+#
+# 5. Mantener separada la procedencia del valor:
+#
+#       q_parana
+#       q_parana_source
+#       q_parana_quality
+#
+# 6. Generar señales para el modelo:
+#
+#       lluvia 3 / 7 / 15 / 30 días
+#       caudal cambios 1 / 3 / 7 / 14 días
+#       medias 3 / 7 / 14 / 30
+#       tendencia
+#       caudal relativo
+#
+# 7. Generar índice de presión hidrológica del corredor.
+#
+# 8. Mantener compatibilidad:
+#
+#       precip_mm
+#       caudal_m3s
 #
 # API:
+#
 # get_exogenous_data(start, end, forecast_days=60)
 #
 # retorna:
+#
 # history, future, metadata
+#
 # ============================================================
 
 
@@ -66,11 +65,11 @@ import requests
 # VERSIÓN
 # ============================================================
 
-VERSION = "V11.10.2"
+VERSION = "V11.11"
 
 
 # ============================================================
-# CONFIGURACIÓN GENERAL
+# CONFIGURACIÓN
 # ============================================================
 
 REQUEST_TIMEOUT = 45
@@ -79,20 +78,19 @@ MAX_FORECAST_DAYS = 60
 
 OPEN_METEO_REAL_FORECAST_DAYS = 16
 
-MIN_FLOW_OBSERVATIONS = 3
-
 FLOW_VALIDATION_DAYS = 180
 
 FLOW_HISTORY_BLOCK_YEARS = 5
 
+MIN_FLOW_OBSERVATIONS = 3
+
+MIN_RATIO_OVERLAP = 15
+
+SHORT_INTERPOLATION_LIMIT = 5
+
 
 # ============================================================
-# VALIDACIÓN DEL CAUDAL DEL PARANÁ TRONCAL
-#
-# Este proyecto sigue el cauce principal del Paraná entre
-# Corrientes y San Nicolás.
-#
-# No es un criterio universal para cualquier río.
+# LÍMITES HIDROLÓGICOS DEL PARANÁ TRONCAL
 # ============================================================
 
 PARANA_TRUNK_MIN_MEDIAN_FLOW = 500.0
@@ -101,9 +99,18 @@ PARANA_TRUNK_MIN_RECENT_FLOW = 250.0
 
 PARANA_TRUNK_MAX_FLOW = 100000.0
 
-FLOW_NEIGHBOR_RATIO_MIN = 0.15
 
-FLOW_NEIGHBOR_RATIO_MAX = 6.50
+# ============================================================
+# CONTROL DE ESTIMACIONES
+# ============================================================
+
+MIN_ESTIMATED_FLOW = 300.0
+
+MAX_ESTIMATED_FLOW = 100000.0
+
+MAX_NEIGHBOR_RATIO = 8.0
+
+MIN_NEIGHBOR_RATIO = 0.10
 
 
 # ============================================================
@@ -123,9 +130,7 @@ OPEN_METEO_FORECAST_URL = (
 # INA A5
 # ============================================================
 
-INA_A5_BASE_URL = (
-    "https://alerta.ina.gob.ar/a5"
-)
+INA_A5_BASE_URL = "https://alerta.ina.gob.ar/a5"
 
 INA_SERIES_GEOJSON_URL = (
     INA_A5_BASE_URL
@@ -154,6 +159,22 @@ STATIONS = [
     "Villa Constitución",
     "San Nicolás",
 ]
+
+
+# ============================================================
+# ORDEN HIDROLÓGICO
+# ============================================================
+
+STATION_ORDER = {
+    "Corrientes": 0,
+    "Goya": 1,
+    "La Paz": 2,
+    "Paraná": 3,
+    "Diamante": 4,
+    "Rosario": 5,
+    "Villa Constitución": 6,
+    "San Nicolás": 7,
+}
 
 
 # ============================================================
@@ -210,23 +231,17 @@ RAIN_POINTS = {
 
 RAIN_COLUMNS = {
 
-    "Corrientes":
-        "rain_corrientes",
+    "Corrientes": "rain_corrientes",
 
-    "Goya":
-        "rain_goya",
+    "Goya": "rain_goya",
 
-    "La Paz":
-        "rain_la_paz",
+    "La Paz": "rain_la_paz",
 
-    "Paraná":
-        "rain_parana",
+    "Paraná": "rain_parana",
 
-    "Diamante":
-        "rain_diamante",
+    "Diamante": "rain_diamante",
 
-    "Rosario":
-        "rain_rosario",
+    "Rosario": "rain_rosario",
 
     "Villa Constitución":
         "rain_villa_constitucion",
@@ -238,23 +253,17 @@ RAIN_COLUMNS = {
 
 FLOW_COLUMNS = {
 
-    "Corrientes":
-        "q_corrientes",
+    "Corrientes": "q_corrientes",
 
-    "Goya":
-        "q_goya",
+    "Goya": "q_goya",
 
-    "La Paz":
-        "q_la_paz",
+    "La Paz": "q_la_paz",
 
-    "Paraná":
-        "q_parana",
+    "Paraná": "q_parana",
 
-    "Diamante":
-        "q_diamante",
+    "Diamante": "q_diamante",
 
-    "Rosario":
-        "q_rosario",
+    "Rosario": "q_rosario",
 
     "Villa Constitución":
         "q_villa_constitucion",
@@ -265,10 +274,7 @@ FLOW_COLUMNS = {
 
 
 # ============================================================
-# PRIORIDAD DEL CAUDAL PRINCIPAL
-#
-# La prioridad es geográfica.
-# Pero sólo se utiliza una estación si su serie fue validada.
+# PRIORIDAD PARA CAUDAL PRINCIPAL
 # ============================================================
 
 FLOW_PRIORITY = [
@@ -324,8 +330,8 @@ STATION_ALIASES = {
     "Villa Constitución": [
         "villa constitucion",
         "villa constitución",
-        "v constitucion",
-        "v. constitucion",
+        "puerto villa constitucion",
+        "puerto villa constitución",
     ],
 
     "San Nicolás": [
@@ -338,7 +344,7 @@ STATION_ALIASES = {
 
 
 # ============================================================
-# TÉRMINOS QUE INDICAN QUE NO ES EL PARANÁ TRONCAL
+# TÉRMINOS A PENALIZAR
 # ============================================================
 
 NON_TRUNK_TERMS = [
@@ -346,11 +352,9 @@ NON_TRUNK_TERMS = [
     "canal",
     "riacho",
     "laguna",
-    "afluente",
     "tributario",
-    "desembocadura",
+    "afluente",
     "brazo",
-    "aliviador",
     "salado",
     "carcarana",
     "carcaraña",
@@ -363,6 +367,19 @@ NON_TRUNK_TERMS = [
 ]
 
 
+BAD_STATION_TERMS = [
+    "meteorologica",
+    "meteorologico",
+    "agrometeorologica",
+    "aeropuerto",
+    "inta",
+    "escuela",
+    "pluviometrica",
+    "precipitacion",
+    "lluvia",
+]
+
+
 # ============================================================
 # UTILIDADES
 # ============================================================
@@ -372,9 +389,7 @@ def _normalize_text(value):
     if value is None:
         return ""
 
-    text = str(
-        value
-    ).lower().strip()
+    text = str(value).lower().strip()
 
     text = unicodedata.normalize(
         "NFD",
@@ -384,9 +399,8 @@ def _normalize_text(value):
     text = "".join(
         ch
         for ch in text
-        if unicodedata.category(
-            ch
-        ) != "Mn"
+        if unicodedata.category(ch)
+        != "Mn"
     )
 
     text = re.sub(
@@ -396,6 +410,40 @@ def _normalize_text(value):
     )
 
     return text.strip()
+
+
+def _safe_float(
+    value,
+    default=np.nan,
+):
+
+    try:
+
+        value = float(value)
+
+        if np.isfinite(value):
+            return value
+
+    except Exception:
+        pass
+
+    return default
+
+
+def _safe_int(
+    value,
+    default=0,
+):
+
+    try:
+
+        return int(
+            float(value)
+        )
+
+    except Exception:
+
+        return default
 
 
 def _normalize_date(value):
@@ -429,47 +477,6 @@ def _to_naive_datetime(values):
     )
 
 
-def _safe_float(
-    value,
-    default=np.nan,
-):
-
-    try:
-
-        value = float(
-            value
-        )
-
-        if np.isfinite(
-            value
-        ):
-
-            return value
-
-    except Exception:
-        pass
-
-    return default
-
-
-def _safe_int(
-    value,
-    default=0,
-):
-
-    try:
-
-        return int(
-            float(
-                value
-            )
-        )
-
-    except Exception:
-
-        return default
-
-
 def _daily_range(
     start,
     end,
@@ -495,7 +502,7 @@ def _daily_range(
 
 
 # ============================================================
-# PRECIPITACIÓN HISTÓRICA
+# LLUVIA HISTÓRICA POR ESTACIÓN
 # ============================================================
 
 def _get_rain_history_station(
@@ -517,14 +524,10 @@ def _get_rain_history_station(
             point["lon"],
 
         "start_date":
-            _normalize_date(
-                start
-            ),
+            _normalize_date(start),
 
         "end_date":
-            _normalize_date(
-                end
-            ),
+            _normalize_date(end),
 
         "daily":
             "precipitation_sum",
@@ -553,7 +556,7 @@ def _get_rain_history_station(
         []
     )
 
-    precip = daily.get(
+    precipitation = daily.get(
         "precipitation_sum",
         []
     )
@@ -577,7 +580,7 @@ def _get_rain_history_station(
             col:
                 pd.to_numeric(
                     pd.Series(
-                        precip
+                        precipitation
                     ),
                     errors="coerce",
                 ),
@@ -606,33 +609,23 @@ def _get_rain_history_station(
         col
     ] = (
         pd.to_numeric(
-            result[
-                col
-            ],
+            result[col],
             errors="coerce",
         )
-        .fillna(
-            0.0
-        )
-        .clip(
-            lower=0.0
-        )
+        .fillna(0.0)
+        .clip(lower=0.0)
     )
 
     return (
         result
         .dropna(
-            subset=[
-                "datetime"
-            ]
+            subset=["datetime"]
         )
         .sort_values(
             "datetime"
         )
         .drop_duplicates(
-            subset=[
-                "datetime"
-            ],
+            subset=["datetime"],
             keep="last",
         )
         .reset_index(
@@ -649,14 +642,6 @@ def get_rain_history(
     start,
     end,
 ):
-
-    start = _normalize_date(
-        start
-    )
-
-    end = _normalize_date(
-        end
-    )
 
     base = pd.DataFrame(
         {
@@ -698,14 +683,11 @@ def get_rain_history(
 
             if station_df.empty:
 
-                base[
-                    col
-                ] = np.nan
+                base[col] = np.nan
 
                 metadata[
                     "stations"
                 ][station] = {
-
                     "status":
                         "sin_datos",
 
@@ -723,9 +705,7 @@ def get_rain_history(
 
             count = int(
                 pd.to_numeric(
-                    base[
-                        col
-                    ],
+                    base[col],
                     errors="coerce",
                 )
                 .notna()
@@ -755,9 +735,7 @@ def get_rain_history(
 
             if col not in base.columns:
 
-                base[
-                    col
-                ] = np.nan
+                base[col] = np.nan
 
             metadata[
                 "stations"
@@ -766,48 +744,29 @@ def get_rain_history(
                 "status":
                     "error",
 
-                "error":
-                    str(
-                        exc
-                    ),
-
                 "records":
                     0,
+
+                "error":
+                    str(exc),
             }
 
-    available_cols = [
-
-        RAIN_COLUMNS[
-            station
-        ]
-
+    rain_cols = [
+        RAIN_COLUMNS[station]
         for station in STATIONS
-
         if (
-            RAIN_COLUMNS[
-                station
-            ]
+            RAIN_COLUMNS[station]
             in base.columns
-            and pd.to_numeric(
-                base[
-                    RAIN_COLUMNS[
-                        station
-                    ]
-                ],
-                errors="coerce",
-            )
-            .notna()
-            .any()
         )
     ]
 
-    if available_cols:
+    if rain_cols:
 
         base[
             "precip_mm"
         ] = (
             base[
-                available_cols
+                rain_cols
             ]
             .apply(
                 pd.to_numeric,
@@ -832,7 +791,7 @@ def get_rain_history(
 
 
 # ============================================================
-# PRONÓSTICO DE LLUVIA
+# PRONÓSTICO DE LLUVIA POR ESTACIÓN
 # ============================================================
 
 def _get_rain_forecast_station(
@@ -881,7 +840,7 @@ def _get_rain_forecast_station(
         []
     )
 
-    precip = daily.get(
+    precipitation = daily.get(
         "precipitation_sum",
         []
     )
@@ -905,7 +864,7 @@ def _get_rain_forecast_station(
             col:
                 pd.to_numeric(
                     pd.Series(
-                        precip
+                        precipitation
                     ),
                     errors="coerce",
                 ),
@@ -915,9 +874,7 @@ def _get_rain_forecast_station(
     result[
         "datetime"
     ] = _to_naive_datetime(
-        result[
-            "datetime"
-        ]
+        result["datetime"]
     )
 
     result[
@@ -934,33 +891,23 @@ def _get_rain_forecast_station(
         col
     ] = (
         pd.to_numeric(
-            result[
-                col
-            ],
+            result[col],
             errors="coerce",
         )
-        .fillna(
-            0.0
-        )
-        .clip(
-            lower=0.0
-        )
+        .fillna(0.0)
+        .clip(lower=0.0)
     )
 
     return (
         result
         .dropna(
-            subset=[
-                "datetime"
-            ]
+            subset=["datetime"]
         )
         .sort_values(
             "datetime"
         )
         .drop_duplicates(
-            subset=[
-                "datetime"
-            ],
+            subset=["datetime"],
             keep="last",
         )
         .reset_index(
@@ -969,6 +916,10 @@ def _get_rain_forecast_station(
     )
 
 
+# ============================================================
+# PRONÓSTICO DE LLUVIA
+# ============================================================
+
 def get_rain_forecast(
     start_date,
     forecast_days=60,
@@ -976,9 +927,7 @@ def get_rain_forecast(
 
     forecast_days = min(
         max(
-            int(
-                forecast_days
-            ),
+            int(forecast_days),
             1,
         ),
         MAX_FORECAST_DAYS,
@@ -992,9 +941,7 @@ def get_rain_forecast(
 
         start=
             start_date
-            + pd.Timedelta(
-                days=1
-            ),
+            + pd.Timedelta(days=1),
 
         periods=
             forecast_days,
@@ -1022,13 +969,6 @@ def get_rain_forecast(
 
         "available_stations":
             [],
-
-        "after_real_forecast":
-            (
-                "Los valores posteriores al horizonte real "
-                "meteorológico no deben interpretarse como "
-                "pronóstico determinista."
-            ),
     }
 
     for station in STATIONS:
@@ -1047,9 +987,7 @@ def get_rain_forecast(
 
             if station_df.empty:
 
-                base[
-                    col
-                ] = 0.0
+                base[col] = 0.0
 
                 metadata[
                     "stations"
@@ -1072,22 +1010,12 @@ def get_rain_forecast(
 
             real_count = int(
                 pd.to_numeric(
-                    base[
-                        col
-                    ],
+                    base[col],
                     errors="coerce",
                 )
                 .notna()
                 .sum()
             )
-
-            if real_count > 0:
-
-                metadata[
-                    "available_stations"
-                ].append(
-                    station
-                )
 
             metadata[
                 "stations"
@@ -1104,25 +1032,25 @@ def get_rain_forecast(
                     real_count,
             }
 
-            base[
-                col
-            ] = (
+            if real_count > 0:
+
+                metadata[
+                    "available_stations"
+                ].append(
+                    station
+                )
+
+            base[col] = (
                 pd.to_numeric(
-                    base[
-                        col
-                    ],
+                    base[col],
                     errors="coerce",
                 )
-                .fillna(
-                    0.0
-                )
+                .fillna(0.0)
             )
 
         except Exception as exc:
 
-            base[
-                col
-            ] = 0.0
+            base[col] = 0.0
 
             metadata[
                 "stations"
@@ -1131,54 +1059,34 @@ def get_rain_forecast(
                 "status":
                     "error",
 
-                "error":
-                    str(
-                        exc
-                    ),
-
                 "records":
                     0,
+
+                "error":
+                    str(exc),
             }
 
-    available_cols = [
-
-        RAIN_COLUMNS[
-            station
-        ]
-
+    rain_cols = [
+        RAIN_COLUMNS[station]
         for station in STATIONS
-
-        if RAIN_COLUMNS[
-            station
-        ] in base.columns
     ]
 
-    if available_cols:
-
+    base[
+        "precip_mm"
+    ] = (
         base[
-            "precip_mm"
-        ] = (
-            base[
-                available_cols
-            ]
-            .apply(
-                pd.to_numeric,
-                errors="coerce",
-            )
-            .mean(
-                axis=1,
-                skipna=True,
-            )
-            .fillna(
-                0.0
-            )
+            rain_cols
+        ]
+        .apply(
+            pd.to_numeric,
+            errors="coerce",
         )
-
-    else:
-
-        base[
-            "precip_mm"
-        ] = 0.0
+        .mean(
+            axis=1,
+            skipna=True,
+        )
+        .fillna(0.0)
+    )
 
     return (
         base,
@@ -1263,9 +1171,7 @@ def get_ina_catalog():
                 coords,
                 list,
             )
-            and len(
-                coords
-            ) >= 2
+            and len(coords) >= 2
         ):
 
             lon = _safe_float(
@@ -1278,11 +1184,6 @@ def get_ina_catalog():
 
         rows.append(
             {
-                "id":
-                    props.get(
-                        "id"
-                    ),
-
                 "series_id":
                     _safe_int(
                         props.get(
@@ -1294,11 +1195,6 @@ def get_ina_catalog():
                 "nombre":
                     props.get(
                         "nombre"
-                    ),
-
-                "estacion_id":
-                    props.get(
-                        "estacion_id"
                     ),
 
                 "rio":
@@ -1350,19 +1246,9 @@ def get_ina_catalog():
                         0,
                     ),
 
-                "data_availability":
-                    props.get(
-                        "data_availability"
-                    ),
-
                 "fuente":
                     props.get(
                         "fuente"
-                    ),
-
-                "public":
-                    props.get(
-                        "public"
                     ),
 
                 "longitude":
@@ -1387,7 +1273,7 @@ def get_ina_catalog():
 
 
 # ============================================================
-# PUNTAJE DE ESTACIÓN
+# COINCIDENCIA DE ESTACIÓN
 # ============================================================
 
 def _station_match_score(
@@ -1405,9 +1291,7 @@ def _station_match_score(
 
     aliases = STATION_ALIASES.get(
         station,
-        [
-            station
-        ],
+        [station],
     )
 
     score = -1000
@@ -1425,7 +1309,7 @@ def _station_match_score(
 
             score = max(
                 score,
-                130,
+                150,
             )
 
         elif name_norm.startswith(
@@ -1434,53 +1318,39 @@ def _station_match_score(
 
             score = max(
                 score,
-                110,
+                125,
             )
 
         elif re.search(
             r"\b"
-            + re.escape(
-                alias_norm
-            )
+            + re.escape(alias_norm)
             + r"\b",
             name_norm,
         ):
 
             score = max(
                 score,
-                90,
+                100,
             )
 
         elif alias_norm in name_norm:
 
             score = max(
                 score,
-                65,
+                70,
             )
 
-    bad_terms = [
-        "meteorologica",
-        "meteorologico",
-        "aeropuerto",
-        "inta",
-        "escuela",
-        "agrometeorologica",
-        "pluviometrica",
-        "precipitacion",
-        "lluvia",
-    ]
-
-    for bad in bad_terms:
+    for bad in BAD_STATION_TERMS:
 
         if bad in name_norm:
 
-            score -= 100
+            score -= 150
 
     return score
 
 
 # ============================================================
-# PUNTAJE DEL RÍO
+# VALIDACIÓN DEL RÍO
 # ============================================================
 
 def _river_score(
@@ -1499,24 +1369,19 @@ def _river_score(
 
     if "parana" in river_norm:
 
-        score += 80
+        score += 100
 
     for term in NON_TRUNK_TERMS:
 
-        term_norm = _normalize_text(
-            term
-        )
+        if (
+            _normalize_text(term)
+            in river_norm
+        ):
 
-        if term_norm in river_norm:
-
-            score -= 90
+            score -= 150
 
     return score
 
-
-# ============================================================
-# VERIFICAR SI PARECE PARANÁ TRONCAL
-# ============================================================
 
 def _is_parana_trunk_candidate(
     river,
@@ -1537,24 +1402,14 @@ def _is_parana_trunk_candidate(
         + name_norm
     )
 
-    # Si se especifica Paraná explícitamente es buena señal.
-    has_parana = (
-        "parana"
-        in combined
-    )
+    for term in NON_TRUNK_TERMS:
 
-    # Rechazar si aparecen términos de curso secundario.
-    has_bad_term = any(
-        _normalize_text(
-            term
-        )
-        in combined
-        for term in NON_TRUNK_TERMS
-    )
+        if (
+            _normalize_text(term)
+            in combined
+        ):
 
-    if has_bad_term:
-
-        return False
+            return False
 
     if river_norm:
 
@@ -1563,9 +1418,7 @@ def _is_parana_trunk_candidate(
             in river_norm
         )
 
-    # Si el campo río está vacío, no podemos descartarlo
-    # sólo por eso; se validará por magnitud.
-    return has_parana or not river_norm
+    return True
 
 
 # ============================================================
@@ -1603,18 +1456,6 @@ def candidatos_caudal_estacion(
             )
     )
 
-    candidates[
-        "river_score"
-    ] = candidates[
-        "rio"
-    ].apply(
-        _river_score
-    )
-
-    # --------------------------------------------------------
-    # Debe coincidir realmente con la estación.
-    # --------------------------------------------------------
-
     candidates = candidates[
         candidates[
             "station_score"
@@ -1627,25 +1468,23 @@ def candidatos_caudal_estacion(
         return pd.DataFrame()
 
     candidates[
+        "river_score"
+    ] = candidates[
+        "rio"
+    ].apply(
+        _river_score
+    )
+
+    candidates[
         "is_parana_trunk"
     ] = candidates.apply(
         lambda row:
             _is_parana_trunk_candidate(
-                row.get(
-                    "rio"
-                ),
-                row.get(
-                    "nombre"
-                ),
+                row.get("rio"),
+                row.get("nombre"),
             ),
         axis=1,
     )
-
-    # --------------------------------------------------------
-    # Preferir Paraná troncal.
-    # No se elimina aún el candidato si el campo río viene
-    # vacío, porque la prueba de caudal decidirá luego.
-    # --------------------------------------------------------
 
     candidates[
         "trunk_score"
@@ -1653,48 +1492,8 @@ def candidatos_caudal_estacion(
         candidates[
             "is_parana_trunk"
         ],
-        60,
-        -100,
-    )
-
-    candidates[
-        "start_dt"
-    ] = pd.to_datetime(
-        candidates[
-            "timestart"
-        ],
-        errors="coerce",
-        utc=True,
-    )
-
-    candidates[
-        "end_dt"
-    ] = pd.to_datetime(
-        candidates[
-            "timeend"
-        ],
-        errors="coerce",
-        utc=True,
-    )
-
-    candidates[
-        "proc_score"
-    ] = (
-        pd.to_numeric(
-            candidates[
-                "proc_id"
-            ],
-            errors="coerce",
-        )
-        .fillna(
-            0
-        )
-        .apply(
-            lambda value:
-                10
-                if value > 0
-                else 0
-        )
+        70,
+        -150,
     )
 
     candidates[
@@ -1702,107 +1501,15 @@ def candidatos_caudal_estacion(
     ] = (
         np.log10(
             pd.to_numeric(
-                candidates[
-                    "count"
-                ],
+                candidates["count"],
                 errors="coerce",
             )
-            .fillna(
-                0
-            )
-            .clip(
-                lower=0
-            )
+            .fillna(0)
+            .clip(lower=0)
             + 1
         )
-        * 6.0
+        * 7.0
     )
-
-    candidates[
-        "recency_score"
-    ] = 0.0
-
-    valid_end = candidates[
-        "end_dt"
-    ].notna()
-
-    if valid_end.any():
-
-        now = pd.Timestamp.now(
-            tz="UTC"
-        )
-
-        age_days = (
-            now
-            - candidates.loc[
-                valid_end,
-                "end_dt"
-            ]
-        ).dt.days
-
-        candidates.loc[
-            valid_end,
-            "recency_score"
-        ] = np.where(
-            age_days <= 60,
-            25,
-            np.where(
-                age_days <= 365,
-                15,
-                np.where(
-                    age_days <= 365 * 5,
-                    5,
-                    0,
-                ),
-            ),
-        )
-
-    candidates[
-        "overlap_score"
-    ] = 0.0
-
-    if (
-        start is not None
-        and end is not None
-    ):
-
-        request_start = pd.Timestamp(
-            _normalize_date(
-                start
-            ),
-            tz="UTC",
-        )
-
-        request_end = pd.Timestamp(
-            _normalize_date(
-                end
-            ),
-            tz="UTC",
-        )
-
-        overlap = (
-            candidates[
-                "start_dt"
-            ].fillna(
-                request_start
-            )
-            <= request_end
-        ) & (
-            candidates[
-                "end_dt"
-            ].fillna(
-                request_end
-            )
-            >= request_start
-        )
-
-        candidates[
-            "overlap_score"
-        ] = np.where(
-            overlap,
-            20,
-            -60,
-        )
 
     candidates[
         "score"
@@ -1820,19 +1527,7 @@ def candidatos_caudal_estacion(
         ]
         +
         candidates[
-            "proc_score"
-        ]
-        +
-        candidates[
             "count_score"
-        ]
-        +
-        candidates[
-            "recency_score"
-        ]
-        +
-        candidates[
-            "overlap_score"
         ]
     )
 
@@ -1855,12 +1550,10 @@ def candidatos_caudal_estacion(
 
 
 # ============================================================
-# EXTRAER REGISTROS A5
+# PARSER INA
 # ============================================================
 
-def _extract_records(
-    obj,
-):
+def _extract_records(obj):
 
     records = []
 
@@ -1877,10 +1570,8 @@ def _extract_records(
             ):
 
                 keys = {
-                    str(
-                        key
-                    ).lower()
-                    for key in item.keys()
+                    str(k).lower()
+                    for k in item.keys()
                 }
 
                 date_keys = {
@@ -1931,10 +1622,7 @@ def _extract_records(
 
             if isinstance(
                 value,
-                (
-                    list,
-                    dict,
-                ),
+                (dict, list),
             ):
 
                 records.extend(
@@ -1963,16 +1651,12 @@ def _record_datetime(
             continue
 
         dt = pd.to_datetime(
-            record.get(
-                key
-            ),
+            record.get(key),
             errors="coerce",
             utc=True,
         )
 
-        if pd.isna(
-            dt
-        ):
+        if pd.isna(dt):
             continue
 
         try:
@@ -2012,14 +1696,10 @@ def _record_value(
             continue
 
         value = _safe_float(
-            record.get(
-                key
-            )
+            record.get(key)
         )
 
-        if np.isfinite(
-            value
-        ):
+        if np.isfinite(value):
 
             return value
 
@@ -2027,7 +1707,7 @@ def _record_value(
 
 
 # ============================================================
-# CONSULTA INA
+# CONSULTA INA A5
 # ============================================================
 
 def query_caudal_series(
@@ -2042,19 +1722,13 @@ def query_caudal_series(
             "puntual",
 
         "series_id":
-            int(
-                series_id
-            ),
+            int(series_id),
 
         "timestart":
-            _normalize_date(
-                start
-            ),
+            _normalize_date(start),
 
         "timeend":
-            _normalize_date(
-                end
-            ),
+            _normalize_date(end),
     }
 
     response = requests.get(
@@ -2068,10 +1742,10 @@ def query_caudal_series(
 
     response.raise_for_status()
 
-    data = response.json()
+    payload = response.json()
 
     records = _extract_records(
-        data
+        payload
     )
 
     rows = []
@@ -2086,23 +1760,16 @@ def query_caudal_series(
             record
         )
 
-        if (
-            pd.isna(
-                dt
-            )
-            or not np.isfinite(
-                value
-            )
-        ):
+        if pd.isna(dt):
+            continue
 
+        if not np.isfinite(value):
             continue
 
         if value < 0:
-
             continue
 
         if value > PARANA_TRUNK_MAX_FLOW:
-
             continue
 
         rows.append(
@@ -2145,15 +1812,14 @@ def query_caudal_series(
         errors="coerce",
     )
 
-    result = result.dropna(
-        subset=[
-            "datetime",
-            "value",
-        ]
-    )
-
     return (
         result
+        .dropna(
+            subset=[
+                "datetime",
+                "value",
+            ]
+        )
         .sort_values(
             "datetime"
         )
@@ -2170,7 +1836,7 @@ def query_caudal_series(
 
 
 # ============================================================
-# ESTADÍSTICAS DE VALIDACIÓN
+# VALIDAR CAUDAL
 # ============================================================
 
 def _flow_statistics(
@@ -2180,43 +1846,21 @@ def _flow_statistics(
     if (
         df is None
         or df.empty
-        or "value"
-        not in df.columns
     ):
 
         return {
-            "records":
-                0,
-
-            "median":
-                np.nan,
-
-            "mean":
-                np.nan,
-
-            "min":
-                np.nan,
-
-            "max":
-                np.nan,
-
-            "last":
-                np.nan,
+            "records": 0,
+            "median": np.nan,
+            "mean": np.nan,
+            "min": np.nan,
+            "max": np.nan,
+            "last": np.nan,
         }
 
     values = (
         pd.to_numeric(
-            df[
-                "value"
-            ],
+            df["value"],
             errors="coerce",
-        )
-        .replace(
-            [
-                np.inf,
-                -np.inf,
-            ],
-            np.nan,
         )
         .dropna()
     )
@@ -2224,33 +1868,18 @@ def _flow_statistics(
     if values.empty:
 
         return {
-            "records":
-                0,
-
-            "median":
-                np.nan,
-
-            "mean":
-                np.nan,
-
-            "min":
-                np.nan,
-
-            "max":
-                np.nan,
-
-            "last":
-                np.nan,
+            "records": 0,
+            "median": np.nan,
+            "mean": np.nan,
+            "min": np.nan,
+            "max": np.nan,
+            "last": np.nan,
         }
 
     return {
 
         "records":
-            int(
-                len(
-                    values
-                )
-            ),
+            int(len(values)),
 
         "median":
             float(
@@ -2274,16 +1903,10 @@ def _flow_statistics(
 
         "last":
             float(
-                values.iloc[
-                    -1
-                ]
+                values.iloc[-1]
             ),
     }
 
-
-# ============================================================
-# VALIDACIÓN HIDROLÓGICA DE UNA SERIE
-# ============================================================
 
 def _validate_trunk_flow_series(
     candidate,
@@ -2298,56 +1921,25 @@ def _validate_trunk_flow_series(
 
     valid = True
 
-    name = candidate.get(
-        "nombre"
-    )
-
-    river = candidate.get(
-        "rio"
-    )
-
-    # --------------------------------------------------------
-    # Cantidad mínima.
-    # --------------------------------------------------------
-
     if (
-        stats[
-            "records"
-        ]
+        stats["records"]
         < MIN_FLOW_OBSERVATIONS
     ):
 
         valid = False
-
         reasons.append(
             "pocas_observaciones"
         )
 
-    # --------------------------------------------------------
-    # Curso principal.
-    # --------------------------------------------------------
-
-    trunk_candidate = (
-        _is_parana_trunk_candidate(
-            river,
-            name,
-        )
-    )
-
-    if not trunk_candidate:
+    if not _is_parana_trunk_candidate(
+        candidate.get("rio"),
+        candidate.get("nombre"),
+    ):
 
         valid = False
-
         reasons.append(
             "no_parana_troncal"
         )
-
-    # --------------------------------------------------------
-    # Magnitud.
-    #
-    # Esto evita aceptar 8 m3/s, 20 m3/s, etc.
-    # como si fueran el caudal del Paraná principal.
-    # --------------------------------------------------------
 
     median = stats[
         "median"
@@ -2358,9 +1950,7 @@ def _validate_trunk_flow_series(
     ]
 
     if (
-        not np.isfinite(
-            median
-        )
+        not np.isfinite(median)
         or median
         < PARANA_TRUNK_MIN_MEDIAN_FLOW
     ):
@@ -2372,9 +1962,7 @@ def _validate_trunk_flow_series(
         )
 
     if (
-        np.isfinite(
-            last
-        )
+        np.isfinite(last)
         and last
         < PARANA_TRUNK_MIN_RECENT_FLOW
     ):
@@ -2385,35 +1973,10 @@ def _validate_trunk_flow_series(
             "caudal_actual_demasiado_bajo"
         )
 
-    if (
-        np.isfinite(
-            stats[
-                "max"
-            ]
-        )
-        and stats[
-            "max"
-        ]
-        > PARANA_TRUNK_MAX_FLOW
-    ):
-
-        valid = False
-
-        reasons.append(
-            "caudal_maximo_fuera_rango"
-        )
-
     return {
 
         "valid":
-            bool(
-                valid
-            ),
-
-        "is_parana_trunk":
-            bool(
-                trunk_candidate
-            ),
+            bool(valid),
 
         "reasons":
             reasons,
@@ -2423,104 +1986,7 @@ def _validate_trunk_flow_series(
 
 
 # ============================================================
-# VENTANA DE VALIDACIÓN
-# ============================================================
-
-def _candidate_validation_window(
-    candidate,
-    requested_start,
-    requested_end,
-):
-
-    request_start = pd.to_datetime(
-        requested_start
-    ).normalize()
-
-    request_end = pd.to_datetime(
-        requested_end
-    ).normalize()
-
-    catalog_start = pd.to_datetime(
-        candidate.get(
-            "timestart"
-        ),
-        errors="coerce",
-        utc=True,
-    )
-
-    catalog_end = pd.to_datetime(
-        candidate.get(
-            "timeend"
-        ),
-        errors="coerce",
-        utc=True,
-    )
-
-    if not pd.isna(
-        catalog_start
-    ):
-
-        catalog_start = (
-            catalog_start
-            .tz_localize(
-                None
-            )
-            .normalize()
-        )
-
-    else:
-
-        catalog_start = request_start
-
-    if not pd.isna(
-        catalog_end
-    ):
-
-        catalog_end = (
-            catalog_end
-            .tz_localize(
-                None
-            )
-            .normalize()
-        )
-
-    else:
-
-        catalog_end = request_end
-
-    overlap_start = max(
-        request_start,
-        catalog_start,
-    )
-
-    overlap_end = min(
-        request_end,
-        catalog_end,
-    )
-
-    if overlap_end < overlap_start:
-
-        return None
-
-    validation_start = max(
-
-        overlap_start,
-
-        overlap_end
-        - pd.Timedelta(
-            days=
-                FLOW_VALIDATION_DAYS
-        ),
-    )
-
-    return (
-        validation_start,
-        overlap_end,
-    )
-
-
-# ============================================================
-# SELECCIONAR SERIE DE CAUDAL
+# SELECCIONAR SERIE
 # ============================================================
 
 def seleccionar_serie_caudal(
@@ -2542,18 +2008,16 @@ def seleccionar_serie_caudal(
         "station":
             station,
 
+        "status":
+            "sin_serie",
+
         "candidate_count":
             int(
-                len(
-                    candidates
-                )
+                len(candidates)
             ),
 
         "tested":
             [],
-
-        "status":
-            "sin_serie",
     }
 
     if candidates.empty:
@@ -2563,11 +2027,20 @@ def seleccionar_serie_caudal(
             metadata,
         )
 
+    end_dt = pd.to_datetime(
+        end
+    ).normalize()
+
+    test_start = (
+        end_dt
+        - pd.Timedelta(
+            days=FLOW_VALIDATION_DAYS
+        )
+    )
+
     for _, candidate in (
         candidates
-        .head(
-            25
-        )
+        .head(25)
         .iterrows()
     ):
 
@@ -2581,30 +2054,14 @@ def seleccionar_serie_caudal(
         if series_id <= 0:
             continue
 
-        validation_window = (
-            _candidate_validation_window(
-                candidate,
-                start,
-                end,
-            )
-        )
-
-        if validation_window is None:
-            continue
-
-        test_start, test_end = (
-            validation_window
-        )
-
         try:
 
-            test_data = query_caudal_series(
-
-                series_id,
-
-                test_start,
-
-                test_end,
+            test_data = (
+                query_caudal_series(
+                    series_id,
+                    test_start,
+                    end_dt,
+                )
             )
 
             validation = (
@@ -2614,36 +2071,25 @@ def seleccionar_serie_caudal(
                 )
             )
 
-            test_info = {
-
-                "series_id":
-                    series_id,
-
-                "name":
-                    candidate.get(
-                        "nombre"
-                    ),
-
-                "river":
-                    candidate.get(
-                        "rio"
-                    ),
-
-                "score":
-                    _safe_float(
-                        candidate.get(
-                            "score"
-                        ),
-                        0.0,
-                    ),
-
-                **validation,
-            }
-
             metadata[
                 "tested"
             ].append(
-                test_info
+                {
+                    "series_id":
+                        series_id,
+
+                    "nombre":
+                        candidate.get(
+                            "nombre"
+                        ),
+
+                    "rio":
+                        candidate.get(
+                            "rio"
+                        ),
+
+                    **validation,
+                }
             )
 
             if not validation[
@@ -2683,34 +2129,6 @@ def seleccionar_serie_caudal(
                         validation[
                             "last"
                         ],
-
-                    "validation_records":
-                        validation[
-                            "records"
-                        ],
-
-                    "is_parana_trunk":
-                        validation[
-                            "is_parana_trunk"
-                        ],
-
-                    "catalog_timestart":
-                        candidate.get(
-                            "timestart"
-                        ),
-
-                    "catalog_timeend":
-                        candidate.get(
-                            "timeend"
-                        ),
-
-                    "catalog_count":
-                        _safe_int(
-                            candidate.get(
-                                "count"
-                            ),
-                            0,
-                        ),
                 }
             )
 
@@ -2728,13 +2146,11 @@ def seleccionar_serie_caudal(
                     "series_id":
                         series_id,
 
-                    "status":
-                        "error",
+                    "valid":
+                        False,
 
                     "error":
-                        str(
-                            exc
-                        ),
+                        str(exc),
                 }
             )
 
@@ -2749,112 +2165,28 @@ def seleccionar_serie_caudal(
 
 
 # ============================================================
-# HISTORIA DE SERIE
+# CONSULTAR HISTORIA EN BLOQUES
 # ============================================================
 
-def _query_selected_series_history(
-    selected,
+def _query_history_blocks(
+    series_id,
     start,
     end,
 ):
 
-    series_id = int(
-        selected[
-            "series_id"
-        ]
-    )
-
-    request_start = pd.to_datetime(
+    start_dt = pd.to_datetime(
         start
     ).normalize()
 
-    request_end = pd.to_datetime(
+    end_dt = pd.to_datetime(
         end
     ).normalize()
 
-    catalog_start = pd.to_datetime(
-        selected.get(
-            "timestart"
-        ),
-        errors="coerce",
-        utc=True,
-    )
-
-    catalog_end = pd.to_datetime(
-        selected.get(
-            "timeend"
-        ),
-        errors="coerce",
-        utc=True,
-    )
-
-    if not pd.isna(
-        catalog_start
-    ):
-
-        catalog_start = (
-            catalog_start
-            .tz_localize(
-                None
-            )
-            .normalize()
-        )
-
-        request_start = max(
-            request_start,
-            catalog_start,
-        )
-
-    if not pd.isna(
-        catalog_end
-    ):
-
-        catalog_end = (
-            catalog_end
-            .tz_localize(
-                None
-            )
-            .normalize()
-        )
-
-        request_end = min(
-            request_end,
-            catalog_end,
-        )
-
-    if request_end < request_start:
-
-        return pd.DataFrame()
-
-    # --------------------------------------------------------
-    # Para períodos cortos intentamos una consulta.
-    # Para períodos muy extensos dividimos en bloques.
-    # --------------------------------------------------------
-
-    total_days = (
-        request_end
-        - request_start
-    ).days
-
-    if total_days <= 365 * FLOW_HISTORY_BLOCK_YEARS:
-
-        try:
-
-            return query_caudal_series(
-                series_id,
-                request_start,
-                request_end,
-            )
-
-        except Exception:
-
-            pass
-
     frames = []
 
-    block_start = request_start
+    block_start = start_dt
 
-    while block_start <= request_end:
+    while block_start <= end_dt:
 
         block_end = min(
 
@@ -2863,11 +2195,9 @@ def _query_selected_series_history(
                 years=
                     FLOW_HISTORY_BLOCK_YEARS
             )
-            - pd.Timedelta(
-                days=1
-            ),
+            - pd.Timedelta(days=1),
 
-            request_end,
+            end_dt,
         )
 
         try:
@@ -2885,32 +2215,29 @@ def _query_selected_series_history(
                 )
 
         except Exception:
-
             pass
 
         block_start = (
             block_end
-            + pd.Timedelta(
-                days=1
-            )
+            + pd.Timedelta(days=1)
         )
 
     if not frames:
 
         return pd.DataFrame()
 
+    result = pd.concat(
+        frames,
+        ignore_index=True,
+    )
+
     return (
-        pd.concat(
-            frames,
-            ignore_index=True,
-        )
+        result
         .sort_values(
             "datetime"
         )
         .drop_duplicates(
-            subset=[
-                "datetime"
-            ],
+            subset=["datetime"],
             keep="last",
         )
         .reset_index(
@@ -2920,7 +2247,7 @@ def _query_selected_series_history(
 
 
 # ============================================================
-# CAUDAL POR ESTACIÓN
+# HISTORIA DE CAUDAL POR ESTACIÓN
 # ============================================================
 
 def get_caudal_station(
@@ -2953,26 +2280,26 @@ def get_caudal_station(
             metadata,
         )
 
+    series_id = int(
+        selected[
+            "series_id"
+        ]
+    )
+
     try:
 
-        data = (
-            _query_selected_series_history(
-                selected,
-                start,
-                end,
-            )
+        raw = _query_history_blocks(
+            series_id,
+            start,
+            end,
         )
 
-        if data.empty:
+        if raw.empty:
 
             metadata[
                 "status"
             ] = "sin_observaciones"
 
-            metadata[
-                "records"
-            ] = 0
-
             return (
                 pd.DataFrame(
                     columns=[
@@ -2983,152 +2310,104 @@ def get_caudal_station(
                 metadata,
             )
 
-        # ----------------------------------------------------
-        # Segunda validación usando la historia descargada.
-        # ----------------------------------------------------
-
-        validation = (
-            _validate_trunk_flow_series(
-                selected,
-                data.tail(
-                    max(
-                        FLOW_VALIDATION_DAYS,
-                        30,
-                    )
-                ),
-            )
-        )
-
-        if not validation[
-            "valid"
-        ]:
-
-            metadata[
-                "status"
-            ] = "rechazada_historia"
-
-            metadata[
-                "validation"
-            ] = validation
-
-            metadata[
-                "records"
-            ] = 0
-
-            return (
-                pd.DataFrame(
-                    columns=[
-                        "datetime",
-                        column,
-                    ]
-                ),
-                metadata,
-            )
-
-        result = data.rename(
-            columns={
-                "value":
-                    column
-            }
-        )
-
-        result[
+        raw[
             "datetime"
         ] = _to_naive_datetime(
-            result[
-                "datetime"
-            ]
+            raw["datetime"]
         )
 
-        result[
+        raw[
             "datetime"
         ] = (
-            result[
+            raw[
                 "datetime"
             ]
             .dt
             .normalize()
         )
 
-        result[
-            column
+        raw[
+            "value"
         ] = pd.to_numeric(
-            result[
-                column
-            ],
+            raw["value"],
             errors="coerce",
         )
 
-        result = result.dropna(
-            subset=[
-                "datetime",
-                column,
-            ]
-        )
-
-        result = result[
+        raw = raw[
             (
-                result[
-                    column
-                ]
-                >= 0
+                raw["value"] >= 0
             )
             &
             (
-                result[
-                    column
-                ]
+                raw["value"]
                 <= PARANA_TRUNK_MAX_FLOW
             )
         ]
 
         result = (
-            result
+            raw
             .groupby(
                 "datetime",
                 as_index=False,
-            )[column]
+            )[
+                "value"
+            ]
             .mean()
-            .sort_values(
-                "datetime"
-            )
-            .reset_index(
-                drop=True
+            .rename(
+                columns={
+                    "value":
+                        column
+                }
             )
         )
 
-        metadata[
-            "records"
-        ] = int(
-            len(
-                result
+        values = (
+            pd.to_numeric(
+                result[column],
+                errors="coerce",
             )
+            .dropna()
         )
+
+        if (
+            len(values)
+            < MIN_FLOW_OBSERVATIONS
+        ):
+
+            metadata[
+                "status"
+            ] = "pocas_observaciones"
+
+            return (
+                pd.DataFrame(
+                    columns=[
+                        "datetime",
+                        column,
+                    ]
+                ),
+                metadata,
+            )
 
         metadata[
             "status"
         ] = "ok"
 
         metadata[
-            "median_flow_history"
-        ] = _safe_float(
-            result[
-                column
-            ].median()
+            "records"
+        ] = int(
+            len(result)
         )
 
         metadata[
-            "last_flow_history"
-        ] = _safe_float(
-            result[
-                column
-            ].dropna().iloc[
-                -1
-            ]
-            if result[
-                column
-            ].notna().any()
-            else np.nan
+            "last_flow"
+        ] = float(
+            values.iloc[-1]
+        )
+
+        metadata[
+            "median_flow"
+        ] = float(
+            values.median()
         )
 
         return (
@@ -3144,13 +2423,7 @@ def get_caudal_station(
 
         metadata[
             "error"
-        ] = str(
-            exc
-        )
-
-        metadata[
-            "records"
-        ] = 0
+        ] = str(exc)
 
         return (
             pd.DataFrame(
@@ -3164,197 +2437,10 @@ def get_caudal_station(
 
 
 # ============================================================
-# VALIDAR COHERENCIA ENTRE ESTACIONES VECINAS
+# OBTENER TODOS LOS CAUDALES OBSERVADOS
 # ============================================================
 
-def _median_recent(
-    df,
-    col,
-    days=30,
-):
-
-    if (
-        df is None
-        or df.empty
-        or col not in df.columns
-    ):
-
-        return np.nan
-
-    values = (
-        pd.to_numeric(
-            df[
-                col
-            ],
-            errors="coerce",
-        )
-        .dropna()
-        .tail(
-            days
-        )
-    )
-
-    if values.empty:
-
-        return np.nan
-
-    return float(
-        values.median()
-    )
-
-
-def _validate_neighbor_consistency(
-    base,
-    metadata,
-):
-
-    """
-    Una estación no se rechaza sólo porque sea diferente
-    de otra, ya que el Paraná tiene aportes y derivaciones.
-
-    Pero si una serie tiene una magnitud totalmente incompatible
-    con las demás series troncal válidas, se descarta.
-    """
-
-    station_medians = {}
-
-    for station in STATIONS:
-
-        col = FLOW_COLUMNS[
-            station
-        ]
-
-        median = _median_recent(
-            base,
-            col,
-            days=30,
-        )
-
-        if np.isfinite(
-            median
-        ):
-
-            station_medians[
-                station
-            ] = median
-
-    if len(
-        station_medians
-    ) < 2:
-
-        return (
-            base,
-            metadata,
-        )
-
-    reference_values = list(
-        station_medians.values()
-    )
-
-    reference_median = float(
-        np.median(
-            reference_values
-        )
-    )
-
-    if (
-        not np.isfinite(
-            reference_median
-        )
-        or reference_median <= 0
-    ):
-
-        return (
-            base,
-            metadata,
-        )
-
-    rejected = []
-
-    for station, station_median in (
-        station_medians.items()
-    ):
-
-        ratio = (
-            station_median
-            / reference_median
-        )
-
-        if (
-            ratio
-            < FLOW_NEIGHBOR_RATIO_MIN
-            or ratio
-            > FLOW_NEIGHBOR_RATIO_MAX
-        ):
-
-            col = FLOW_COLUMNS[
-                station
-            ]
-
-            base[
-                col
-            ] = np.nan
-
-            rejected.append(
-                {
-                    "station":
-                        station,
-
-                    "median":
-                        station_median,
-
-                    "reference_median":
-                        reference_median,
-
-                    "ratio":
-                        ratio,
-                }
-            )
-
-            station_meta = (
-                metadata[
-                    "stations"
-                ].get(
-                    station,
-                    {}
-                )
-            )
-
-            station_meta[
-                "status"
-            ] = "rechazada_incoherencia_vecinos"
-
-            station_meta[
-                "neighbor_ratio"
-            ] = ratio
-
-            station_meta[
-                "reference_median"
-            ] = reference_median
-
-            metadata[
-                "stations"
-            ][station] = station_meta
-
-    metadata[
-        "neighbor_validation_reference_median"
-    ] = reference_median
-
-    metadata[
-        "neighbor_rejected"
-    ] = rejected
-
-    return (
-        base,
-        metadata,
-    )
-
-
-# ============================================================
-# TODOS LOS CAUDALES
-# ============================================================
-
-def get_all_caudales(
+def get_observed_caudales(
     start,
     end,
 ):
@@ -3374,28 +2460,22 @@ def get_all_caudales(
         "source":
             "INA A5",
 
-        "validation":
-            "Paraná troncal V11.10.2",
-
         "stations":
             {},
 
-        "available_stations":
+        "observed_stations":
             [],
-
-        "flow_series":
-            {},
     }
 
     for station in STATIONS:
 
-        column = FLOW_COLUMNS[
+        col = FLOW_COLUMNS[
             station
         ]
 
         try:
 
-            flow_df, flow_meta = (
+            df, meta = (
                 get_caudal_station(
                     station,
                     start,
@@ -3405,76 +2485,70 @@ def get_all_caudales(
 
             metadata[
                 "stations"
-            ][station] = flow_meta
-
-            metadata[
-                "flow_series"
-            ][station] = flow_meta
+            ][station] = meta
 
             if (
-                flow_df is not None
-                and not flow_df.empty
+                df is not None
+                and not df.empty
             ):
 
                 base = base.merge(
-                    flow_df,
+                    df,
                     on="datetime",
                     how="left",
                 )
 
             else:
 
-                base[
-                    column
-                ] = np.nan
+                base[col] = np.nan
+
+            count = int(
+                pd.to_numeric(
+                    base[col],
+                    errors="coerce",
+                )
+                .notna()
+                .sum()
+            )
+
+            if count >= MIN_FLOW_OBSERVATIONS:
+
+                metadata[
+                    "observed_stations"
+                ].append(
+                    station
+                )
 
         except Exception as exc:
 
-            base[
-                column
-            ] = np.nan
+            base[col] = np.nan
 
-            flow_meta = {
-
-                "station":
-                    station,
+            metadata[
+                "stations"
+            ][station] = {
 
                 "status":
                     "error",
 
                 "error":
-                    str(
-                        exc
-                    ),
-
-                "records":
-                    0,
+                    str(exc),
             }
 
-            metadata[
-                "stations"
-            ][station] = flow_meta
-
-            metadata[
-                "flow_series"
-            ][station] = flow_meta
-
-    # ========================================================
-    # VALIDACIÓN ENTRE SERIES
-    # ========================================================
-
-    base, metadata = (
-        _validate_neighbor_consistency(
-            base,
-            metadata,
-        )
+    return (
+        base,
+        metadata,
     )
 
-    # ========================================================
-    # RECONSTRUIR DISPONIBILIDAD DESPUÉS DE VALIDACIONES
-    # ========================================================
 
-    available = []
+# ============================================================
+# MARCAR FUENTE DE CAUDAL
+# ============================================================
+
+def _initialize_flow_sources(
+    df,
+):
+
+    result = df.copy()
 
     for station in STATIONS:
 
@@ -3482,81 +2556,667 @@ def get_all_caudales(
             station
         ]
 
-        if col not in base.columns:
-            continue
+        source_col = (
+            col
+            + "_source"
+        )
 
-        values = (
+        quality_col = (
+            col
+            + "_quality"
+        )
+
+        if col not in result.columns:
+
+            result[col] = np.nan
+
+        result[
+            source_col
+        ] = np.where(
             pd.to_numeric(
-                base[
-                    col
-                ],
+                result[col],
                 errors="coerce",
             )
-            .dropna()
+            .notna(),
+
+            "observado",
+
+            "faltante",
         )
 
-        if (
-            len(
-                values
-            )
-            < MIN_FLOW_OBSERVATIONS
-        ):
+        result[
+            quality_col
+        ] = np.where(
+            result[
+                source_col
+            ]
+            == "observado",
 
-            continue
+            1.0,
 
-        recent_median = float(
-            values.tail(
-                30
-            ).median()
+            0.0,
         )
 
-        if (
-            not np.isfinite(
-                recent_median
-            )
-            or recent_median
-            < PARANA_TRUNK_MIN_MEDIAN_FLOW
-        ):
+    return result
 
-            base[
-                col
-            ] = np.nan
 
-            station_meta = (
-                metadata[
-                    "stations"
-                ].get(
-                    station,
-                    {}
-                )
-            )
+# ============================================================
+# INTERPOLAR HUECOS CORTOS
+# ============================================================
 
-            station_meta[
-                "status"
-            ] = "rechazada_magnitud_final"
+def _interpolate_short_flow_gaps(
+    df,
+):
 
-            station_meta[
-                "recent_median"
-            ] = recent_median
+    result = df.copy()
 
-            metadata[
-                "stations"
-            ][station] = station_meta
+    for station in STATIONS:
 
-            continue
-
-        available.append(
+        col = FLOW_COLUMNS[
             station
+        ]
+
+        source_col = (
+            col
+            + "_source"
         )
 
-    metadata[
-        "available_stations"
-    ] = available
+        quality_col = (
+            col
+            + "_quality"
+        )
 
-    return (
-        base,
-        metadata,
+        original = pd.to_numeric(
+            result[col],
+            errors="coerce",
+        )
+
+        interpolated = (
+            original
+            .interpolate(
+                limit=
+                    SHORT_INTERPOLATION_LIMIT,
+                limit_area="inside",
+            )
+        )
+
+        mask = (
+            original.isna()
+            &
+            interpolated.notna()
+        )
+
+        result.loc[
+            mask,
+            col
+        ] = interpolated.loc[
+            mask
+        ]
+
+        result.loc[
+            mask,
+            source_col
+        ] = "interpolado"
+
+        result.loc[
+            mask,
+            quality_col
+        ] = 0.90
+
+    return result
+
+
+# ============================================================
+# ENCONTRAR ESTACIONES VECINAS CON CAUDAL
+# ============================================================
+
+def _neighbor_stations(
+    target_station,
+):
+
+    target_index = (
+        STATION_ORDER[
+            target_station
+        ]
     )
+
+    others = [
+        station
+        for station in STATIONS
+        if station != target_station
+    ]
+
+    others.sort(
+        key=lambda station:
+            abs(
+                STATION_ORDER[
+                    station
+                ]
+                - target_index
+            )
+    )
+
+    return others
+
+
+# ============================================================
+# CALCULAR RELACIÓN HISTÓRICA ENTRE CAUDALES
+# ============================================================
+
+def _historical_flow_ratio(
+    df,
+    target_col,
+    reference_col,
+):
+
+    if (
+        target_col not in df.columns
+        or reference_col
+        not in df.columns
+    ):
+
+        return None
+
+    pair = df[
+        [
+            target_col,
+            reference_col,
+        ]
+    ].copy()
+
+    pair[
+        target_col
+    ] = pd.to_numeric(
+        pair[
+            target_col
+        ],
+        errors="coerce",
+    )
+
+    pair[
+        reference_col
+    ] = pd.to_numeric(
+        pair[
+            reference_col
+        ],
+        errors="coerce",
+    )
+
+    pair = pair.dropna()
+
+    pair = pair[
+        pair[
+            reference_col
+        ] > 0
+    ]
+
+    if (
+        len(pair)
+        < MIN_RATIO_OVERLAP
+    ):
+
+        return None
+
+    ratio = (
+        pair[
+            target_col
+        ]
+        /
+        pair[
+            reference_col
+        ]
+    )
+
+    ratio = ratio.replace(
+        [
+            np.inf,
+            -np.inf,
+        ],
+        np.nan,
+    ).dropna()
+
+    ratio = ratio[
+        (
+            ratio
+            >= MIN_NEIGHBOR_RATIO
+        )
+        &
+        (
+            ratio
+            <= MAX_NEIGHBOR_RATIO
+        )
+    ]
+
+    if (
+        len(ratio)
+        < MIN_RATIO_OVERLAP
+    ):
+
+        return None
+
+    median_ratio = float(
+        ratio.median()
+    )
+
+    dispersion = float(
+        ratio.std()
+    )
+
+    return {
+
+        "ratio":
+            median_ratio,
+
+        "dispersion":
+            dispersion,
+
+        "records":
+            int(
+                len(ratio)
+            ),
+    }
+
+
+# ============================================================
+# ESTIMAR CAUDAL CON RELACIÓN HISTÓRICA
+# ============================================================
+
+def _fill_from_historical_ratios(
+    df,
+):
+
+    result = df.copy()
+
+    # --------------------------------------------------------
+    # Varias pasadas permiten que una estación recién estimada
+    # pueda ayudar a completar otra más adelante.
+    # --------------------------------------------------------
+
+    for _ in range(3):
+
+        changes = 0
+
+        for station in STATIONS:
+
+            target_col = FLOW_COLUMNS[
+                station
+            ]
+
+            source_col = (
+                target_col
+                + "_source"
+            )
+
+            quality_col = (
+                target_col
+                + "_quality"
+            )
+
+            missing = (
+                pd.to_numeric(
+                    result[
+                        target_col
+                    ],
+                    errors="coerce",
+                )
+                .isna()
+            )
+
+            if not missing.any():
+                continue
+
+            for reference_station in (
+                _neighbor_stations(
+                    station
+                )
+            ):
+
+                reference_col = (
+                    FLOW_COLUMNS[
+                        reference_station
+                    ]
+                )
+
+                if (
+                    reference_col
+                    not in result.columns
+                ):
+                    continue
+
+                ratio_info = (
+                    _historical_flow_ratio(
+                        result,
+                        target_col,
+                        reference_col,
+                    )
+                )
+
+                if ratio_info is None:
+                    continue
+
+                reference = (
+                    pd.to_numeric(
+                        result[
+                            reference_col
+                        ],
+                        errors="coerce",
+                    )
+                )
+
+                estimated = (
+                    reference
+                    * ratio_info[
+                        "ratio"
+                    ]
+                )
+
+                mask = (
+                    missing
+                    &
+                    reference.notna()
+                    &
+                    estimated.notna()
+                )
+
+                estimated = estimated.clip(
+                    lower=
+                        MIN_ESTIMATED_FLOW,
+
+                    upper=
+                        MAX_ESTIMATED_FLOW,
+                )
+
+                if mask.any():
+
+                    result.loc[
+                        mask,
+                        target_col
+                    ] = estimated.loc[
+                        mask
+                    ]
+
+                    result.loc[
+                        mask,
+                        source_col
+                    ] = (
+                        "estimado_ratio_"
+                        + _normalize_text(
+                            reference_station
+                        )
+                        .replace(
+                            " ",
+                            "_"
+                        )
+                    )
+
+                    # Cuanto mayor superposición,
+                    # mejor calidad.
+                    overlap_factor = min(
+                        ratio_info[
+                            "records"
+                        ]
+                        / 100.0,
+                        1.0,
+                    )
+
+                    dispersion = (
+                        ratio_info[
+                            "dispersion"
+                        ]
+                    )
+
+                    if not np.isfinite(
+                        dispersion
+                    ):
+
+                        dispersion = 1.0
+
+                    quality = (
+                        0.65
+                        +
+                        0.15
+                        * overlap_factor
+                        -
+                        min(
+                            dispersion,
+                            1.0,
+                        )
+                        * 0.10
+                    )
+
+                    quality = float(
+                        np.clip(
+                            quality,
+                            0.45,
+                            0.82,
+                        )
+                    )
+
+                    result.loc[
+                        mask,
+                        quality_col
+                    ] = quality
+
+                    changes += int(
+                        mask.sum()
+                    )
+
+                    missing = (
+                        pd.to_numeric(
+                            result[
+                                target_col
+                            ],
+                            errors="coerce",
+                        )
+                        .isna()
+                    )
+
+                    if not missing.any():
+                        break
+
+        if changes == 0:
+            break
+
+    return result
+
+
+# ============================================================
+# ESTIMACIÓN DE ÚLTIMO RECURSO CON CAUDAL DEL CORREDOR
+# ============================================================
+
+def _fill_from_corridor_median(
+    df,
+):
+
+    result = df.copy()
+
+    flow_cols = [
+        FLOW_COLUMNS[
+            station
+        ]
+        for station in STATIONS
+    ]
+
+    numeric = (
+        result[
+            flow_cols
+        ]
+        .apply(
+            pd.to_numeric,
+            errors="coerce",
+        )
+    )
+
+    corridor_median = (
+        numeric
+        .median(
+            axis=1,
+            skipna=True,
+        )
+    )
+
+    for station in STATIONS:
+
+        col = FLOW_COLUMNS[
+            station
+        ]
+
+        source_col = (
+            col
+            + "_source"
+        )
+
+        quality_col = (
+            col
+            + "_quality"
+        )
+
+        current = pd.to_numeric(
+            result[col],
+            errors="coerce",
+        )
+
+        missing = current.isna()
+
+        # ----------------------------------------------------
+        # Sólo estimar si existen al menos dos estaciones
+        # válidas ese mismo día.
+        # --------------------------------------------------------
+
+        valid_count = (
+            numeric
+            .notna()
+            .sum(
+                axis=1
+            )
+        )
+
+        mask = (
+            missing
+            &
+            corridor_median.notna()
+            &
+            (
+                valid_count >= 2
+            )
+        )
+
+        estimated = (
+            corridor_median
+            .clip(
+                lower=
+                    MIN_ESTIMATED_FLOW,
+
+                upper=
+                    MAX_ESTIMATED_FLOW,
+            )
+        )
+
+        result.loc[
+            mask,
+            col
+        ] = estimated.loc[
+            mask
+        ]
+
+        result.loc[
+            mask,
+            source_col
+        ] = "estimado_corredor"
+
+        result.loc[
+            mask,
+            quality_col
+        ] = 0.40
+
+    return result
+
+
+# ============================================================
+# RECONSTRUIR CAUDALES FALTANTES
+# ============================================================
+
+def complete_missing_flows(
+    flow_history,
+):
+
+    result = (
+        _initialize_flow_sources(
+            flow_history
+        )
+    )
+
+    result = (
+        _interpolate_short_flow_gaps(
+            result
+        )
+    )
+
+    result = (
+        _fill_from_historical_ratios(
+            result
+        )
+    )
+
+    result = (
+        _fill_from_corridor_median(
+            result
+        )
+    )
+
+    # ========================================================
+    # CONTROL FINAL
+    # ========================================================
+
+    for station in STATIONS:
+
+        col = FLOW_COLUMNS[
+            station
+        ]
+
+        source_col = (
+            col
+            + "_source"
+        )
+
+        quality_col = (
+            col
+            + "_quality"
+        )
+
+        values = pd.to_numeric(
+            result[col],
+            errors="coerce",
+        )
+
+        invalid = (
+            (
+                values
+                < MIN_ESTIMATED_FLOW
+            )
+            |
+            (
+                values
+                > MAX_ESTIMATED_FLOW
+            )
+        )
+
+        result.loc[
+            invalid,
+            col
+        ] = np.nan
+
+        result.loc[
+            invalid,
+            source_col
+        ] = "rechazado"
+
+        result.loc[
+            invalid,
+            quality_col
+        ] = 0.0
+
+    return result
 
 
 # ============================================================
@@ -3577,56 +3237,91 @@ def elegir_caudal_principal(
             None,
         )
 
+    # --------------------------------------------------------
+    # Priorizamos estaciones cercanas,
+    # pero el valor debe tener calidad aceptable.
+    # --------------------------------------------------------
+
     for station in FLOW_PRIORITY:
 
         col = FLOW_COLUMNS[
             station
         ]
 
+        quality_col = (
+            col
+            + "_quality"
+        )
+
         if col not in df.columns:
             continue
 
-        valid = (
-            pd.to_numeric(
+        values = pd.to_numeric(
+            df[col],
+            errors="coerce",
+        )
+
+        if quality_col in df.columns:
+
+            quality = pd.to_numeric(
                 df[
-                    col
+                    quality_col
                 ],
                 errors="coerce",
             )
-            .dropna()
-        )
+
+            valid_mask = (
+                values.notna()
+                &
+                (
+                    quality >= 0.60
+                )
+            )
+
+        else:
+
+            valid_mask = (
+                values.notna()
+            )
 
         if (
-            len(
-                valid
+            int(
+                valid_mask.sum()
             )
-            < MIN_FLOW_OBSERVATIONS
+            >= MIN_FLOW_OBSERVATIONS
         ):
 
-            continue
+            return (
+                col,
+                station,
+            )
 
-        recent = valid.tail(
-            30
-        )
+    # --------------------------------------------------------
+    # Segunda opción:
+    # cualquier caudal reconstruido.
+    # --------------------------------------------------------
 
-        recent_median = float(
-            recent.median()
-        )
+    for station in FLOW_PRIORITY:
+
+        col = FLOW_COLUMNS[
+            station
+        ]
 
         if (
-            not np.isfinite(
-                recent_median
+            col in df.columns
+            and pd.to_numeric(
+                df[col],
+                errors="coerce",
             )
-            or recent_median
-            < PARANA_TRUNK_MIN_MEDIAN_FLOW
+            .notna()
+            .sum()
+            >= MIN_FLOW_OBSERVATIONS
         ):
 
-            continue
-
-        return (
-            col,
-            station,
-        )
+            return (
+                col,
+                station,
+            )
 
     return (
         None,
@@ -3635,7 +3330,7 @@ def elegir_caudal_principal(
 
 
 # ============================================================
-# PROYECCIÓN DE CAUDAL
+# PROYECCIÓN FUTURA DE CAUDAL
 # ============================================================
 
 def proyectar_serie_caudal(
@@ -3643,22 +3338,6 @@ def proyectar_serie_caudal(
     column,
     future_dates,
 ):
-
-    if (
-        history is None
-        or history.empty
-        or column not in history.columns
-    ):
-
-        return pd.Series(
-            np.nan,
-            index=range(
-                len(
-                    future_dates
-                )
-            ),
-            dtype=float,
-        )
 
     values = (
         pd.to_numeric(
@@ -3675,41 +3354,30 @@ def proyectar_serie_caudal(
         return pd.Series(
             np.nan,
             index=range(
-                len(
-                    future_dates
-                )
+                len(future_dates)
             ),
             dtype=float,
         )
 
     current = float(
-        values.iloc[
-            -1
-        ]
+        values.iloc[-1]
     )
 
     recent = values.tail(
         min(
             21,
-            len(
-                values
-            ),
+            len(values),
         )
     )
 
-    if len(
-        recent
-    ) >= 4:
+    if len(recent) >= 4:
 
         try:
 
             slope = float(
                 np.polyfit(
                     np.arange(
-                        len(
-                            recent
-                        ),
-                        dtype=float,
+                        len(recent)
                     ),
                     recent.to_numpy(
                         dtype=float
@@ -3727,10 +3395,7 @@ def proyectar_serie_caudal(
         slope = 0.0
 
     max_slope = max(
-        abs(
-            current
-        )
-        * 0.025,
+        current * 0.025,
         50.0,
     )
 
@@ -3742,21 +3407,17 @@ def proyectar_serie_caudal(
         )
     )
 
-    projected = []
+    output = []
 
     level = current
 
     for day in range(
         1,
-        len(
-            future_dates
-        )
-        + 1,
+        len(future_dates) + 1,
     ):
 
         damping = np.exp(
-            -day
-            / 18.0
+            -day / 20.0
         )
 
         change = (
@@ -3764,24 +3425,31 @@ def proyectar_serie_caudal(
             * damping
         )
 
-        level = max(
-            0.0,
+        level = (
             level
-            + change,
+            + change
         )
 
-        projected.append(
+        level = float(
+            np.clip(
+                level,
+                MIN_ESTIMATED_FLOW,
+                MAX_ESTIMATED_FLOW,
+            )
+        )
+
+        output.append(
             level
         )
 
     return pd.Series(
-        projected,
+        output,
         dtype=float,
     )
 
 
 # ============================================================
-# FEATURES LLUVIA
+# FEATURES DE LLUVIA
 # ============================================================
 
 def agregar_features_lluvia(
@@ -3799,24 +3467,13 @@ def agregar_features_lluvia(
         if col not in result.columns:
             continue
 
-        values = pd.to_numeric(
-            result[
-                col
-            ],
-            errors="coerce",
-        )
-
-        if not values.notna().any():
-            continue
-
         values = (
-            values
-            .fillna(
-                0.0
+            pd.to_numeric(
+                result[col],
+                errors="coerce",
             )
-            .clip(
-                lower=0.0
-            )
+            .fillna(0.0)
+            .clip(lower=0.0)
         )
 
         for window in [
@@ -3841,7 +3498,7 @@ def agregar_features_lluvia(
 
 
 # ============================================================
-# FEATURES CAUDAL
+# FEATURES DE CAUDAL
 # ============================================================
 
 def agregar_features_caudal(
@@ -3860,125 +3517,449 @@ def agregar_features_caudal(
             continue
 
         q = pd.to_numeric(
-            result[
-                col
-            ],
+            result[col],
             errors="coerce",
         )
 
-        if (
-            q.notna().sum()
-            < MIN_FLOW_OBSERVATIONS
-        ):
-
+        if q.notna().sum() < 3:
             continue
 
-        result[
-            f"{col}_diff_1"
-        ] = q.diff(
-            1
-        )
+        for lag in [
+            1,
+            3,
+            7,
+            14,
+        ]:
+
+            result[
+                f"{col}_diff_{lag}"
+            ] = q.diff(
+                lag
+            )
+
+        for window in [
+            3,
+            7,
+            14,
+            30,
+        ]:
+
+            result[
+                f"{col}_mean_{window}"
+            ] = (
+                q
+                .rolling(
+                    window,
+                    min_periods=1,
+                )
+                .mean()
+            )
 
         result[
-            f"{col}_diff_3"
-        ] = q.diff(
-            3
-        )
-
-        result[
-            f"{col}_diff_7"
-        ] = q.diff(
-            7
-        )
-
-        result[
-            f"{col}_mean_3"
+            f"{col}_trend_7"
         ] = (
             q
-            .rolling(
-                3,
-                min_periods=1,
-            )
-            .mean()
-        )
-
-        result[
-            f"{col}_mean_7"
-        ] = (
-            q
-            .rolling(
-                7,
-                min_periods=2,
-            )
-            .mean()
-        )
-
-        result[
-            f"{col}_mean_14"
-        ] = (
-            q
-            .rolling(
-                14,
-                min_periods=3,
-            )
-            .mean()
+            -
+            q.shift(7)
         )
 
         result[
             f"{col}_relative_7"
         ] = (
-            q.diff(
-                7
-            )
+            q.diff(7)
             /
-            q.shift(
-                7
-            ).replace(
+            q.shift(7).replace(
                 0,
                 np.nan,
             )
         )
 
+
     return result
 
 
 # ============================================================
-# COBERTURA
+# PESOS HIDROLÓGICOS DEL CORREDOR
+#
+# Más cercanía a San Nicolás = mayor peso inmediato.
 # ============================================================
 
-def _column_coverage(
+CORRIDOR_WEIGHTS = {
+
+    "Corrientes": 0.08,
+
+    "Goya": 0.09,
+
+    "La Paz": 0.11,
+
+    "Paraná": 0.15,
+
+    "Diamante": 0.16,
+
+    "Rosario": 0.17,
+
+    "Villa Constitución": 0.14,
+
+    "San Nicolás": 0.10,
+}
+
+
+# ============================================================
+# ÍNDICE DE PRESIÓN POR LLUVIA
+# ============================================================
+
+def agregar_indice_lluvia_corredor(
     df,
-    columns,
+):
+
+    result = df.copy()
+
+    weighted = pd.Series(
+        0.0,
+        index=result.index,
+        dtype=float,
+    )
+
+    total_weight = 0.0
+
+    for station in STATIONS:
+
+        col = (
+            RAIN_COLUMNS[
+                station
+            ]
+            + "_7d"
+        )
+
+        if col not in result.columns:
+            continue
+
+        weight = (
+            CORRIDOR_WEIGHTS[
+                station
+            ]
+        )
+
+        values = (
+            pd.to_numeric(
+                result[col],
+                errors="coerce",
+            )
+            .fillna(0.0)
+        )
+
+        weighted += (
+            values
+            * weight
+        )
+
+        total_weight += weight
+
+    if total_weight > 0:
+
+        weighted = (
+            weighted
+            / total_weight
+        )
+
+    result[
+        "rain_pressure_7d"
+    ] = weighted
+
+    return result
+
+
+# ============================================================
+# ÍNDICE DE PRESIÓN POR CAUDAL
+# ============================================================
+
+def agregar_indice_caudal_corredor(
+    df,
+):
+
+    result = df.copy()
+
+    signals = []
+
+    weights = []
+
+    for station in STATIONS:
+
+        col = FLOW_COLUMNS[
+            station
+        ]
+
+        if col not in result.columns:
+            continue
+
+        q = pd.to_numeric(
+            result[col],
+            errors="coerce",
+        )
+
+        baseline = (
+            q
+            .rolling(
+                30,
+                min_periods=7,
+            )
+            .median()
+        )
+
+        relative = (
+            (
+                q
+                - baseline
+            )
+            /
+            baseline.replace(
+                0,
+                np.nan,
+            )
+        )
+
+        weight = (
+            CORRIDOR_WEIGHTS[
+                station
+            ]
+        )
+
+        signals.append(
+            relative
+            * weight
+        )
+
+        weights.append(
+            weight
+        )
+
+    if not signals:
+
+        result[
+            "flow_pressure"
+        ] = 0.0
+
+        return result
+
+    combined = (
+        pd.concat(
+            signals,
+            axis=1,
+        )
+        .sum(
+            axis=1,
+            skipna=True,
+        )
+    )
+
+    total_weight = sum(
+        weights
+    )
+
+    if total_weight > 0:
+
+        combined = (
+            combined
+            / total_weight
+        )
+
+    combined = combined.clip(
+        lower=-1.0,
+        upper=2.0,
+    )
+
+    result[
+        "flow_pressure"
+    ] = combined.fillna(0.0)
+
+    return result
+
+
+# ============================================================
+# ÍNDICE HIDROLÓGICO EXÓGENO
+#
+# En V11.11 todavía no incluye niveles aguas arriba:
+# éstos se incorporarán en hydrology/model.
+#
+# Aquí dejamos:
+#
+# 55% caudal
+# 45% lluvia
+# ============================================================
+
+def agregar_indice_hidrologico_exogeno(
+    df,
+):
+
+    result = df.copy()
+
+    rain_pressure = pd.to_numeric(
+        result.get(
+            "rain_pressure_7d",
+            0.0,
+        ),
+        errors="coerce",
+    ).fillna(0.0)
+
+    flow_pressure = pd.to_numeric(
+        result.get(
+            "flow_pressure",
+            0.0,
+        ),
+        errors="coerce",
+    ).fillna(0.0)
+
+    rain_scaled = (
+        rain_pressure
+        / 100.0
+    ).clip(
+        lower=0.0,
+        upper=2.0,
+    )
+
+    result[
+        "hydro_exogenous_pressure"
+    ] = (
+        0.55
+        * flow_pressure
+        +
+        0.45
+        * rain_scaled
+    ).clip(
+        lower=-1.0,
+        upper=2.0,
+    )
+
+    return result
+
+
+# ============================================================
+# RESUMEN DE CALIDAD DE CAUDAL
+# ============================================================
+
+def _flow_quality_summary(
+    df,
 ):
 
     output = {}
 
-    for col in columns:
+    for station in STATIONS:
 
-        if (
-            df is not None
-            and not df.empty
-            and col in df.columns
-        ):
+        col = FLOW_COLUMNS[
+            station
+        ]
 
-            output[
-                col
+        source_col = (
+            col
+            + "_source"
+        )
+
+        quality_col = (
+            col
+            + "_quality"
+        )
+
+        station_info = {
+
+            "records":
+                0,
+
+            "observed":
+                0,
+
+            "interpolated":
+                0,
+
+            "estimated":
+                0,
+
+            "missing":
+                0,
+
+            "mean_quality":
+                np.nan,
+        }
+
+        if col in df.columns:
+
+            station_info[
+                "records"
             ] = int(
                 pd.to_numeric(
-                    df[
-                        col
-                    ],
+                    df[col],
                     errors="coerce",
                 )
                 .notna()
                 .sum()
             )
 
-        else:
+        if source_col in df.columns:
 
-            output[
-                col
-            ] = 0
+            source = (
+                df[
+                    source_col
+                ]
+                .astype(str)
+            )
+
+            station_info[
+                "observed"
+            ] = int(
+                (
+                    source
+                    == "observado"
+                ).sum()
+            )
+
+            station_info[
+                "interpolated"
+            ] = int(
+                (
+                    source
+                    == "interpolado"
+                ).sum()
+            )
+
+            station_info[
+                "estimated"
+            ] = int(
+                source.str.startswith(
+                    "estimado"
+                ).sum()
+            )
+
+            station_info[
+                "missing"
+            ] = int(
+                (
+                    source
+                    == "faltante"
+                ).sum()
+            )
+
+        if quality_col in df.columns:
+
+            quality = (
+                pd.to_numeric(
+                    df[
+                        quality_col
+                    ],
+                    errors="coerce",
+                )
+                .dropna()
+            )
+
+            if not quality.empty:
+
+                station_info[
+                    "mean_quality"
+                ] = float(
+                    quality.mean()
+                )
+
+        output[
+            station
+        ] = station_info
 
     return output
 
@@ -4003,9 +3984,7 @@ def get_exogenous_data(
 
     forecast_days = min(
         max(
-            int(
-                forecast_days
-            ),
+            int(forecast_days),
             1,
         ),
         MAX_FORECAST_DAYS,
@@ -4023,18 +4002,28 @@ def get_exogenous_data(
     )
 
     # ========================================================
-    # CAUDAL HISTÓRICO VALIDADO
+    # CAUDALES OBSERVADOS
     # ========================================================
 
-    flow_history, flow_meta = (
-        get_all_caudales(
+    observed_flows, flow_meta = (
+        get_observed_caudales(
             start,
             end,
         )
     )
 
     # ========================================================
-    # BASE
+    # RECONSTRUCCIÓN DE FALTANTES
+    # ========================================================
+
+    completed_flows = (
+        complete_missing_flows(
+            observed_flows
+        )
+    )
+
+    # ========================================================
+    # DATASET HISTÓRICO
     # ========================================================
 
     history = pd.DataFrame(
@@ -4047,61 +4036,63 @@ def get_exogenous_data(
         }
     )
 
-    if (
-        rain_history is not None
-        and not rain_history.empty
-    ):
+    history = history.merge(
+        rain_history,
+        on="datetime",
+        how="left",
+    )
 
-        history = history.merge(
-            rain_history,
-            on="datetime",
-            how="left",
-        )
+    flow_columns_to_merge = [
+        col
+        for col
+        in completed_flows.columns
+        if col != "datetime"
+    ]
 
-    if (
-        flow_history is not None
-        and not flow_history.empty
-    ):
-
-        flow_cols = [
-            col
-            for col in flow_history.columns
-            if col != "datetime"
-        ]
-
-        history = history.merge(
-
-            flow_history[
-                [
-                    "datetime",
-                    *flow_cols,
-                ]
-            ],
-
-            on="datetime",
-
-            how="left",
-        )
+    history = history.merge(
+        completed_flows[
+            [
+                "datetime",
+                *flow_columns_to_merge,
+            ]
+        ],
+        on="datetime",
+        how="left",
+    )
 
     # ========================================================
-    # GARANTIZAR COLUMNAS
+    # GARANTIZAR TODAS LAS COLUMNAS
     # ========================================================
 
     for station in STATIONS:
 
-        rain_col = RAIN_COLUMNS[
-            station
-        ]
+        rain_col = (
+            RAIN_COLUMNS[
+                station
+            ]
+        )
 
-        flow_col = FLOW_COLUMNS[
-            station
-        ]
+        flow_col = (
+            FLOW_COLUMNS[
+                station
+            ]
+        )
+
+        source_col = (
+            flow_col
+            + "_source"
+        )
+
+        quality_col = (
+            flow_col
+            + "_quality"
+        )
 
         if rain_col not in history.columns:
 
             history[
                 rain_col
-            ] = np.nan
+            ] = 0.0
 
         if flow_col not in history.columns:
 
@@ -4109,37 +4100,17 @@ def get_exogenous_data(
                 flow_col
             ] = np.nan
 
-    # ========================================================
-    # INTERPOLACIÓN LIMITADA
-    # ========================================================
-
-    for station in STATIONS:
-
-        col = FLOW_COLUMNS[
-            station
-        ]
-
-        q = pd.to_numeric(
-            history[
-                col
-            ],
-            errors="coerce",
-        )
-
-        if (
-            q.notna().sum()
-            >= MIN_FLOW_OBSERVATIONS
-        ):
+        if source_col not in history.columns:
 
             history[
-                col
-            ] = (
-                q
-                .interpolate(
-                    limit=5,
-                    limit_area="inside",
-                )
-            )
+                source_col
+            ] = "faltante"
+
+        if quality_col not in history.columns:
+
+            history[
+                quality_col
+            ] = 0.0
 
     # ========================================================
     # CAUDAL PRINCIPAL
@@ -4152,7 +4123,7 @@ def get_exogenous_data(
         history
     )
 
-    if main_flow_col is not None:
+    if main_flow_col:
 
         history[
             "caudal_m3s"
@@ -4163,59 +4134,90 @@ def get_exogenous_data(
             errors="coerce",
         )
 
+        source_col = (
+            main_flow_col
+            + "_source"
+        )
+
+        quality_col = (
+            main_flow_col
+            + "_quality"
+        )
+
+        history[
+            "caudal_source"
+        ] = (
+            history[
+                source_col
+            ]
+            if source_col
+            in history.columns
+            else "desconocido"
+        )
+
+        history[
+            "caudal_quality"
+        ] = (
+            history[
+                quality_col
+            ]
+            if quality_col
+            in history.columns
+            else 0.0
+        )
+
     else:
 
         history[
             "caudal_m3s"
         ] = np.nan
 
-    # ========================================================
-    # PRECIPITACIÓN LEGACY
-    # ========================================================
-
-    if "precip_mm" not in history.columns:
-
-        rain_cols = [
-            RAIN_COLUMNS[
-                station
-            ]
-            for station in STATIONS
-        ]
+        history[
+            "caudal_source"
+        ] = "sin_datos"
 
         history[
-            "precip_mm"
-        ] = (
-            history[
-                rain_cols
-            ]
-            .apply(
-                pd.to_numeric,
-                errors="coerce",
-            )
-            .mean(
-                axis=1,
-                skipna=True,
-            )
-        )
+            "caudal_quality"
+        ] = 0.0
 
     # ========================================================
     # FEATURES
     # ========================================================
 
-    history = agregar_features_lluvia(
-        history
+    history = (
+        agregar_features_lluvia(
+            history
+        )
     )
 
-    history = agregar_features_caudal(
-        history
+    history = (
+        agregar_features_caudal(
+            history
+        )
+    )
+
+    history = (
+        agregar_indice_lluvia_corredor(
+            history
+        )
+    )
+
+    history = (
+        agregar_indice_caudal_corredor(
+            history
+        )
+    )
+
+    history = (
+        agregar_indice_hidrologico_exogeno(
+            history
+        )
     )
 
     history[
         "datetime"
     ] = _to_naive_datetime(
-        history[
-            "datetime"
-        ]
+        history["datetime"]
     )
 
     history = (
@@ -4224,9 +4226,7 @@ def get_exogenous_data(
             "datetime"
         )
         .drop_duplicates(
-            subset=[
-                "datetime"
-            ],
+            subset=["datetime"],
             keep="last",
         )
         .reset_index(
@@ -4235,7 +4235,7 @@ def get_exogenous_data(
     )
 
     # ========================================================
-    # FUTURO LLUVIA
+    # FUTURO DE LLUVIA
     # ========================================================
 
     rain_future, rain_future_meta = (
@@ -4248,12 +4248,8 @@ def get_exogenous_data(
     future = rain_future.copy()
 
     # ========================================================
-    # FUTURO CAUDAL
+    # FUTURO DE CAUDAL
     # ========================================================
-
-    future_dates = future[
-        "datetime"
-    ]
 
     for station in STATIONS:
 
@@ -4261,11 +4257,19 @@ def get_exogenous_data(
             station
         ]
 
+        source_col = (
+            col
+            + "_source"
+        )
+
+        quality_col = (
+            col
+            + "_quality"
+        )
+
         valid_count = int(
             pd.to_numeric(
-                history[
-                    col
-                ],
+                history[col],
                 errors="coerce",
             )
             .notna()
@@ -4277,26 +4281,108 @@ def get_exogenous_data(
             >= MIN_FLOW_OBSERVATIONS
         ):
 
-            future[
-                col
-            ] = proyectar_serie_caudal(
-
-                history,
-
-                col,
-
-                future_dates,
+            future[col] = (
+                proyectar_serie_caudal(
+                    history,
+                    col,
+                    future[
+                        "datetime"
+                    ],
+                )
             )
+
+            future[
+                source_col
+            ] = "proyectado"
+
+            # ------------------------------------------------
+            # La calidad disminuye con el horizonte.
+            # ------------------------------------------------
+
+            horizon = np.arange(
+                1,
+                len(future) + 1,
+            )
+
+            quality = (
+                0.70
+                * np.exp(
+                    -horizon
+                    / 60.0
+                )
+            )
+
+            quality = np.clip(
+                quality,
+                0.25,
+                0.70,
+            )
+
+            future[
+                quality_col
+            ] = quality
 
         else:
 
+            future[col] = np.nan
+
             future[
-                col
-            ] = np.nan
+                source_col
+            ] = "sin_datos"
+
+            future[
+                quality_col
+            ] = 0.0
+
+    # ========================================================
+    # RECONSTRUIR FUTURO FALTANTE ENTRE ESTACIONES
+    # ========================================================
+
+    future = (
+        complete_missing_flows(
+            future
+        )
+    )
+
+    # No queremos que complete_missing_flows cambie
+    # "proyectado" a "observado" en valores ya generados.
+    for station in STATIONS:
+
+        col = FLOW_COLUMNS[
+            station
+        ]
+
+        source_col = (
+            col
+            + "_source"
+        )
+
+        quality_col = (
+            col
+            + "_quality"
+        )
+
+        if source_col not in future.columns:
+
+            future[
+                source_col
+            ] = "proyectado"
+
+        if quality_col not in future.columns:
+
+            future[
+                quality_col
+            ] = 0.45
+
+    # ========================================================
+    # CAUDAL PRINCIPAL FUTURO
+    # ========================================================
 
     if (
-        main_flow_col is not None
-        and main_flow_col in future.columns
+        main_flow_col
+        and
+        main_flow_col
+        in future.columns
     ):
 
         future[
@@ -4308,73 +4394,114 @@ def get_exogenous_data(
             errors="coerce",
         )
 
+        source_col = (
+            main_flow_col
+            + "_source"
+        )
+
+        quality_col = (
+            main_flow_col
+            + "_quality"
+        )
+
+        future[
+            "caudal_source"
+        ] = future.get(
+            source_col,
+            "proyectado",
+        )
+
+        future[
+            "caudal_quality"
+        ] = future.get(
+            quality_col,
+            0.50,
+        )
+
     else:
 
         future[
             "caudal_m3s"
         ] = np.nan
 
+        future[
+            "caudal_source"
+        ] = "sin_datos"
+
+        future[
+            "caudal_quality"
+        ] = 0.0
+
     # ========================================================
     # FEATURES FUTURAS
     # ========================================================
 
-    raw_cols = [
-        "datetime",
-        "precip_mm",
-        "caudal_m3s",
-    ]
+    history_tail = (
+        history
+        .tail(45)
+        .copy()
+    )
 
-    for station in STATIONS:
-
-        raw_cols.append(
-            RAIN_COLUMNS[
-                station
-            ]
+    common_columns = sorted(
+        set(
+            history_tail.columns
         )
-
-        raw_cols.append(
-            FLOW_COLUMNS[
-                station
-            ]
+        |
+        set(
+            future.columns
         )
+    )
 
-    history_cols = [
-        col
-        for col in raw_cols
-        if col in history.columns
-    ]
+    for col in common_columns:
 
-    future_cols = [
-        col
-        for col in raw_cols
-        if col in future.columns
-    ]
+        if col not in history_tail.columns:
+            history_tail[col] = np.nan
+
+        if col not in future.columns:
+            future[col] = np.nan
 
     combined = pd.concat(
-
         [
-            history[
-                history_cols
-            ].tail(
-                45
-            ),
+            history_tail[
+                common_columns
+            ],
 
             future[
-                future_cols
+                common_columns
             ],
         ],
-
         ignore_index=True,
-
         sort=False,
     )
 
-    combined = agregar_features_lluvia(
-        combined
+    combined = (
+        agregar_features_lluvia(
+            combined
+        )
     )
 
-    combined = agregar_features_caudal(
-        combined
+    combined = (
+        agregar_features_caudal(
+            combined
+        )
+    )
+
+    combined = (
+        agregar_indice_lluvia_corredor(
+            combined
+        )
+    )
+
+    combined = (
+        agregar_indice_caudal_corredor(
+            combined
+        )
+    )
+
+    combined = (
+        agregar_indice_hidrologico_exogeno(
+            combined
+        )
     )
 
     combined[
@@ -4388,11 +4515,11 @@ def get_exogenous_data(
     future_start = (
         pd.to_datetime(
             end
-        )
+        ).normalize()
         + pd.Timedelta(
             days=1
         )
-    ).normalize()
+    )
 
     future = (
         combined[
@@ -4405,9 +4532,7 @@ def get_exogenous_data(
             "datetime"
         )
         .drop_duplicates(
-            subset=[
-                "datetime"
-            ],
+            subset=["datetime"],
             keep="last",
         )
         .head(
@@ -4419,108 +4544,86 @@ def get_exogenous_data(
     )
 
     # ========================================================
-    # COBERTURA
+    # CALIDAD / COBERTURA
     # ========================================================
 
-    rain_base_columns = [
-        RAIN_COLUMNS[
-            station
-        ]
-        for station in STATIONS
-    ]
-
-    flow_base_columns = [
-        FLOW_COLUMNS[
-            station
-        ]
-        for station in STATIONS
-    ]
-
-    rain_coverage = _column_coverage(
-        history,
-        rain_base_columns,
+    flow_quality = (
+        _flow_quality_summary(
+            history
+        )
     )
 
-    flow_coverage = _column_coverage(
-        history,
-        flow_base_columns,
-    )
+    rain_stations = []
 
-    available_rain_stations = [
-        station
-        for station in STATIONS
-        if rain_coverage.get(
+    flow_observed_stations = []
+
+    flow_available_stations = []
+
+    for station in STATIONS:
+
+        rain_col = (
             RAIN_COLUMNS[
                 station
-            ],
-            0,
-        ) > 0
-    ]
+            ]
+        )
 
-    available_flow_stations = [
-        station
-        for station in STATIONS
-        if flow_coverage.get(
+        flow_col = (
             FLOW_COLUMNS[
                 station
-            ],
-            0,
-        ) >= MIN_FLOW_OBSERVATIONS
-    ]
+            ]
+        )
 
-    # ========================================================
-    # MEDIANAS / ÚLTIMOS CAUDALES
-    # ========================================================
+        source_col = (
+            flow_col
+            + "_source"
+        )
 
-    flow_summary = {}
-
-    for station in available_flow_stations:
-
-        col = FLOW_COLUMNS[
-            station
-        ]
-
-        values = (
-            pd.to_numeric(
+        if (
+            rain_col in history.columns
+            and pd.to_numeric(
                 history[
-                    col
+                    rain_col
                 ],
                 errors="coerce",
             )
-            .dropna()
-        )
+            .notna()
+            .any()
+        ):
 
-        if values.empty:
-            continue
+            rain_stations.append(
+                station
+            )
 
-        flow_summary[
-            station
-        ] = {
+        if (
+            flow_col in history.columns
+            and pd.to_numeric(
+                history[
+                    flow_col
+                ],
+                errors="coerce",
+            )
+            .notna()
+            .any()
+        ):
 
-            "column":
-                col,
+            flow_available_stations.append(
+                station
+            )
 
-            "records":
-                int(
-                    len(
-                        values
-                    )
-                ),
+        if (
+            source_col
+            in history.columns
+            and (
+                history[
+                    source_col
+                ]
+                == "observado"
+            ).any()
+        ):
 
-            "median_30d":
-                float(
-                    values.tail(
-                        30
-                    ).median()
-                ),
-
-            "last":
-                float(
-                    values.iloc[
-                        -1
-                    ]
-                ),
-        }
+            flow_observed_stations.append(
+                station
+            )
 
     # ========================================================
     # METADATA
@@ -4537,28 +4640,8 @@ def get_exogenous_data(
         "rain_source":
             "Open-Meteo",
 
-        "caudal_source":
-            (
-                "INA A5 · Paraná troncal validado"
-                if available_flow_stations
-                else "Sin serie INA de caudal troncal validada"
-            ),
-
-        "rain_stations":
-            available_rain_stations,
-
-        "flow_stations":
-            available_flow_stations,
-
-        "rain_station_count":
-            len(
-                available_rain_stations
-            ),
-
-        "flow_station_count":
-            len(
-                available_flow_stations
-            ),
+        "flow_source":
+            "INA A5 + reconstrucción hidrológica",
 
         "main_flow_station":
             main_flow_station,
@@ -4566,8 +4649,32 @@ def get_exogenous_data(
         "main_flow_column":
             main_flow_col,
 
-        "flow_summary":
-            flow_summary,
+        "rain_stations":
+            rain_stations,
+
+        "flow_observed_stations":
+            flow_observed_stations,
+
+        "flow_available_stations":
+            flow_available_stations,
+
+        "rain_station_count":
+            len(
+                rain_stations
+            ),
+
+        "flow_observed_station_count":
+            len(
+                flow_observed_stations
+            ),
+
+        "flow_available_station_count":
+            len(
+                flow_available_stations
+            ),
+
+        "flow_quality":
+            flow_quality,
 
         "rain_history":
             rain_meta,
@@ -4578,78 +4685,36 @@ def get_exogenous_data(
         "flow_history":
             flow_meta,
 
-        "flow_series":
-            flow_meta.get(
-                "flow_series",
-                {}
-            ),
-
-        "rain_coverage":
-            rain_coverage,
-
-        "flow_coverage":
-            flow_coverage,
-
         "history_rows":
             int(
-                len(
-                    history
-                )
+                len(history)
             ),
 
         "future_rows":
             int(
-                len(
-                    future
-                )
+                len(future)
             ),
-
-        "history_start":
-            (
-                history[
-                    "datetime"
-                ].min()
-                if not history.empty
-                else None
-            ),
-
-        "history_end":
-            (
-                history[
-                    "datetime"
-                ].max()
-                if not history.empty
-                else None
-            ),
-
-        "flow_validation":
-            {
-
-                "min_median_m3s":
-                    PARANA_TRUNK_MIN_MEDIAN_FLOW,
-
-                "min_recent_m3s":
-                    PARANA_TRUNK_MIN_RECENT_FLOW,
-
-                "max_m3s":
-                    PARANA_TRUNK_MAX_FLOW,
-
-                "neighbor_ratio_min":
-                    FLOW_NEIGHBOR_RATIO_MIN,
-
-                "neighbor_ratio_max":
-                    FLOW_NEIGHBOR_RATIO_MAX,
-            },
 
         "real_weather_forecast_days":
             OPEN_METEO_REAL_FORECAST_DAYS,
 
-        "rain_after_real_forecast":
-            (
-                "No se interpreta como pronóstico "
-                "meteorológico determinista después "
-                "del horizonte disponible."
-            ),
+        "reconstruction":
+            {
+
+                "short_interpolation_days":
+                    SHORT_INTERPOLATION_LIMIT,
+
+                "historical_ratio_min_overlap":
+                    MIN_RATIO_OVERLAP,
+
+                "methods":
+                    [
+                        "observado",
+                        "interpolado",
+                        "estimado_ratio",
+                        "estimado_corredor",
+                    ],
+            },
     }
 
     return (
@@ -4660,7 +4725,7 @@ def get_exogenous_data(
 
 
 # ============================================================
-# DIAGNÓSTICO COMPLETO
+# DIAGNÓSTICO
 # ============================================================
 
 def diagnostic(
@@ -4674,180 +4739,52 @@ def diagnostic(
             VERSION,
 
         "start":
-            _normalize_date(
-                start
-            ),
+            _normalize_date(start),
 
         "end":
-            _normalize_date(
-                end
-            ),
+            _normalize_date(end),
 
         "status":
             "pendiente",
     }
 
-    # ========================================================
-    # CATÁLOGO
-    # ========================================================
-
     try:
 
-        catalog = get_ina_catalog()
-
-        caudal_catalog = catalog[
-            catalog[
-                "var_id"
-            ]
-            == VAR_ID_CAUDAL
-        ]
+        catalog = (
+            get_ina_catalog()
+        )
 
         result[
             "ina_catalog_records"
         ] = int(
-            len(
-                catalog
-            )
+            len(catalog)
         )
 
         result[
-            "ina_caudal_series"
+            "ina_flow_series"
         ] = int(
-            len(
-                caudal_catalog
-            )
+            (
+                catalog[
+                    "var_id"
+                ]
+                == VAR_ID_CAUDAL
+            ).sum()
         )
 
     except Exception as exc:
 
         result[
-            "ina_catalog_error"
-        ] = str(
-            exc
-        )
-
-    # ========================================================
-    # CANDIDATOS Y VALIDACIÓN
-    # ========================================================
-
-    station_results = {}
-
-    for station in STATIONS:
-
-        info = {}
-
-        try:
-
-            candidates = (
-                candidatos_caudal_estacion(
-                    station,
-                    start,
-                    end,
-                )
-            )
-
-            info[
-                "candidate_count"
-            ] = int(
-                len(
-                    candidates
-                )
-            )
-
-            if not candidates.empty:
-
-                preview_cols = [
-                    col
-                    for col in [
-                        "series_id",
-                        "nombre",
-                        "rio",
-                        "timestart",
-                        "timeend",
-                        "count",
-                        "is_parana_trunk",
-                        "score",
-                    ]
-                    if col
-                    in candidates.columns
-                ]
-
-                info[
-                    "top_candidates"
-                ] = (
-                    candidates[
-                        preview_cols
-                    ]
-                    .head(
-                        5
-                    )
-                    .to_dict(
-                        orient="records"
-                    )
-                )
-
-            selected, meta = (
-                seleccionar_serie_caudal(
-                    station,
-                    start,
-                    end,
-                )
-            )
-
-            info[
-                "selection"
-            ] = meta
-
-            if selected is not None:
-
-                info[
-                    "selected_series_id"
-                ] = selected.get(
-                    "series_id"
-                )
-
-                info[
-                    "selected_name"
-                ] = selected.get(
-                    "nombre"
-                )
-
-                info[
-                    "selected_river"
-                ] = selected.get(
-                    "rio"
-                )
-
-        except Exception as exc:
-
-            info[
-                "error"
-            ] = str(
-                exc
-            )
-
-        station_results[
-            station
-        ] = info
-
-    result[
-        "stations"
-    ] = station_results
-
-    # ========================================================
-    # TEST FINAL
-    # ========================================================
+            "catalog_error"
+        ] = str(exc)
 
     try:
 
-        (
-            history,
-            future,
-            metadata,
-        ) = get_exogenous_data(
-            start,
-            end,
-            forecast_days=60,
+        history, future, metadata = (
+            get_exogenous_data(
+                start,
+                end,
+                forecast_days=60,
+            )
         )
 
         result[
@@ -4857,31 +4794,13 @@ def diagnostic(
         result[
             "history_rows"
         ] = int(
-            len(
-                history
-            )
+            len(history)
         )
 
         result[
             "future_rows"
         ] = int(
-            len(
-                future
-            )
-        )
-
-        result[
-            "rain_stations"
-        ] = metadata.get(
-            "rain_stations",
-            []
-        )
-
-        result[
-            "flow_stations"
-        ] = metadata.get(
-            "flow_stations",
-            []
+            len(future)
         )
 
         result[
@@ -4897,76 +4816,105 @@ def diagnostic(
         )
 
         result[
-            "flow_summary"
+            "flow_observed_stations"
         ] = metadata.get(
-            "flow_summary",
-            {}
+            "flow_observed_stations",
+            [],
         )
 
         result[
-            "rain_coverage"
+            "flow_available_stations"
         ] = metadata.get(
-            "rain_coverage",
-            {}
+            "flow_available_stations",
+            [],
         )
 
         result[
-            "flow_coverage"
+            "flow_quality"
         ] = metadata.get(
-            "flow_coverage",
-            {}
+            "flow_quality",
+            {},
         )
 
-        result[
-            "neighbor_rejected"
-        ] = (
-            metadata.get(
-                "flow_history",
-                {}
+        current_flows = {}
+
+        for station in STATIONS:
+
+            col = FLOW_COLUMNS[
+                station
+            ]
+
+            source_col = (
+                col
+                + "_source"
             )
-            .get(
-                "neighbor_rejected",
-                []
-            )
-        )
 
-        result[
-            "rain_columns_present"
-        ] = [
-            col
-            for col
-            in RAIN_COLUMNS.values()
-            if (
-                col in history.columns
-                and pd.to_numeric(
-                    history[
-                        col
+            quality_col = (
+                col
+                + "_quality"
+            )
+
+            if col not in history.columns:
+                continue
+
+            valid = history[
+                [
+                    "datetime",
+                    col,
+                    source_col,
+                    quality_col,
+                ]
+            ].copy()
+
+            valid[
+                col
+            ] = pd.to_numeric(
+                valid[
+                    col
+                ],
+                errors="coerce",
+            )
+
+            valid = valid.dropna(
+                subset=[col]
+            )
+
+            if valid.empty:
+                continue
+
+            row = valid.iloc[-1]
+
+            current_flows[
+                station
+            ] = {
+
+                "datetime":
+                    row[
+                        "datetime"
                     ],
-                    errors="coerce",
-                )
-                .notna()
-                .any()
-            )
-        ]
+
+                "flow_m3s":
+                    float(
+                        row[col]
+                    ),
+
+                "source":
+                    row[
+                        source_col
+                    ],
+
+                "quality":
+                    _safe_float(
+                        row[
+                            quality_col
+                        ],
+                        0.0,
+                    ),
+            }
 
         result[
-            "flow_columns_present"
-        ] = [
-            col
-            for col
-            in FLOW_COLUMNS.values()
-            if (
-                col in history.columns
-                and pd.to_numeric(
-                    history[
-                        col
-                    ],
-                    errors="coerce",
-                )
-                .notna()
-                .any()
-            )
-        ]
+            "current_flows"
+        ] = current_flows
 
     except Exception as exc:
 
@@ -4976,8 +4924,6 @@ def diagnostic(
 
         result[
             "error"
-        ] = str(
-            exc
-        )
+        ] = str(exc)
 
     return result
