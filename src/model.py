@@ -1,28 +1,32 @@
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # src/model.py
-# V11.10.1 COMPLETO
+# V11.11 COMPLETO
 #
 # MODELO HIDROLÓGICO MULTIVARIABLE
 #
-# ------------------------------------------------------------
-# VARIABLES:
-# - Nivel San Nicolás
-# - Niveles aguas arriba
-# - Caudales INA por estación
-# - Precipitación por estación
-# - Tendencias
-# - Lags
-# - Acumulados
-# - Señales hidrológicas
+# Integra:
+#
+#   - nivel San Nicolás
+#   - niveles aguas arriba
+#   - caudales INA observados
+#   - caudales reconstruidos
+#   - calidad del caudal
+#   - lluvias por estación
+#   - lluvia acumulada
+#   - propagación hidrológica
+#   - presión hidrológica
+#   - eventos históricos similares
+#   - escenarios P50 / P90 / P98
 #
 # HORIZONTES:
-# - 1-15 días
-# - 16-30 días
-# - 31-45 días
-# - 46-60 días
 #
-# COMPATIBILIDAD:
+#   1-15 días   = pronóstico operativo
+#   16-30 días  = proyección hidrológica
+#   31-45 días  = escenario extendido
+#   46-60 días  = tendencia / escenario histórico
+#
+# API PRINCIPAL:
 #
 # train(
 #     df,
@@ -40,24 +44,18 @@
 #     hydrology=None,
 # )
 #
-# También soporta por compatibilidad:
-#
-# predict(
-#     models,
-#     df,
-#     ...
-# )
 # ============================================================
 
+
+import math
 
 import numpy as np
 import pandas as pd
 
 from sklearn.ensemble import RandomForestRegressor
-
 from sklearn.metrics import (
-    mean_squared_error,
     mean_absolute_error,
+    mean_squared_error,
 )
 
 
@@ -65,7 +63,7 @@ from sklearn.metrics import (
 # VERSIÓN
 # ============================================================
 
-VERSION = "V11.10.1"
+VERSION = "V11.11"
 
 
 # ============================================================
@@ -80,11 +78,13 @@ MAX_FORECAST_DAYS = 60
 
 MIN_RMSE = 0.03
 
-MAX_UNCERTAINTY = 1.80
+MAX_UNCERTAINTY = 2.00
 
 LEVEL_MIN = -2.0
 
 LEVEL_MAX = 12.0
+
+RANDOM_STATE = 42
 
 
 # ============================================================
@@ -102,6 +102,10 @@ STATIONS = [
     "San Nicolás",
 ]
 
+
+# ============================================================
+# COLUMNAS
+# ============================================================
 
 LEVEL_COLUMNS = {
 
@@ -186,67 +190,47 @@ RAIN_COLUMNS = {
 
 # ============================================================
 # PESOS DEL CORREDOR
-#
-# Más peso a estaciones cercanas a San Nicolás.
 # ============================================================
 
 STATION_WEIGHTS = {
 
-    "Corrientes":
-        0.75,
+    "Corrientes": 0.08,
 
-    "Goya":
-        0.82,
+    "Goya": 0.09,
 
-    "La Paz":
-        0.90,
+    "La Paz": 0.11,
 
-    "Paraná":
-        1.00,
+    "Paraná": 0.15,
 
-    "Diamante":
-        1.08,
+    "Diamante": 0.16,
 
-    "Rosario":
-        1.18,
+    "Rosario": 0.17,
 
-    "Villa Constitución":
-        1.30,
+    "Villa Constitución": 0.14,
 
-    "San Nicolás":
-        1.40,
+    "San Nicolás": 0.10,
 }
 
 
 # ============================================================
-# RETARDOS DE REFERENCIA
-#
-# Se utilizan sólo como punto de partida.
-# Si hydrology aporta retardos históricos, se reemplazan.
+# RETARDOS DE RESPALDO
 # ============================================================
 
 DEFAULT_PROPAGATION_LAGS = {
 
-    "Corrientes":
-        18,
+    "Corrientes": 20,
 
-    "Goya":
-        15,
+    "Goya": 16,
 
-    "La Paz":
-        12,
+    "La Paz": 12,
 
-    "Paraná":
-        8,
+    "Paraná": 8,
 
-    "Diamante":
-        6,
+    "Diamante": 6,
 
-    "Rosario":
-        3,
+    "Rosario": 3,
 
-    "Villa Constitución":
-        1,
+    "Villa Constitución": 1,
 }
 
 
@@ -267,30 +251,24 @@ def _datetime_naive(values):
     )
 
 
-def _numeric(
-    values,
-):
+def _numeric(series):
 
     return pd.to_numeric(
-        values,
+        series,
         errors="coerce",
     )
 
 
 def _safe_float(
     value,
-    default=None,
+    default=np.nan,
 ):
 
     try:
 
-        value = float(
-            value
-        )
+        value = float(value)
 
-        if np.isfinite(
-            value
-        ):
+        if np.isfinite(value):
 
             return value
 
@@ -308,9 +286,7 @@ def _safe_int(
     try:
 
         return int(
-            float(
-                value
-            )
+            float(value)
         )
 
     except Exception:
@@ -319,12 +295,10 @@ def _safe_int(
 
 
 # ============================================================
-# NORMALIZAR NIVEL LOCAL
+# NIVEL LOCAL
 # ============================================================
 
-def preparar_nivel_local(
-    df,
-):
+def preparar_nivel_local(df):
 
     if (
         df is None
@@ -336,12 +310,10 @@ def preparar_nivel_local(
     ):
 
         raise ValueError(
-            "No existen datos de San Nicolás."
+            "No hay datos de nivel de San Nicolás."
         )
 
-
     x = df.copy()
-
 
     if "datetime" not in x.columns:
 
@@ -349,6 +321,25 @@ def preparar_nivel_local(
             "Los datos no contienen columna datetime."
         )
 
+    level_col = None
+
+    for candidate in [
+        "nivel_san_nicolas",
+        "nivel",
+        "value",
+        "level",
+    ]:
+
+        if candidate in x.columns:
+
+            level_col = candidate
+            break
+
+    if level_col is None:
+
+        raise ValueError(
+            "No fue posible identificar el nivel de San Nicolás."
+        )
 
     x[
         "datetime"
@@ -358,34 +349,13 @@ def preparar_nivel_local(
         ]
     )
 
-
-    if "nivel" in x.columns:
-
-        source_col = "nivel"
-
-    elif "value" in x.columns:
-
-        source_col = "value"
-
-    elif "nivel_san_nicolas" in x.columns:
-
-        source_col = "nivel_san_nicolas"
-
-    else:
-
-        raise ValueError(
-            "No existe columna de nivel de San Nicolás."
-        )
-
-
     x[
         "nivel"
     ] = _numeric(
         x[
-            source_col
+            level_col
         ]
     )
-
 
     x = x.dropna(
         subset=[
@@ -393,7 +363,6 @@ def preparar_nivel_local(
             "nivel",
         ]
     )
-
 
     x = x[
         (
@@ -411,7 +380,6 @@ def preparar_nivel_local(
         )
     ]
 
-
     x[
         "datetime"
     ] = (
@@ -421,7 +389,6 @@ def preparar_nivel_local(
         .dt
         .normalize()
     )
-
 
     x = (
         x
@@ -440,45 +407,47 @@ def preparar_nivel_local(
         )
     )
 
-
-    if len(
-        x
-    ) < MIN_OBSERVATIONS:
+    if len(x) < MIN_OBSERVATIONS:
 
         raise ValueError(
-            "Se necesitan al menos "
-            f"{MIN_OBSERVATIONS} observaciones "
-            "de San Nicolás para entrenar el modelo."
+            "No hay suficientes observaciones para entrenar el modelo."
         )
-
 
     return x
 
 
 # ============================================================
-# NORMALIZAR EXÓGENAS
+# EXÓGENAS
 # ============================================================
 
 def preparar_exogenas(
-    df,
+    exog_history,
 ):
 
     if (
-        df is None
+        exog_history is None
         or not isinstance(
-            df,
+            exog_history,
             pd.DataFrame,
         )
-        or df.empty
-        or "datetime"
-        not in df.columns
+        or exog_history.empty
     ):
 
-        return pd.DataFrame()
+        return pd.DataFrame(
+            columns=[
+                "datetime"
+            ]
+        )
 
+    x = exog_history.copy()
 
-    x = df.copy()
+    if "datetime" not in x.columns:
 
+        return pd.DataFrame(
+            columns=[
+                "datetime"
+            ]
+        )
 
     x[
         "datetime"
@@ -487,14 +456,6 @@ def preparar_exogenas(
             "datetime"
         ]
     )
-
-
-    x = x.dropna(
-        subset=[
-            "datetime"
-        ]
-    )
-
 
     x[
         "datetime"
@@ -506,29 +467,34 @@ def preparar_exogenas(
         .normalize()
     )
 
+    numeric_prefixes = (
+        "q_",
+        "rain_",
+        "caudal_",
+        "precip_",
+        "flow_",
+        "hydro_",
+    )
 
-    numeric_cols = [
+    for col in x.columns:
 
-        col
+        if col == "datetime":
+            continue
 
-        for col in x.columns
+        if (
+            col.startswith(
+                numeric_prefixes
+            )
+            or col.endswith(
+                "_quality"
+            )
+        ):
 
-        if col != "datetime"
-    ]
+            x[col] = _numeric(
+                x[col]
+            )
 
-
-    for col in numeric_cols:
-
-        x[
-            col
-        ] = _numeric(
-            x[
-                col
-            ]
-        )
-
-
-    x = (
+    return (
         x
         .sort_values(
             "datetime"
@@ -545,33 +511,38 @@ def preparar_exogenas(
     )
 
 
-    return x
-
-
 # ============================================================
-# NORMALIZAR AGUAS ARRIBA
+# UPSTREAM
 # ============================================================
 
 def preparar_upstream(
-    df,
+    upstream_history,
 ):
 
     if (
-        df is None
+        upstream_history is None
         or not isinstance(
-            df,
+            upstream_history,
             pd.DataFrame,
         )
-        or df.empty
-        or "datetime"
-        not in df.columns
+        or upstream_history.empty
     ):
 
-        return pd.DataFrame()
+        return pd.DataFrame(
+            columns=[
+                "datetime"
+            ]
+        )
 
+    x = upstream_history.copy()
 
-    x = df.copy()
+    if "datetime" not in x.columns:
 
+        return pd.DataFrame(
+            columns=[
+                "datetime"
+            ]
+        )
 
     x[
         "datetime"
@@ -580,14 +551,6 @@ def preparar_upstream(
             "datetime"
         ]
     )
-
-
-    x = x.dropna(
-        subset=[
-            "datetime"
-        ]
-    )
-
 
     x[
         "datetime"
@@ -599,62 +562,24 @@ def preparar_upstream(
         .normalize()
     )
 
-
     for col in LEVEL_COLUMNS.values():
 
         if col in x.columns:
 
-            x[
-                col
-            ] = _numeric(
-                x[
-                    col
-                ]
+            x[col] = _numeric(
+                x[col]
             )
 
-
-    # --------------------------------------------------------
-    # Reducir a una fila diaria.
-    # --------------------------------------------------------
-
-    numeric_cols = [
-
-        col
-
-        for col in LEVEL_COLUMNS.values()
-
-        if col in x.columns
-    ]
-
-
-    if not numeric_cols:
-
-        return pd.DataFrame(
-            {
-                "datetime":
-                    x[
-                        "datetime"
-                    ]
-            }
-        ).drop_duplicates()
-
-
-    x = (
-        x[
-            [
-                "datetime",
-                *numeric_cols,
-            ]
-        ]
-        .groupby(
-            "datetime",
-            as_index=False,
-        )
-        .mean(
-            numeric_only=True
-        )
+    return (
+        x
         .sort_values(
             "datetime"
+        )
+        .drop_duplicates(
+            subset=[
+                "datetime"
+            ],
+            keep="last",
         )
         .reset_index(
             drop=True
@@ -662,11 +587,8 @@ def preparar_upstream(
     )
 
 
-    return x
-
-
 # ============================================================
-# DATASET UNIFICADO
+# DATASET
 # ============================================================
 
 def preparar_dataset(
@@ -679,130 +601,105 @@ def preparar_dataset(
         df
     )
 
-
-    dataset = local.copy()
-
+    upstream = preparar_upstream(
+        upstream_history
+    )
 
     exog = preparar_exogenas(
         exog_history
     )
 
-
-    upstream = preparar_upstream(
-        upstream_history
-    )
-
+    result = local.copy()
 
     # ========================================================
-    # MERGE AGUAS ARRIBA
+    # UPSTREAM
     # ========================================================
 
     if not upstream.empty:
 
-        dataset = dataset.merge(
+        duplicate = [
+            col
+            for col in upstream.columns
+            if (
+                col != "datetime"
+                and col in result.columns
+            )
+        ]
+
+        upstream = upstream.drop(
+            columns=duplicate,
+            errors="ignore",
+        )
+
+        result = result.merge(
             upstream,
             on="datetime",
             how="left",
         )
 
-
     # ========================================================
-    # MERGE EXÓGENAS
+    # EXÓGENAS
     # ========================================================
 
     if not exog.empty:
 
-        # Evitar duplicados accidentales.
-        exog_cols = [
-
+        duplicate = [
             col
-
             for col in exog.columns
-
             if (
-                col == "datetime"
-                or col not in dataset.columns
+                col != "datetime"
+                and col in result.columns
             )
         ]
 
+        exog = exog.drop(
+            columns=duplicate,
+            errors="ignore",
+        )
 
-        dataset = dataset.merge(
-            exog[
-                exog_cols
-            ],
+        result = result.merge(
+            exog,
             on="datetime",
             how="left",
         )
 
+    # ========================================================
+    # INTERPOLACIÓN LIMITADA
+    # ========================================================
 
-    dataset = dataset.sort_values(
-        "datetime"
-    ).reset_index(
-        drop=True
+    interpolate_cols = (
+        list(
+            LEVEL_COLUMNS.values()
+        )
+        +
+        list(
+            FLOW_COLUMNS.values()
+        )
     )
 
+    for col in interpolate_cols:
 
-    # ========================================================
-    # INTERPOLACIÓN CORTA NIVELES UPSTREAM
-    # ========================================================
+        if col in result.columns:
 
-    for col in LEVEL_COLUMNS.values():
-
-        if col not in dataset.columns:
-            continue
-
-
-        values = _numeric(
-            dataset[
-                col
-            ]
-        )
-
-
-        if values.notna().sum() >= 3:
-
-            dataset[
-                col
-            ] = (
-                values
+            result[col] = (
+                _numeric(
+                    result[col]
+                )
                 .interpolate(
                     limit=5,
                     limit_area="inside",
                 )
             )
 
-
-    # ========================================================
-    # INTERPOLACIÓN CORTA DE CAUDALES
-    # ========================================================
-
-    for col in FLOW_COLUMNS.values():
-
-        if col not in dataset.columns:
-            continue
-
-
-        values = _numeric(
-            dataset[
-                col
-            ]
+    return (
+        result
+        .sort_values(
+            "datetime"
         )
-
-
-        if values.notna().sum() >= 3:
-
-            dataset[
-                col
-            ] = (
-                values
-                .interpolate(
-                    limit=5,
-                    limit_area="inside",
-                )
-            )
-
-
-    return dataset
+        .reset_index(
+            drop=True
+        )
+    )
 
 
 # ============================================================
@@ -813,255 +710,176 @@ def obtener_lags_hidrologicos(
     hydrology=None,
 ):
 
-    lags = (
-        DEFAULT_PROPAGATION_LAGS.copy()
+    result = dict(
+        DEFAULT_PROPAGATION_LAGS
     )
-
 
     if not isinstance(
         hydrology,
         dict,
     ):
 
-        return lags
+        return result
 
+    # ========================================================
+    # LAG DIRECTO A SN
+    # ========================================================
 
-    corridor = hydrology.get(
+    lag_to_sn = hydrology.get(
+        "lag_to_sn"
+    )
+
+    if (
+        isinstance(
+            lag_to_sn,
+            pd.DataFrame,
+        )
+        and not lag_to_sn.empty
+    ):
+
+        for _, row in (
+            lag_to_sn.iterrows()
+        ):
+
+            station = row.get(
+                "station"
+            )
+
+            lag = _safe_int(
+                row.get(
+                    "lag_days"
+                ),
+                None,
+            )
+
+            if (
+                station
+                in result
+                and lag is not None
+            ):
+
+                result[
+                    station
+                ] = int(
+                    np.clip(
+                        lag,
+                        0,
+                        45,
+                    )
+                )
+
+    # ========================================================
+    # COMPATIBILIDAD CON VERSIONES ANTERIORES
+    # ========================================================
+
+    corridor_lags = hydrology.get(
         "corridor_lags"
     )
 
-
     if (
-        corridor is None
-        or not isinstance(
-            corridor,
+        isinstance(
+            corridor_lags,
             pd.DataFrame,
         )
-        or corridor.empty
+        and not corridor_lags.empty
     ):
 
-        # Corrientes directo como mínimo.
-        current_estimate = (
-            hydrology.get(
-                "current_estimate",
-                {}
+        # sólo usamos esto como respaldo si no vino lag_to_sn
+        if (
+            not isinstance(
+                lag_to_sn,
+                pd.DataFrame,
             )
-        )
-
-
-        if isinstance(
-            current_estimate,
-            dict,
+            or lag_to_sn.empty
         ):
 
-            delay = _safe_int(
-                current_estimate.get(
-                    "delay_days"
-                ),
-                0,
-            )
+            segments = {}
 
+            for _, row in (
+                corridor_lags.iterrows()
+            ):
 
-            if 1 <= delay <= 40:
-
-                lags[
-                    "Corrientes"
-                ] = delay
-
-
-        return lags
-
-
-    # --------------------------------------------------------
-    # Intentar interpretar retardos por tramo.
-    # Construimos retardo acumulado hasta San Nicolás.
-    # --------------------------------------------------------
-
-    segment_lags = {}
-
-
-    for _, row in corridor.iterrows():
-
-        upstream_station = None
-        downstream_station = None
-
-
-        for key in [
-            "upstream",
-            "station_upstream",
-            "from_station",
-            "origen",
-            "desde",
-        ]:
-
-            if key in corridor.columns:
-
-                upstream_station = row.get(
-                    key
+                upstream = row.get(
+                    "upstream"
                 )
 
-                if upstream_station is not None:
-                    break
-
-
-        for key in [
-            "downstream",
-            "station_downstream",
-            "to_station",
-            "destino",
-            "hasta",
-        ]:
-
-            if key in corridor.columns:
-
-                downstream_station = row.get(
-                    key
+                downstream = row.get(
+                    "downstream"
                 )
-
-                if downstream_station is not None:
-                    break
-
-
-        lag = None
-
-
-        for key in [
-            "lag_days",
-            "delay_days",
-            "lag",
-            "retardo_dias",
-        ]:
-
-            if key in corridor.columns:
 
                 lag = _safe_int(
                     row.get(
-                        key
+                        "lag_days"
                     ),
-                    0,
+                    None,
                 )
 
-                if lag > 0:
-                    break
-
-
-        if (
-            upstream_station is None
-            or downstream_station is None
-            or lag is None
-            or lag <= 0
-        ):
-
-            continue
-
-
-        segment_lags[
-            (
-                str(
-                    upstream_station
-                ),
-                str(
-                    downstream_station
-                ),
-            )
-        ] = lag
-
-
-    # --------------------------------------------------------
-    # Si no se pudo interpretar, conservar defaults.
-    # --------------------------------------------------------
-
-    if not segment_lags:
-
-        return lags
-
-
-    # --------------------------------------------------------
-    # Acumular desde cada estación hacia San Nicolás.
-    # --------------------------------------------------------
-
-    order = STATIONS
-
-
-    for idx, station in enumerate(
-        order[
-            :-1
-        ]
-    ):
-
-        total = 0
-
-        valid = True
-
-
-        for i in range(
-            idx,
-            len(
-                order
-            )
-            - 1,
-        ):
-
-            pair = (
-                order[
-                    i
-                ],
-                order[
-                    i + 1
-                ],
-            )
-
-
-            segment = None
-
-
-            # Coincidencia exacta.
-            for key, value in segment_lags.items():
-
                 if (
-                    str(
-                        key[0]
-                    ).lower()
-                    == str(
-                        pair[0]
-                    ).lower()
-                    and
-                    str(
-                        key[1]
-                    ).lower()
-                    == str(
-                        pair[1]
-                    ).lower()
+                    upstream
+                    and downstream
+                    and lag is not None
                 ):
 
-                    segment = value
-                    break
+                    segments[
+                        (
+                            upstream,
+                            downstream,
+                        )
+                    ] = lag
 
+            corridor = [
+                "Corrientes",
+                "Goya",
+                "La Paz",
+                "Paraná",
+                "Diamante",
+                "Rosario",
+                "Villa Constitución",
+                "San Nicolás",
+            ]
 
-            if segment is None:
+            for i, station in enumerate(
+                corridor[:-1]
+            ):
 
-                valid = False
-                break
+                total = 0
 
+                valid = True
 
-            total += segment
+                for j in range(
+                    i,
+                    len(corridor) - 1,
+                ):
 
+                    key = (
+                        corridor[j],
+                        corridor[j + 1],
+                    )
 
-        if (
-            valid
-            and 1 <= total <= 45
-        ):
+                    if key not in segments:
 
-            lags[
-                station
-            ] = total
+                        valid = False
+                        break
 
+                    total += segments[key]
 
-    return lags
+                if valid:
+
+                    result[
+                        station
+                    ] = int(
+                        np.clip(
+                            total,
+                            0,
+                            45,
+                        )
+                    )
+
+    return result
 
 
 # ============================================================
-# FEATURES NIVEL LOCAL
+# FEATURES LOCALES
 # ============================================================
 
 def agregar_features_locales(
@@ -1070,13 +888,15 @@ def agregar_features_locales(
 
     result = x.copy()
 
-
-    level = _numeric(
+    nivel = _numeric(
         result[
             "nivel"
         ]
     )
 
+    # ========================================================
+    # LAGS
+    # ========================================================
 
     for lag in [
         1,
@@ -1092,25 +912,30 @@ def agregar_features_locales(
 
         result[
             f"nivel_lag_{lag}"
-        ] = level.shift(
+        ] = nivel.shift(
             lag
         )
 
+    # ========================================================
+    # CAMBIOS
+    # ========================================================
 
     for lag in [
         1,
         3,
         7,
         14,
-        30,
     ]:
 
         result[
             f"nivel_diff_{lag}"
-        ] = level.diff(
+        ] = nivel.diff(
             lag
         )
 
+    # ========================================================
+    # ROLLING
+    # ========================================================
 
     for window in [
         3,
@@ -1119,53 +944,26 @@ def agregar_features_locales(
         30,
     ]:
 
-        result[
-            f"nivel_mean_{window}"
-        ] = (
-            level
-            .rolling(
-                window,
-                min_periods=2,
-            )
-            .mean()
+        roll = nivel.rolling(
+            window,
+            min_periods=1,
         )
 
+        result[
+            f"nivel_mean_{window}"
+        ] = roll.mean()
 
         result[
             f"nivel_std_{window}"
-        ] = (
-            level
-            .rolling(
-                window,
-                min_periods=2,
-            )
-            .std()
-        )
-
+        ] = roll.std()
 
         result[
             f"nivel_min_{window}"
-        ] = (
-            level
-            .rolling(
-                window,
-                min_periods=2,
-            )
-            .min()
-        )
-
+        ] = roll.min()
 
         result[
             f"nivel_max_{window}"
-        ] = (
-            level
-            .rolling(
-                window,
-                min_periods=2,
-            )
-            .max()
-        )
-
+        ] = roll.max()
 
         result[
             f"nivel_range_{window}"
@@ -1179,51 +977,46 @@ def agregar_features_locales(
             ]
         )
 
-
     return result
 
 
 # ============================================================
-# FEATURES NIVELES AGUAS ARRIBA
+# FEATURES UPSTREAM
 # ============================================================
 
 def agregar_features_upstream(
     x,
-    propagation_lags=None,
+    lags,
 ):
 
     result = x.copy()
 
+    weighted_signal = pd.Series(
+        0.0,
+        index=result.index,
+        dtype=float,
+    )
 
-    if propagation_lags is None:
+    total_weight = 0.0
 
-        propagation_lags = (
-            DEFAULT_PROPAGATION_LAGS
-        )
-
-
-    level_signal_parts = []
-
-
-    for station, col in LEVEL_COLUMNS.items():
+    for station, col in (
+        LEVEL_COLUMNS.items()
+    ):
 
         if col not in result.columns:
+
             continue
 
-
-        values = _numeric(
-            result[
-                col
-            ]
+        level = _numeric(
+            result[col]
         )
 
+        if level.notna().sum() < 10:
 
-        if values.notna().sum() < 3:
             continue
 
-
         # ----------------------------------------------------
-        # Valores y cambios.
+        # Cambios
         # ----------------------------------------------------
 
         for lag in [
@@ -1235,42 +1028,46 @@ def agregar_features_upstream(
 
             result[
                 f"{col}_diff_{lag}"
-            ] = values.diff(
+            ] = level.diff(
                 lag
             )
 
+        # ----------------------------------------------------
+        # Tendencia
+        # ----------------------------------------------------
 
-        for window in [
-            3,
-            7,
-            14,
-        ]:
-
-            result[
-                f"{col}_mean_{window}"
-            ] = (
-                values
-                .rolling(
-                    window,
-                    min_periods=2,
-                )
-                .mean()
+        result[
+            f"{col}_mean_7"
+        ] = (
+            level
+            .rolling(
+                7,
+                min_periods=1,
             )
+            .mean()
+        )
 
+        result[
+            f"{col}_mean_14"
+        ] = (
+            level
+            .rolling(
+                14,
+                min_periods=1,
+            )
+            .mean()
+        )
 
         result[
             f"{col}_trend_7"
         ] = (
-            values
+            level
             -
-            values.shift(
-                7
-            )
-        ) / 7.0
-
+            level.shift(7)
+        )
 
         # ----------------------------------------------------
-        # Lags generales.
+        # Lags estándares
         # ----------------------------------------------------
 
         for lag in [
@@ -1286,91 +1083,79 @@ def agregar_features_upstream(
 
             result[
                 f"{col}_lag_{lag}"
-            ] = values.shift(
+            ] = level.shift(
                 lag
             )
 
-
         # ----------------------------------------------------
-        # Lag hidrológico estimado hacia San Nicolás.
+        # Lag de propagación aprendido
         # ----------------------------------------------------
 
-        hydro_lag = _safe_int(
-            propagation_lags.get(
-                station
-            ),
-            DEFAULT_PROPAGATION_LAGS.get(
+        propagation_lag = int(
+            lags.get(
                 station,
-                1,
-            ),
-        )
-
-
-        hydro_lag = max(
-            1,
-            min(
-                hydro_lag,
-                45,
-            ),
-        )
-
-
-        result[
-            f"{col}_lag_propagacion"
-        ] = values.shift(
-            hydro_lag
-        )
-
-
-        # ----------------------------------------------------
-        # Señal ponderada por tendencia.
-        # ----------------------------------------------------
-
-        trend_component = (
-            result[
-                f"{col}_trend_7"
-            ]
-            *
-            STATION_WEIGHTS.get(
-                station,
-                1.0,
+                DEFAULT_PROPAGATION_LAGS.get(
+                    station,
+                    7,
+                ),
             )
         )
 
-
-        level_signal_parts.append(
-            trend_component
+        propagation_lag = int(
+            np.clip(
+                propagation_lag,
+                0,
+                45,
+            )
         )
-
-
-    if level_signal_parts:
-
-        signal_df = pd.concat(
-            level_signal_parts,
-            axis=1,
-        )
-
 
         result[
-            "upstream_level_signal"
-        ] = signal_df.mean(
-            axis=1,
-            skipna=True,
+            f"{col}_propagated"
+        ] = level.shift(
+            propagation_lag
         )
 
+        # ----------------------------------------------------
+        # Señal normalizada
+        # ----------------------------------------------------
 
-    else:
+        trend = (
+            level
+            -
+            level.shift(7)
+        )
 
-        result[
-            "upstream_level_signal"
-        ] = np.nan
+        signal = (
+            trend / 0.50
+        ).clip(
+            lower=-2.0,
+            upper=2.0,
+        )
 
+        weight = STATION_WEIGHTS[
+            station
+        ]
+
+        weighted_signal += (
+            signal.fillna(0.0)
+            * weight
+        )
+
+        total_weight += weight
+
+    if total_weight > 0:
+
+        weighted_signal /= total_weight
+
+    result[
+        "upstream_level_signal"
+    ] = weighted_signal
 
     return result
 
 
 # ============================================================
-# FEATURES CAUDAL
+# FEATURES DE CAUDAL
 # ============================================================
 
 def agregar_features_caudal(
@@ -1379,26 +1164,66 @@ def agregar_features_caudal(
 
     result = x.copy()
 
+    weighted_signal = pd.Series(
+        0.0,
+        index=result.index,
+        dtype=float,
+    )
 
-    flow_signal_parts = []
+    weighted_quality = pd.Series(
+        0.0,
+        index=result.index,
+        dtype=float,
+    )
 
+    total_weight = 0.0
 
-    for station, col in FLOW_COLUMNS.items():
+    for station, col in (
+        FLOW_COLUMNS.items()
+    ):
 
         if col not in result.columns:
-            continue
 
+            continue
 
         q = _numeric(
-            result[
-                col
-            ]
+            result[col]
         )
 
+        if q.notna().sum() < 5:
 
-        if q.notna().sum() < 3:
             continue
 
+        quality_col = (
+            col
+            + "_quality"
+        )
+
+        if quality_col in result.columns:
+
+            quality = (
+                _numeric(
+                    result[
+                        quality_col
+                    ]
+                )
+                .fillna(0.0)
+                .clip(
+                    lower=0.0,
+                    upper=1.0,
+                )
+            )
+
+        else:
+
+            quality = pd.Series(
+                1.0,
+                index=result.index,
+            )
+
+        # ----------------------------------------------------
+        # Cambios
+        # ----------------------------------------------------
 
         for lag in [
             1,
@@ -1413,6 +1238,9 @@ def agregar_features_caudal(
                 lag
             )
 
+        # ----------------------------------------------------
+        # Medias
+        # ----------------------------------------------------
 
         for window in [
             3,
@@ -1427,101 +1255,127 @@ def agregar_features_caudal(
                 q
                 .rolling(
                     window,
-                    min_periods=2,
+                    min_periods=1,
                 )
                 .mean()
             )
 
-
-        result[
-            f"{col}_trend_7"
-        ] = (
-            q
-            -
-            q.shift(
-                7
-            )
-        ) / 7.0
-
-
         result[
             f"{col}_relative_7"
         ] = (
-            q
-            -
-            q.shift(
-                7
+            q.diff(7)
+            /
+            q.shift(7).replace(
+                0,
+                np.nan,
             )
-        ) / q.shift(
-            7
-        ).replace(
+        )
+
+        result[
+            f"{col}_relative_14"
+        ] = (
+            q.diff(14)
+            /
+            q.shift(14).replace(
+                0,
+                np.nan,
+            )
+        )
+
+        # ----------------------------------------------------
+        # CALIDAD COMO FEATURE
+        # ----------------------------------------------------
+
+        result[
+            f"{col}_quality_feature"
+        ] = quality
+
+        # ----------------------------------------------------
+        # Señal ponderada
+        # ----------------------------------------------------
+
+        baseline = (
+            q
+            .rolling(
+                30,
+                min_periods=7,
+            )
+            .median()
+        )
+
+        relative = (
+            (
+                q
+                - baseline
+            )
+            /
+            baseline.replace(
+                0,
+                np.nan,
+            )
+        )
+
+        relative = relative.clip(
+            lower=-1.0,
+            upper=2.0,
+        )
+
+        weight = STATION_WEIGHTS[
+            station
+        ]
+
+        weighted_signal += (
+            relative.fillna(0.0)
+            * quality
+            * weight
+        )
+
+        weighted_quality += (
+            quality
+            * weight
+        )
+
+        total_weight += weight
+
+    valid_quality = (
+        weighted_quality
+        .replace(
             0,
             np.nan,
         )
+    )
 
+    result[
+        "weighted_flow_signal"
+    ] = (
+        weighted_signal
+        /
+        valid_quality
+    ).fillna(0.0)
 
-        for lag in [
-            1,
-            3,
-            5,
-            7,
-            10,
-            14,
-            21,
-        ]:
-
-            result[
-                f"{col}_lag_{lag}"
-            ] = q.shift(
-                lag
-            )
-
-
-        normalized_flow_trend = (
-            result[
-                f"{col}_relative_7"
-            ]
-            *
-            STATION_WEIGHTS.get(
-                station,
-                1.0,
-            )
-        )
-
-
-        flow_signal_parts.append(
-            normalized_flow_trend
-        )
-
-
-    if flow_signal_parts:
-
-        signal_df = pd.concat(
-            flow_signal_parts,
-            axis=1,
-        )
-
+    if total_weight > 0:
 
         result[
-            "upstream_flow_signal"
-        ] = signal_df.mean(
-            axis=1,
-            skipna=True,
+            "flow_data_quality"
+        ] = (
+            weighted_quality
+            / total_weight
+        ).clip(
+            lower=0.0,
+            upper=1.0,
         )
-
 
     else:
 
         result[
-            "upstream_flow_signal"
-        ] = np.nan
-
+            "flow_data_quality"
+        ] = 0.0
 
     return result
 
 
 # ============================================================
-# FEATURES LLUVIA
+# FEATURES DE LLUVIA
 # ============================================================
 
 def agregar_features_lluvia(
@@ -1530,31 +1384,31 @@ def agregar_features_lluvia(
 
     result = x.copy()
 
+    rain_signal = pd.Series(
+        0.0,
+        index=result.index,
+        dtype=float,
+    )
 
-    weighted_rain = []
+    total_weight = 0.0
 
-
-    for station, col in RAIN_COLUMNS.items():
+    for station, col in (
+        RAIN_COLUMNS.items()
+    ):
 
         if col not in result.columns:
+
             continue
 
-
-        rain = _numeric(
-            result[
-                col
-            ]
+        rain = (
+            _numeric(
+                result[col]
+            )
+            .fillna(0.0)
+            .clip(
+                lower=0.0
+            )
         )
-
-
-        if rain.notna().sum() < 3:
-            continue
-
-
-        rain = rain.clip(
-            lower=0
-        )
-
 
         for window in [
             3,
@@ -1563,20 +1417,10 @@ def agregar_features_lluvia(
             30,
         ]:
 
-            feature_name = (
-                f"{col}_{window}d"
-            )
-
-
-            # Si ya viene desde exogenous lo reemplazamos
-            # con el cálculo sobre el dataset unificado.
             result[
-                feature_name
+                f"{col}_{window}d"
             ] = (
                 rain
-                .fillna(
-                    0
-                )
                 .rolling(
                     window,
                     min_periods=1,
@@ -1584,69 +1428,12 @@ def agregar_features_lluvia(
                 .sum()
             )
 
+        weight = STATION_WEIGHTS[
+            station
+        ]
 
-        weighted_rain.append(
-            rain.fillna(
-                0
-            )
-            *
-            STATION_WEIGHTS.get(
-                station,
-                1.0,
-            )
-        )
-
-
-    if weighted_rain:
-
-        rain_matrix = pd.concat(
-            weighted_rain,
-            axis=1,
-        )
-
-
-        result[
-            "rain_signal"
-        ] = rain_matrix.mean(
-            axis=1,
-            skipna=True,
-        )
-
-
-        result[
-            "rain_corridor_3d"
-        ] = (
-            result[
-                "rain_signal"
-            ]
-            .rolling(
-                3,
-                min_periods=1,
-            )
-            .sum()
-        )
-
-
-        result[
-            "rain_corridor_7d"
-        ] = (
-            result[
-                "rain_signal"
-            ]
-            .rolling(
-                7,
-                min_periods=1,
-            )
-            .sum()
-        )
-
-
-        result[
-            "rain_corridor_15d"
-        ] = (
-            result[
-                "rain_signal"
-            ]
+        rain_15d = (
+            rain
             .rolling(
                 15,
                 min_periods=1,
@@ -1654,27 +1441,27 @@ def agregar_features_lluvia(
             .sum()
         )
 
-
-        result[
-            "rain_corridor_30d"
-        ] = (
-            result[
-                "rain_signal"
-            ]
-            .rolling(
-                30,
-                min_periods=1,
+        rain_signal += (
+            (
+                rain_15d
+                / 100.0
             )
-            .sum()
+            .clip(
+                lower=0.0,
+                upper=3.0,
+            )
+            * weight
         )
 
+        total_weight += weight
 
-    else:
+    if total_weight > 0:
 
-        result[
-            "rain_signal"
-        ] = np.nan
+        rain_signal /= total_weight
 
+    result[
+        "weighted_rain_signal"
+    ] = rain_signal
 
     return result
 
@@ -1689,7 +1476,6 @@ def agregar_features_temporales(
 
     result = x.copy()
 
-
     dt = pd.to_datetime(
         result[
             "datetime"
@@ -1697,46 +1483,165 @@ def agregar_features_temporales(
         errors="coerce",
     )
 
-
     result[
         "month"
     ] = dt.dt.month
 
-
     result[
-        "day_of_year"
+        "dayofyear"
     ] = dt.dt.dayofyear
 
-
     result[
-        "sin_day_of_year"
+        "month_sin"
     ] = np.sin(
         2
         * np.pi
         * result[
-            "day_of_year"
+            "month"
         ]
-        / 365.25
+        / 12.0
     )
 
-
     result[
-        "cos_day_of_year"
+        "month_cos"
     ] = np.cos(
         2
         * np.pi
         * result[
-            "day_of_year"
+            "month"
+        ]
+        / 12.0
+    )
+
+    result[
+        "doy_sin"
+    ] = np.sin(
+        2
+        * np.pi
+        * result[
+            "dayofyear"
         ]
         / 365.25
     )
 
+    result[
+        "doy_cos"
+    ] = np.cos(
+        2
+        * np.pi
+        * result[
+            "dayofyear"
+        ]
+        / 365.25
+    )
 
     return result
 
 
 # ============================================================
-# CREAR TODAS LAS FEATURES
+# FEATURES HIDROLÓGICAS GLOBALES
+# ============================================================
+
+def agregar_features_hidrologicas_globales(
+    x,
+):
+
+    result = x.copy()
+
+    upstream = _numeric(
+        result.get(
+            "upstream_level_signal",
+            0.0,
+        )
+    ).fillna(0.0)
+
+    flow = _numeric(
+        result.get(
+            "weighted_flow_signal",
+            0.0,
+        )
+    ).fillna(0.0)
+
+    rain = _numeric(
+        result.get(
+            "weighted_rain_signal",
+            0.0,
+        )
+    ).fillna(0.0)
+
+    quality = _numeric(
+        result.get(
+            "flow_data_quality",
+            0.0,
+        )
+    ).fillna(0.0)
+
+    # ========================================================
+    # ÍNDICE HIDROLÓGICO
+    # ========================================================
+
+    result[
+        "hydrological_pressure_model"
+    ] = (
+        0.40
+        * upstream
+        +
+        0.35
+        * flow
+        * (
+            0.50
+            +
+            0.50
+            * quality
+        )
+        +
+        0.25
+        * rain
+    ).clip(
+        lower=-1.5,
+        upper=3.0,
+    )
+
+    # ========================================================
+    # INTERACCIONES
+    # ========================================================
+
+    result[
+        "flow_x_rain"
+    ] = (
+        flow
+        * rain
+    )
+
+    result[
+        "upstream_x_flow"
+    ] = (
+        upstream
+        * flow
+    )
+
+    result[
+        "upstream_x_rain"
+    ] = (
+        upstream
+        * rain
+    )
+
+    result[
+        "combined_hydro_signal"
+    ] = (
+        upstream
+        +
+        flow
+        +
+        rain
+    ) / 3.0
+
+    return result
+
+
+# ============================================================
+# CREAR TABLA DE FEATURES
 # ============================================================
 
 def crear_features(
@@ -1744,55 +1649,62 @@ def crear_features(
     propagation_lags=None,
 ):
 
-    x = dataset.copy()
+    if propagation_lags is None:
 
+        propagation_lags = dict(
+            DEFAULT_PROPAGATION_LAGS
+        )
+
+    x = dataset.copy()
 
     x = agregar_features_locales(
         x
     )
 
-
     x = agregar_features_upstream(
         x,
-        propagation_lags=
-            propagation_lags,
+        propagation_lags,
     )
-
 
     x = agregar_features_caudal(
         x
     )
 
-
     x = agregar_features_lluvia(
         x
     )
-
 
     x = agregar_features_temporales(
         x
     )
 
+    x = agregar_features_hidrologicas_globales(
+        x
+    )
 
-    # --------------------------------------------------------
-    # Objetivo = variación del día siguiente.
-    # --------------------------------------------------------
+    # ========================================================
+    # TARGET
+    # ========================================================
+
+    x[
+        "target_next_level"
+    ] = x[
+        "nivel"
+    ].shift(
+        -1
+    )
 
     x[
         "target_delta"
     ] = (
         x[
-            "nivel"
+            "target_next_level"
         ]
-        .shift(
-            -1
-        )
         -
         x[
             "nivel"
         ]
     )
-
 
     return x
 
@@ -1802,58 +1714,55 @@ def crear_features(
 # ============================================================
 
 def seleccionar_features(
-    features_df,
+    features,
 ):
 
     excluded = {
+
         "datetime",
         "nivel",
+        "target_next_level",
         "target_delta",
     }
 
+    feature_names = []
 
-    selected = []
-
-
-    for col in features_df.columns:
+    for col in features.columns:
 
         if col in excluded:
             continue
 
+        # ----------------------------------------------------
+        # Sólo numéricas
+        # ----------------------------------------------------
 
         values = _numeric(
-            features_df[
-                col
-            ]
+            features[col]
         )
-
 
         valid_count = int(
             values.notna().sum()
         )
 
-
         if valid_count < 20:
+
             continue
 
-
-        # Evitar constantes.
         if values.nunique(
             dropna=True
         ) <= 1:
+
             continue
 
-
-        selected.append(
+        feature_names.append(
             col
         )
 
-
-    return selected
+    return feature_names
 
 
 # ============================================================
-# CONTAR GRUPOS DE FEATURES
+# COBERTURA POR GRUPO
 # ============================================================
 
 def _count_feature_groups(
@@ -1863,77 +1772,84 @@ def _count_feature_groups(
     upstream_count = 0
     flow_count = 0
     rain_count = 0
-
+    hydrology_count = 0
 
     for feature in feature_names:
 
-        name = str(
-            feature
-        ).lower()
-
+        low = feature.lower()
 
         if (
-            name.startswith(
-                "nivel_corrientes"
-            )
-            or name.startswith(
-                "nivel_goya"
-            )
-            or name.startswith(
-                "nivel_la_paz"
-            )
-            or name.startswith(
-                "nivel_parana"
-            )
-            or name.startswith(
-                "nivel_diamante"
-            )
-            or name.startswith(
-                "nivel_rosario"
-            )
-            or name.startswith(
-                "nivel_villa_constitucion"
-            )
-            or name
-            == "upstream_level_signal"
+            "nivel_corrientes"
+            in low
+            or "nivel_goya"
+            in low
+            or "nivel_la_paz"
+            in low
+            or "nivel_parana"
+            in low
+            or "nivel_diamante"
+            in low
+            or "nivel_rosario"
+            in low
+            or "nivel_villa"
+            in low
+            or "upstream_"
+            in low
         ):
 
             upstream_count += 1
 
-
         if (
-            name.startswith(
+            low.startswith(
                 "q_"
             )
-            or name
-            == "caudal_m3s"
-            or name
-            == "upstream_flow_signal"
+            or "caudal"
+            in low
+            or "flow_"
+            in low
         ):
 
             flow_count += 1
 
-
         if (
-            name.startswith(
+            low.startswith(
                 "rain_"
             )
-            or name
-            == "precip_mm"
+            or "precip"
+            in low
         ):
 
             rain_count += 1
 
+        if (
+            "hydro"
+            in low
+            or "propag"
+            in low
+            or "combined"
+            in low
+        ):
 
-    return (
-        upstream_count,
-        flow_count,
-        rain_count,
-    )
+            hydrology_count += 1
+
+    return {
+
+        "upstream":
+            upstream_count,
+
+        "flow":
+            flow_count,
+
+        "rain":
+            rain_count,
+
+        "hydrology":
+            hydrology_count,
+    }
 
 
 # ============================================================
-# ENTRENAMIENTO
+# TRAIN
 # ============================================================
 
 def train(
@@ -1943,19 +1859,6 @@ def train(
     hydrology=None,
     **kwargs,
 ):
-
-    """
-    Entrena Random Forest para predecir variación diaria.
-
-    Retorna:
-        models
-        metrics
-    """
-
-
-    # ========================================================
-    # DATASET
-    # ========================================================
 
     dataset = preparar_dataset(
 
@@ -1968,15 +1871,13 @@ def train(
             upstream_history,
     )
 
-
     propagation_lags = (
         obtener_lags_hidrologicos(
             hydrology
         )
     )
 
-
-    feature_table = crear_features(
+    features = crear_features(
 
         dataset,
 
@@ -1984,239 +1885,198 @@ def train(
             propagation_lags,
     )
 
-
-    feature_names = seleccionar_features(
-        feature_table
+    feature_names = (
+        seleccionar_features(
+            features
+        )
     )
-
 
     if not feature_names:
 
         raise ValueError(
-            "No se generaron variables suficientes "
-            "para entrenar el modelo."
+            "No fue posible generar variables para el entrenamiento."
         )
-
-
-    # ========================================================
-    # MEDIANAS PARA RELLENO
-    # ========================================================
-
-    fill_values = {}
-
-
-    for col in feature_names:
-
-        values = _numeric(
-            feature_table[
-                col
-            ]
-        )
-
-
-        median = _safe_float(
-            values.median(),
-            0.0,
-        )
-
-
-        if median is None:
-
-            median = 0.0
-
-
-        fill_values[
-            col
-        ] = median
-
-
-        feature_table[
-            col
-        ] = values.fillna(
-            median
-        )
-
 
     # ========================================================
     # TARGET
     # ========================================================
 
-    feature_table[
-        "target_delta"
-    ] = _numeric(
-        feature_table[
+    target = _numeric(
+        features[
             "target_delta"
         ]
     )
 
+    valid_target = (
+        target.notna()
+    )
 
-    training = feature_table.dropna(
-        subset=[
-            "target_delta"
-        ]
-    ).copy()
+    training = features.loc[
+        valid_target
+    ].copy()
 
+    target = target.loc[
+        valid_target
+    ]
 
-    if len(
-        training
-    ) < MIN_TRAINING_ROWS:
+    # ========================================================
+    # FILL VALUES
+    # ========================================================
 
-        raise ValueError(
-            "No existen suficientes filas válidas "
-            "para el entrenamiento multivariable. "
-            f"Disponibles: {len(training)}."
+    fill_values = {}
+
+    for col in feature_names:
+
+        values = _numeric(
+            training[col]
         )
 
+        median = values.median()
+
+        if not np.isfinite(
+            median
+        ):
+
+            median = 0.0
+
+        fill_values[col] = float(
+            median
+        )
+
+        training[col] = (
+            values
+            .fillna(
+                median
+            )
+        )
+
+    if len(training) < MIN_TRAINING_ROWS:
+
+        raise ValueError(
+            "No hay suficientes filas válidas para entrenar."
+        )
 
     X = training[
         feature_names
     ]
 
-
-    y = training[
-        "target_delta"
-    ]
-
+    y = target.to_numpy(
+        dtype=float
+    )
 
     # ========================================================
-    # VALIDACIÓN TEMPORAL
+    # VALIDACIÓN CRONOLÓGICA
     # ========================================================
 
-    split_idx = int(
-        len(
-            training
-        )
+    split = int(
+        len(X)
         * 0.80
     )
 
-
-    split_idx = max(
-        split_idx,
+    split = max(
+        split,
         MIN_TRAINING_ROWS,
     )
 
-
-    split_idx = min(
-        split_idx,
-        len(
-            training
-        )
-        - 5,
+    split = min(
+        split,
+        len(X) - 5,
     )
 
+    if split <= 0:
+
+        raise ValueError(
+            "No hay datos suficientes para validación."
+        )
 
     X_train = X.iloc[
-        :split_idx
+        :split
     ]
 
-
-    y_train = y.iloc[
-        :split_idx
+    y_train = y[
+        :split
     ]
 
-
-    X_valid = X.iloc[
-        split_idx:
+    X_test = X.iloc[
+        split:
     ]
 
-
-    y_valid = y.iloc[
-        split_idx:
+    y_test = y[
+        split:
     ]
-
 
     # ========================================================
-    # MODELO VALIDACIÓN
+    # MODELO DE VALIDACIÓN
     # ========================================================
 
     validation_model = RandomForestRegressor(
 
-        n_estimators=
-            700,
+        n_estimators=700,
 
-        max_depth=
-            14,
+        max_depth=14,
 
-        min_samples_leaf=
-            2,
+        min_samples_leaf=2,
 
-        max_features=
-            "sqrt",
+        max_features="sqrt",
 
         random_state=
-            42,
+            RANDOM_STATE,
 
-        n_jobs=
-            -1,
+        n_jobs=-1,
     )
-
 
     validation_model.fit(
         X_train,
         y_train,
     )
 
-
-    valid_pred = validation_model.predict(
-        X_valid
-    )
-
-
-    rmse = float(
-        np.sqrt(
-            mean_squared_error(
-                y_valid,
-                valid_pred,
-            )
+    validation_prediction = (
+        validation_model.predict(
+            X_test
         )
     )
 
-
-    mae = float(
-        mean_absolute_error(
-            y_valid,
-            valid_pred,
+    rmse = math.sqrt(
+        mean_squared_error(
+            y_test,
+            validation_prediction,
         )
     )
 
+    mae = mean_absolute_error(
+        y_test,
+        validation_prediction,
+    )
 
     rmse = max(
-        rmse,
+        float(rmse),
         MIN_RMSE,
     )
-
 
     # ========================================================
     # MODELO FINAL
     # ========================================================
 
-    model = RandomForestRegressor(
+    final_model = RandomForestRegressor(
 
-        n_estimators=
-            1000,
+        n_estimators=1000,
 
-        max_depth=
-            14,
+        max_depth=15,
 
-        min_samples_leaf=
-            2,
+        min_samples_leaf=2,
 
-        max_features=
-            "sqrt",
+        max_features="sqrt",
 
         random_state=
-            42,
+            RANDOM_STATE,
 
-        n_jobs=
-            -1,
+        n_jobs=-1,
     )
 
-
-    model.fit(
+    final_model.fit(
         X,
         y,
     )
-
 
     # ========================================================
     # IMPORTANCIA
@@ -2228,10 +2088,10 @@ def train(
                 feature_names,
 
             "importance":
-                model.feature_importances_,
+                final_model
+                .feature_importances_,
         }
     )
-
 
     importance = (
         importance
@@ -2244,36 +2104,23 @@ def train(
         )
     )
 
-
     # ========================================================
-    # CONTADORES
+    # COBERTURA
     # ========================================================
 
-    (
-        upstream_feature_count,
-        flow_feature_count,
-        rain_feature_count,
-    ) = _count_feature_groups(
-        feature_names
+    group_counts = (
+        _count_feature_groups(
+            feature_names
+        )
     )
 
-
-    # ========================================================
-    # COLUMNAS BASE DISPONIBLES
-    # ========================================================
-
-    available_upstream_columns = [
-
+    available_upstream = [
         col
-
         for col in LEVEL_COLUMNS.values()
-
         if (
             col in dataset.columns
             and _numeric(
-                dataset[
-                    col
-                ]
+                dataset[col]
             )
             .notna()
             .sum()
@@ -2281,19 +2128,13 @@ def train(
         )
     ]
 
-
-    available_flow_columns = [
-
+    available_flow = [
         col
-
         for col in FLOW_COLUMNS.values()
-
         if (
             col in dataset.columns
             and _numeric(
-                dataset[
-                    col
-                ]
+                dataset[col]
             )
             .notna()
             .sum()
@@ -2301,29 +2142,54 @@ def train(
         )
     ]
 
-
-    available_rain_columns = [
-
+    available_rain = [
         col
-
         for col in RAIN_COLUMNS.values()
-
         if (
             col in dataset.columns
             and _numeric(
-                dataset[
-                    col
-                ]
+                dataset[col]
             )
             .notna()
             .sum()
             >= 3
         )
     ]
-
 
     # ========================================================
-    # MODELS
+    # HIDROLOGÍA
+    # ========================================================
+
+    hydrology_summary = {}
+
+    if isinstance(
+        hydrology,
+        dict,
+    ):
+
+        hydrology_summary = {
+
+            "current_estimate":
+                hydrology.get(
+                    "current_estimate",
+                    {}
+                ),
+
+            "pressure":
+                hydrology.get(
+                    "pressure",
+                    {}
+                ),
+
+            "similar_summary":
+                hydrology.get(
+                    "similar_summary",
+                    {}
+                ),
+        }
+
+    # ========================================================
+    # RESULTADO
     # ========================================================
 
     models = {
@@ -2332,7 +2198,7 @@ def train(
             VERSION,
 
         "model":
-            model,
+            final_model,
 
         "feature_names":
             feature_names,
@@ -2344,13 +2210,13 @@ def train(
             rmse,
 
         "mae":
-            mae,
+            float(mae),
 
         "dataset":
             dataset,
 
         "features_table":
-            feature_table,
+            features,
 
         "importance":
             importance,
@@ -2361,108 +2227,114 @@ def train(
         "hydrology":
             hydrology,
 
+        "hydrology_summary":
+            hydrology_summary,
+
         # ----------------------------------------------------
-        # APP V11.10
+        # COMPATIBILIDAD APP
         # ----------------------------------------------------
 
         "uses_upstream":
-            upstream_feature_count > 0,
+            group_counts[
+                "upstream"
+            ] > 0,
 
         "uses_caudal":
-            flow_feature_count > 0,
+            group_counts[
+                "flow"
+            ] > 0,
 
         "uses_rain":
-            rain_feature_count > 0,
+            group_counts[
+                "rain"
+            ] > 0,
+
+        "uses_hydrology":
+            group_counts[
+                "hydrology"
+            ] > 0,
 
         "upstream_feature_count":
-            upstream_feature_count,
+            group_counts[
+                "upstream"
+            ],
 
         "flow_feature_count":
-            flow_feature_count,
+            group_counts[
+                "flow"
+            ],
 
         "rain_feature_count":
-            rain_feature_count,
+            group_counts[
+                "rain"
+            ],
+
+        "hydrology_feature_count":
+            group_counts[
+                "hydrology"
+            ],
 
         "available_upstream_columns":
-            available_upstream_columns,
+            available_upstream,
 
         "available_flow_columns":
-            available_flow_columns,
+            available_flow,
 
         "available_rain_columns":
-            available_rain_columns,
+            available_rain,
 
         "training_rows":
             int(
-                len(
-                    training
-                )
+                len(training)
             ),
 
         "feature_count":
             int(
-                len(
-                    feature_names
-                )
+                len(feature_names)
             ),
     }
-
-
-    # ========================================================
-    # MÉTRICAS
-    # ========================================================
 
     metrics = {
 
         "version":
             VERSION,
 
-        "RMSE":
+        "rmse":
             rmse,
 
-        "MAE":
-            mae,
+        "mae":
+            float(mae),
 
         "training_rows":
             int(
-                len(
-                    training
-                )
-            ),
-
-        "validation_rows":
-            int(
-                len(
-                    y_valid
-                )
+                len(training)
             ),
 
         "features":
             int(
-                len(
-                    feature_names
-                )
+                len(feature_names)
             ),
 
         "upstream_features":
-            upstream_feature_count,
+            group_counts[
+                "upstream"
+            ],
 
         "flow_features":
-            flow_feature_count,
+            group_counts[
+                "flow"
+            ],
 
         "rain_features":
-            rain_feature_count,
+            group_counts[
+                "rain"
+            ],
 
-        "uses_upstream":
-            upstream_feature_count > 0,
-
-        "uses_caudal":
-            flow_feature_count > 0,
-
-        "uses_rain":
-            rain_feature_count > 0,
+        "hydrology_features":
+            group_counts[
+                "hydrology"
+            ],
     }
-
 
     return (
         models,
@@ -2471,12 +2343,10 @@ def train(
 
 
 # ============================================================
-# HORIZONTES
+# HORIZONTE
 # ============================================================
 
-def grupo_horizonte(
-    day,
-):
+def _horizon_group(day):
 
     if day <= 15:
 
@@ -2493,84 +2363,96 @@ def grupo_horizonte(
     return "46-60"
 
 
-def tipo_horizonte(
-    day,
-):
+def _forecast_type(day):
 
     if day <= 15:
 
-        return "pronostico"
+        return "Pronóstico"
 
     if day <= 30:
 
-        return "proyeccion"
+        return "Proyección"
 
     if day <= 45:
 
-        return "escenario_probabilistico"
+        return "Escenario extendido"
 
-    return "tendencia_extendida"
+    return "Tendencia hidrológica"
 
 
 # ============================================================
 # PESOS POR HORIZONTE
+#
+# ML pierde peso con el horizonte.
+# Escenario histórico gana peso.
 # ============================================================
 
-def pesos_horizonte(
-    day,
-):
+def _horizon_weights(day):
 
     if day <= 15:
 
         return {
-            "model":
-                0.65,
+
+            "ml":
+                0.58,
 
             "hydrology":
-                0.25,
+                0.24,
+
+            "scenario":
+                0.10,
+
+            "trend":
+                0.08,
+        }
+
+    if day <= 30:
+
+        return {
+
+            "ml":
+                0.45,
+
+            "hydrology":
+                0.27,
+
+            "scenario":
+                0.18,
 
             "trend":
                 0.10,
         }
 
-
-    if day <= 30:
-
-        return {
-            "model":
-                0.52,
-
-            "hydrology":
-                0.30,
-
-            "trend":
-                0.18,
-        }
-
-
     if day <= 45:
 
         return {
-            "model":
-                0.38,
+
+            "ml":
+                0.31,
 
             "hydrology":
-                0.34,
+                0.26,
+
+            "scenario":
+                0.31,
 
             "trend":
-                0.28,
+                0.12,
         }
 
-
     return {
-        "model":
-            0.28,
+
+        "ml":
+            0.22,
 
         "hydrology":
-            0.34,
+            0.23,
+
+        "scenario":
+            0.42,
 
         "trend":
-            0.38,
+            0.13,
     }
 
 
@@ -2578,7 +2460,7 @@ def pesos_horizonte(
 # INCERTIDUMBRE
 # ============================================================
 
-def incertidumbre_horizonte(
+def _uncertainty(
     rmse,
     day,
 ):
@@ -2591,36 +2473,37 @@ def incertidumbre_horizonte(
         MIN_RMSE,
     )
 
-
     if day <= 15:
 
         factor = 1.00
 
     elif day <= 30:
 
-        factor = 1.10
+        factor = 1.20
 
     elif day <= 45:
 
-        factor = 1.25
+        factor = 1.45
 
     else:
 
-        factor = 1.40
-
+        factor = 1.75
 
     uncertainty = (
         rmse
-        * np.sqrt(
-            day
+        * math.sqrt(
+            max(
+                day,
+                1,
+            )
         )
         * factor
     )
 
-
     return float(
-        min(
+        np.clip(
             uncertainty,
+            MIN_RMSE,
             MAX_UNCERTAINTY,
         )
     )
@@ -2630,62 +2513,42 @@ def incertidumbre_horizonte(
 # TENDENCIA LOCAL
 # ============================================================
 
-def tendencia_local_reciente(
-    history,
+def _recent_local_trend(
+    dataset,
 ):
-
-    if (
-        history is None
-        or history.empty
-        or "nivel"
-        not in history.columns
-    ):
-
-        return 0.0
-
 
     values = (
         _numeric(
-            history[
+            dataset[
                 "nivel"
             ]
         )
         .dropna()
-        .tail(
-            10
-        )
+        .tail(10)
     )
 
-
-    if len(
-        values
-    ) < 3:
+    if len(values) < 3:
 
         return 0.0
 
-
     try:
 
-        slope = float(
-            np.polyfit(
-                np.arange(
-                    len(
-                        values
-                    ),
-                    dtype=float,
-                ),
-                values.to_numpy(
-                    dtype=float
-                ),
-                1,
-            )[0]
-        )
+        slope = np.polyfit(
 
+            np.arange(
+                len(values)
+            ),
+
+            values.to_numpy(
+                dtype=float
+            ),
+
+            1,
+        )[0]
 
     except Exception:
 
         slope = 0.0
-
 
     return float(
         np.clip(
@@ -2697,10 +2560,10 @@ def tendencia_local_reciente(
 
 
 # ============================================================
-# FUTURE EXOG
+# PREPARAR FUTURO
 # ============================================================
 
-def preparar_future(
+def _prepare_future(
     df,
 ):
 
@@ -2711,61 +2574,36 @@ def preparar_future(
             pd.DataFrame,
         )
         or df.empty
-        or "datetime"
-        not in df.columns
     ):
 
         return pd.DataFrame()
 
+    result = df.copy()
 
-    x = df.copy()
+    if "datetime" in result.columns:
 
-
-    x[
-        "datetime"
-    ] = _datetime_naive(
-        x[
+        result[
             "datetime"
-        ]
-    )
-
-
-    x[
-        "datetime"
-    ] = (
-        x[
-            "datetime"
-        ]
-        .dt
-        .normalize()
-    )
-
-
-    for col in x.columns:
-
-        if col == "datetime":
-            continue
-
-
-        x[
-            col
-        ] = _numeric(
-            x[
-                col
+        ] = _datetime_naive(
+            result[
+                "datetime"
             ]
         )
 
+        result[
+            "datetime"
+        ] = (
+            result[
+                "datetime"
+            ]
+            .dt
+            .normalize()
+        )
 
     return (
-        x
+        result
         .sort_values(
             "datetime"
-        )
-        .drop_duplicates(
-            subset=[
-                "datetime"
-            ],
-            keep="last",
         )
         .reset_index(
             drop=True
@@ -2774,141 +2612,40 @@ def preparar_future(
 
 
 # ============================================================
-# OBTENER VALOR FUTURO
+# VALOR FUTURO
 # ============================================================
 
 def _future_value(
-    future_df,
-    target_date,
-    col,
+    future,
+    index,
+    column,
 ):
 
     if (
-        future_df is None
-        or future_df.empty
-        or col not in future_df.columns
+        future is None
+        or future.empty
+        or column
+        not in future.columns
+        or index
+        >= len(future)
     ):
 
         return np.nan
-
-
-    rows = future_df[
-        future_df[
-            "datetime"
-        ]
-        == target_date
-    ]
-
-
-    if rows.empty:
-
-        return np.nan
-
 
     return _safe_float(
-        rows.iloc[
-            0
-        ][
-            col
-        ],
-        np.nan,
+        future.iloc[
+            index
+        ].get(
+            column
+        )
     )
 
 
 # ============================================================
-# PROYECTAR CAUDAL FALTANTE
+# PROYECTAR NIVEL UPSTREAM
 # ============================================================
 
-def _project_flow_one_day(
-    history,
-    col,
-):
-
-    if (
-        col not in history.columns
-    ):
-
-        return np.nan
-
-
-    values = (
-        _numeric(
-            history[
-                col
-            ]
-        )
-        .dropna()
-        .tail(
-            14
-        )
-    )
-
-
-    if values.empty:
-
-        return np.nan
-
-
-    current = float(
-        values.iloc[-1]
-    )
-
-
-    if len(
-        values
-    ) >= 4:
-
-        slope = float(
-            np.polyfit(
-                np.arange(
-                    len(
-                        values
-                    ),
-                    dtype=float,
-                ),
-                values.to_numpy(
-                    dtype=float
-                ),
-                1,
-            )[0]
-        )
-
-    else:
-
-        slope = 0.0
-
-
-    max_change = max(
-        abs(
-            current
-        )
-        * 0.025,
-        50.0,
-    )
-
-
-    slope = float(
-        np.clip(
-            slope,
-            -max_change,
-            max_change,
-        )
-    )
-
-
-    return max(
-        0.0,
-        current
-        + slope
-        * 0.75,
-    )
-
-
-# ============================================================
-# PROYECTAR NIVEL UPSTREAM FALTANTE
-# ============================================================
-
-def _project_upstream_one_day(
+def _project_upstream_value(
     history,
     col,
 ):
@@ -2917,53 +2654,52 @@ def _project_upstream_one_day(
 
         return np.nan
 
-
     values = (
         _numeric(
-            history[
-                col
-            ]
+            history[col]
         )
         .dropna()
-        .tail(
-            7
-        )
     )
-
 
     if values.empty:
 
         return np.nan
 
-
     current = float(
         values.iloc[-1]
     )
 
+    recent = values.tail(
+        min(
+            7,
+            len(values),
+        )
+    )
 
-    if len(
-        values
-    ) >= 3:
+    if len(recent) >= 3:
 
-        slope = float(
-            np.polyfit(
+        try:
+
+            slope = np.polyfit(
+
                 np.arange(
-                    len(
-                        values
-                    ),
-                    dtype=float,
+                    len(recent)
                 ),
-                values.to_numpy(
+
+                recent.to_numpy(
                     dtype=float
                 ),
+
                 1,
             )[0]
-        )
+
+        except Exception:
+
+            slope = 0.0
 
     else:
 
         slope = 0.0
-
 
     slope = float(
         np.clip(
@@ -2973,8 +2709,87 @@ def _project_upstream_one_day(
         )
     )
 
-
     return current + slope
+
+
+# ============================================================
+# PROYECTAR CAUDAL SI NO VIENE
+# ============================================================
+
+def _project_flow_value(
+    history,
+    col,
+):
+
+    if col not in history.columns:
+
+        return np.nan
+
+    q = (
+        _numeric(
+            history[col]
+        )
+        .dropna()
+    )
+
+    if q.empty:
+
+        return np.nan
+
+    current = float(
+        q.iloc[-1]
+    )
+
+    recent = q.tail(
+        min(
+            14,
+            len(q),
+        )
+    )
+
+    if len(recent) >= 4:
+
+        try:
+
+            slope = np.polyfit(
+
+                np.arange(
+                    len(recent)
+                ),
+
+                recent.to_numpy(
+                    dtype=float
+                ),
+
+                1,
+            )[0]
+
+        except Exception:
+
+            slope = 0.0
+
+    else:
+
+        slope = 0.0
+
+    max_change = max(
+        current * 0.025,
+        50.0,
+    )
+
+    slope = float(
+        np.clip(
+            slope,
+            -max_change,
+            max_change,
+        )
+    )
+
+    return max(
+        current
+        + slope * 0.75,
+        0.0,
+    )
 
 
 # ============================================================
@@ -2983,495 +2798,611 @@ def _project_upstream_one_day(
 
 def crear_fila_futura(
     history,
-    target_date,
-    current_level,
-    exog_future=None,
-    upstream_future=None,
-    horizon_day=1,
+    date,
+    day,
+    exog_future,
+    upstream_future,
 ):
 
     row = {
+
         "datetime":
-            target_date,
+            pd.Timestamp(
+                date
+            ),
 
         "nivel":
-            current_level,
+            float(
+                history[
+                    "nivel"
+                ].iloc[-1]
+            ),
     }
 
+    future_index = (
+        day - 1
+    )
 
     # ========================================================
     # LLUVIA
     # ========================================================
 
-    for col in RAIN_COLUMNS.values():
-
-        value = _future_value(
-            exog_future,
-            target_date,
-            col,
-        )
-
-
-        if not np.isfinite(
-            value
-        ):
-
-            value = 0.0
-
-
-        # ----------------------------------------------------
-        # Después del horizonte meteorológico corto, cero no
-        # debe actuar como señal fuerte de sequía.
-        #
-        # Se mantiene neutro.
-        # ----------------------------------------------------
-
-        if horizon_day > 16:
-
-            value = 0.0
-
-
-        row[
-            col
-        ] = value
-
-
-    # Compatibilidad
-    row[
-        "precip_mm"
-    ] = _future_value(
-        exog_future,
-        target_date,
-        "precip_mm",
-    )
-
-
-    if not np.isfinite(
-        row[
-            "precip_mm"
-        ]
+    for station, col in (
+        RAIN_COLUMNS.items()
     ):
 
-        row[
-            "precip_mm"
-        ] = 0.0
+        rain_value = (
+            _future_value(
+                exog_future,
+                future_index,
+                col,
+            )
+        )
 
+        if not np.isfinite(
+            rain_value
+        ):
+
+            rain_value = 0.0
+
+        row[col] = max(
+            rain_value,
+            0.0,
+        )
 
     # ========================================================
-    # CAUDALES
+    # CAUDAL
     # ========================================================
 
-    for col in FLOW_COLUMNS.values():
+    for station, col in (
+        FLOW_COLUMNS.items()
+    ):
 
-        value = _future_value(
+        q = _future_value(
             exog_future,
-            target_date,
+            future_index,
             col,
         )
 
-
         if not np.isfinite(
-            value
+            q
         ):
 
-            value = _project_flow_one_day(
+            q = _project_flow_value(
                 history,
                 col,
             )
 
+        row[col] = q
+
+        quality_col = (
+            col
+            + "_quality"
+        )
+
+        quality = _future_value(
+            exog_future,
+            future_index,
+            quality_col,
+        )
+
+        if not np.isfinite(
+            quality
+        ):
+
+            quality = max(
+                0.25,
+                0.70
+                * np.exp(
+                    -day / 60.0
+                ),
+            )
 
         row[
-            col
-        ] = value
+            quality_col
+        ] = float(
+            np.clip(
+                quality,
+                0.0,
+                1.0,
+            )
+        )
 
+    # ========================================================
+    # LEGACY CAUDAL
+    # ========================================================
 
-    row[
-        "caudal_m3s"
-    ] = _future_value(
+    legacy_flow = _future_value(
         exog_future,
-        target_date,
+        future_index,
         "caudal_m3s",
     )
 
-
-    if not np.isfinite(
-        row[
-            "caudal_m3s"
-        ]
+    if np.isfinite(
+        legacy_flow
     ):
 
-        # Primer caudal válido.
-        for col in FLOW_COLUMNS.values():
-
-            value = row.get(
-                col
-            )
-
-            if (
-                value is not None
-                and np.isfinite(
-                    value
-                )
-            ):
-
-                row[
-                    "caudal_m3s"
-                ] = value
-
-                break
-
+        row[
+            "caudal_m3s"
+        ] = legacy_flow
 
     # ========================================================
-    # NIVELES AGUAS ARRIBA
+    # UPSTREAM
     # ========================================================
 
-    for col in LEVEL_COLUMNS.values():
+    for station, col in (
+        LEVEL_COLUMNS.items()
+    ):
 
         value = _future_value(
             upstream_future,
-            target_date,
+            future_index,
             col,
         )
-
 
         if not np.isfinite(
             value
         ):
 
-            value = _project_upstream_one_day(
+            value = _project_upstream_value(
                 history,
                 col,
             )
 
-
-        row[
-            col
-        ] = value
-
+        row[col] = value
 
     return row
 
 
 # ============================================================
-# SEÑAL HIDROLÓGICA
+# ESCENARIO HIDROLÓGICO PARA UN DÍA
+# ============================================================
+
+def _hydrology_scenario_level(
+    hydrology,
+    day,
+    scenario_name,
+):
+
+    if not isinstance(
+        hydrology,
+        dict,
+    ):
+
+        return np.nan
+
+    key_map = {
+
+        "probable":
+            "scenario_probable",
+
+        "adverse":
+            "scenario_adverse",
+
+        "extreme":
+            "scenario_extreme",
+    }
+
+    key = key_map[
+        scenario_name
+    ]
+
+    scenario_df = hydrology.get(
+        key
+    )
+
+    if (
+        not isinstance(
+            scenario_df,
+            pd.DataFrame,
+        )
+        or scenario_df.empty
+    ):
+
+        return np.nan
+
+    if "scenario_day" in scenario_df.columns:
+
+        match = scenario_df[
+            scenario_df[
+                "scenario_day"
+            ]
+            == day
+        ]
+
+        if not match.empty:
+
+            if "level" in match.columns:
+
+                return _safe_float(
+                    match.iloc[0][
+                        "level"
+                    ]
+                )
+
+    index = day - 1
+
+    if (
+        index < len(
+            scenario_df
+        )
+        and "level"
+        in scenario_df.columns
+    ):
+
+        return _safe_float(
+            scenario_df.iloc[
+                index
+            ][
+                "level"
+            ]
+        )
+
+    return np.nan
+
+
+# ============================================================
+# SEÑAL HIDROLÓGICA DE FUTURO
 # ============================================================
 
 def calcular_senal_hidrologica(
     history,
-    future_row=None,
+    future_row,
+    hydrology=None,
 ):
-
-    if (
-        history is None
-        or history.empty
-    ):
-
-        return {
-            "combined":
-                0.0,
-
-            "level":
-                0.0,
-
-            "flow":
-                0.0,
-
-            "rain":
-                0.0,
-        }
-
-
-    level_parts = []
-    flow_parts = []
-    rain_parts = []
-
 
     # ========================================================
     # NIVELES
     # ========================================================
 
-    for station, col in LEVEL_COLUMNS.items():
+    level_signals = []
+
+    level_weights = []
+
+    for station, col in (
+        LEVEL_COLUMNS.items()
+    ):
 
         if col not in history.columns:
-            continue
 
+            continue
 
         values = (
             _numeric(
-                history[
-                    col
-                ]
+                history[col]
             )
             .dropna()
-            .tail(
-                8
+            .tail(7)
+        )
+
+        future_value = _safe_float(
+            future_row.get(
+                col
             )
         )
 
-
-        if len(
-            values
-        ) < 3:
+        if (
+            len(values) < 2
+            or not np.isfinite(
+                future_value
+            )
+        ):
 
             continue
 
-
-        slope = (
-            float(
-                values.iloc[-1]
-            )
-            -
-            float(
-                values.iloc[0]
-            )
-        ) / max(
-            len(
-                values
-            )
-            - 1,
-            1,
+        baseline = float(
+            values.iloc[-1]
         )
 
+        signal = (
+            future_value
+            - baseline
+        )
 
-        level_parts.append(
-            slope
-            *
-            STATION_WEIGHTS.get(
-                station,
-                1.0,
+        signal = float(
+            np.clip(
+                signal,
+                -0.50,
+                0.80,
             )
         )
 
+        level_signals.append(
+            signal
+        )
+
+        level_weights.append(
+            STATION_WEIGHTS[
+                station
+            ]
+        )
+
+    if level_signals:
+
+        level_signal = float(
+            np.average(
+                level_signals,
+                weights=
+                    level_weights,
+            )
+        )
+
+    else:
+
+        level_signal = 0.0
 
     # ========================================================
-    # CAUDALES
+    # CAUDAL
     # ========================================================
 
-    for station, col in FLOW_COLUMNS.items():
+    flow_signals = []
+
+    flow_weights = []
+
+    for station, col in (
+        FLOW_COLUMNS.items()
+    ):
 
         if col not in history.columns:
+
             continue
 
-
-        values = (
+        q_hist = (
             _numeric(
-                history[
-                    col
-                ]
+                history[col]
             )
             .dropna()
-            .tail(
-                8
+            .tail(14)
+        )
+
+        future_q = _safe_float(
+            future_row.get(
+                col
             )
         )
 
-
-        if len(
-            values
-        ) < 3:
-
-            continue
-
-
-        first = float(
-            values.iloc[
-                0
-            ]
-        )
-
-
-        last = float(
-            values.iloc[
-                -1
-            ]
-        )
-
-
-        if abs(
-            first
-        ) < 1e-9:
+        if (
+            q_hist.empty
+            or not np.isfinite(
+                future_q
+            )
+        ):
 
             continue
 
+        baseline = float(
+            q_hist.median()
+        )
+
+        if baseline <= 0:
+
+            continue
 
         relative = (
-            last
-            - first
-        ) / abs(
-            first
+            future_q
+            - baseline
+        ) / baseline
+
+        relative = float(
+            np.clip(
+                relative,
+                -0.50,
+                1.50,
+            )
         )
 
+        quality = _safe_float(
+            future_row.get(
+                col
+                + "_quality"
+            ),
+            0.5,
+        )
 
-        flow_parts.append(
-            relative
-            *
-            STATION_WEIGHTS.get(
-                station,
+        quality = float(
+            np.clip(
+                quality,
+                0.0,
                 1.0,
             )
         )
 
+        flow_signals.append(
+            relative
+        )
+
+        flow_weights.append(
+            STATION_WEIGHTS[
+                station
+            ]
+            * (
+                0.30
+                +
+                0.70
+                * quality
+            )
+        )
+
+    if flow_signals:
+
+        flow_signal = float(
+            np.average(
+                flow_signals,
+                weights=
+                    flow_weights,
+            )
+        )
+
+    else:
+
+        flow_signal = 0.0
 
     # ========================================================
-    # LLUVIA FUTURA
+    # LLUVIA
     # ========================================================
 
-    if future_row is not None:
+    rain_values = []
 
-        for station, col in RAIN_COLUMNS.items():
+    rain_weights = []
 
-            value = _safe_float(
-                future_row.get(
-                    col
-                ),
+    for station, col in (
+        RAIN_COLUMNS.items()
+    ):
+
+        rain = _safe_float(
+            future_row.get(
+                col
+            ),
+            0.0,
+        )
+
+        rain_values.append(
+            max(
+                rain,
                 0.0,
             )
+        )
 
+        rain_weights.append(
+            STATION_WEIGHTS[
+                station
+            ]
+        )
 
-            if value is None:
-                value = 0.0
+    if rain_values:
 
+        rain_signal = float(
+            np.average(
+                rain_values,
+                weights=
+                    rain_weights,
+            )
+        )
 
-            rain_parts.append(
-                value
-                *
-                STATION_WEIGHTS.get(
-                    station,
-                    1.0,
+    else:
+
+        rain_signal = 0.0
+
+    rain_signal = float(
+        np.clip(
+            rain_signal
+            / 40.0,
+            0.0,
+            2.0,
+        )
+    )
+
+    # ========================================================
+    # PRESIÓN ACTUAL DE HYDROLOGY.PY
+    # ========================================================
+
+    pressure_signal = 0.0
+
+    if isinstance(
+        hydrology,
+        dict,
+    ):
+
+        pressure = hydrology.get(
+            "pressure",
+            {}
+        )
+
+        if isinstance(
+            pressure,
+            dict,
+        ):
+
+            pressure_signal = (
+                _safe_float(
+                    pressure.get(
+                        "hydrological_pressure"
+                    ),
+                    0.0,
                 )
             )
 
-
-    level_signal = (
-        float(
-            np.nanmean(
-                level_parts
-            )
-        )
-        if level_parts
-        else 0.0
-    )
-
-
-    flow_signal = (
-        float(
-            np.nanmean(
-                flow_parts
-            )
-        )
-        if flow_parts
-        else 0.0
-    )
-
-
-    rain_signal = (
-        float(
-            np.nanmean(
-                rain_parts
-            )
-        )
-        if rain_parts
-        else 0.0
-    )
-
-
-    # --------------------------------------------------------
-    # Convertimos a variación diaria aproximada.
-    # --------------------------------------------------------
+    # ========================================================
+    # SEÑAL COMBINADA
+    # ========================================================
 
     combined = (
 
-        0.70
+        0.38
         * level_signal
 
         +
 
-        0.20
+        0.32
         * flow_signal
 
         +
 
-        0.01
+        0.18
         * rain_signal
+
+        +
+
+        0.12
+        * pressure_signal
     )
 
-
-    combined = float(
+    return float(
         np.clip(
             combined,
-            -0.12,
-            0.12,
+            -0.15,
+            0.20,
         )
     )
 
 
-    return {
-
-        "combined":
-            combined,
-
-        "level":
-            level_signal,
-
-        "flow":
-            flow_signal,
-
-        "rain":
-            rain_signal,
-    }
-
-
 # ============================================================
-# LÍMITE DE CAMBIO DIARIO
+# LÍMITES DE CAMBIO DIARIO
 # ============================================================
 
-def limite_cambio_diario(
-    horizon_day,
-    hydro_signal=0.0,
+def _daily_change_limits(
+    day,
+    hydro_signal,
 ):
 
-    if horizon_day <= 15:
+    if day <= 15:
 
-        max_abs = 0.20
+        max_rise = 0.20
+        max_drop = -0.15
 
-    elif horizon_day <= 30:
+    elif day <= 30:
 
-        max_abs = 0.16
+        max_rise = 0.16
+        max_drop = -0.12
 
-    elif horizon_day <= 45:
+    elif day <= 45:
 
-        max_abs = 0.13
+        max_rise = 0.13
+        max_drop = -0.10
 
     else:
 
-        max_abs = 0.10
+        max_rise = 0.10
+        max_drop = -0.08
 
+    # ========================================================
+    # Si aguas arriba está creciendo,
+    # limitar las caídas bruscas.
+    # ========================================================
 
-    max_rise = max_abs
-
-    max_drop = -max_abs
-
-
-    # --------------------------------------------------------
-    # Si aguas arriba está creciendo claramente,
-    # restringimos las bajadas abruptas.
-    # --------------------------------------------------------
-
-    if hydro_signal > 0.03:
+    if hydro_signal > 0.05:
 
         max_drop = max(
             max_drop,
-            -0.08,
+            -0.06,
         )
 
-
-    if hydro_signal > 0.06:
+    if hydro_signal > 0.10:
 
         max_drop = max(
             max_drop,
-            -0.04,
+            -0.035,
         )
-
 
     return (
         max_drop,
@@ -3480,7 +3411,7 @@ def limite_cambio_diario(
 
 
 # ============================================================
-# PREDICCIÓN
+# PREDICT
 # ============================================================
 
 def predict(
@@ -3493,38 +3424,23 @@ def predict(
     **kwargs,
 ):
 
-    """
-    Pronóstico recursivo hasta 60 días.
-
-    Compatible con:
-        predict(df, models, ...)
-
-    y:
-        predict(models, df, ...)
-    """
-
-
     # ========================================================
-    # COMPATIBILIDAD ARGUMENTOS INVERTIDOS
+    # COMPATIBILIDAD:
+    # predict(models, df, ...)
     # ========================================================
 
-    if (
-        isinstance(
-            df,
-            dict,
-        )
-        and
-        isinstance(
-            models,
-            pd.DataFrame,
-        )
+    if isinstance(
+        df,
+        dict,
+    ) and isinstance(
+        models,
+        pd.DataFrame,
     ):
 
         df, models = (
             models,
             df,
         )
-
 
     if not isinstance(
         models,
@@ -3535,11 +3451,9 @@ def predict(
             "El modelo no está entrenado."
         )
 
-
     model = models.get(
         "model"
     )
-
 
     if model is None:
 
@@ -3547,75 +3461,51 @@ def predict(
             "El modelo no está entrenado."
         )
 
-
-    days = max(
-        1,
-        min(
-            int(
-                days
-            ),
-            MAX_FORECAST_DAYS,
-        ),
-    )
-
-
     feature_names = models.get(
         "feature_names",
         []
     )
-
 
     fill_values = models.get(
         "feature_fill_values",
         {}
     )
 
+    if not feature_names:
 
-    rmse = models.get(
-        "rmse",
-        MIN_RMSE,
-    )
-
-
-    propagation_lags = models.get(
-        "propagation_lags",
-        DEFAULT_PROPAGATION_LAGS,
-    )
-
-
-    if hydrology is None:
-
-        hydrology = models.get(
-            "hydrology",
-            {}
+        raise ValueError(
+            "El modelo no contiene variables de entrenamiento."
         )
 
+    days = int(
+        np.clip(
+            days,
+            1,
+            MAX_FORECAST_DAYS,
+        )
+    )
 
     # ========================================================
-    # DATASET BASE
+    # BASE
     # ========================================================
 
-    base_dataset = models.get(
+    dataset = models.get(
         "dataset"
     )
 
-
     if (
-        base_dataset is None
-        or not isinstance(
-            base_dataset,
+        not isinstance(
+            dataset,
             pd.DataFrame,
         )
-        or base_dataset.empty
+        or dataset.empty
     ):
 
-        base_dataset = preparar_dataset(
+        dataset = preparar_dataset(
             df
         )
 
-
-    history = base_dataset.copy()
-
+    history = dataset.copy()
 
     history[
         "datetime"
@@ -3625,178 +3515,168 @@ def predict(
         ]
     )
 
-
     history = history.sort_values(
         "datetime"
     ).reset_index(
         drop=True
     )
 
+    # ========================================================
+    # HIDROLOGÍA
+    # ========================================================
 
-    exog_future = preparar_future(
+    if hydrology is None:
+
+        hydrology = models.get(
+            "hydrology"
+        )
+
+    propagation_lags = (
+        models.get(
+            "propagation_lags",
+            DEFAULT_PROPAGATION_LAGS,
+        )
+    )
+
+    # ========================================================
+    # FUTURO
+    # ========================================================
+
+    exog_future = _prepare_future(
         exog_future
     )
 
-
-    upstream_future = preparar_future(
+    upstream_future = _prepare_future(
         upstream_future
     )
 
-
-    # ========================================================
-    # ESTADO INICIAL
-    # ========================================================
-
-    current_level = _safe_float(
-        history[
-            "nivel"
-        ].dropna().iloc[
-            -1
-        ]
-    )
-
-
-    if current_level is None:
-
-        raise ValueError(
-            "No existe un nivel inicial válido."
-        )
-
-
-    last_date = pd.to_datetime(
+    last_date = (
         history[
             "datetime"
         ].max()
-    ).normalize()
-
-
-    local_trend = tendencia_local_reciente(
-        history
     )
 
+    last_level = float(
+        _numeric(
+            history[
+                "nivel"
+            ]
+        )
+        .dropna()
+        .iloc[-1]
+    )
 
-    previous_delta = local_trend
+    recent_trend = (
+        _recent_local_trend(
+            history
+        )
+    )
 
+    rmse = _safe_float(
+        models.get(
+            "rmse"
+        ),
+        0.10,
+    )
 
-    forecast_rows = []
+    previous_delta = 0.0
 
+    output = []
 
     # ========================================================
-    # CICLO 60 DÍAS
+    # LOOP RECURSIVO
     # ========================================================
 
-    for horizon_day in range(
+    for day in range(
         1,
         days + 1,
     ):
 
-        target_date = (
+        forecast_date = (
             last_date
             + pd.Timedelta(
-                days=horizon_day
+                days=day
             )
         )
 
+        future_row = (
+            crear_fila_futura(
 
-        # ====================================================
-        # FILA FUTURA
-        # ====================================================
-
-        future_row = crear_fila_futura(
-
-            history,
-
-            target_date,
-
-            current_level,
-
-            exog_future=
-                exog_future,
-
-            upstream_future=
-                upstream_future,
-
-            horizon_day=
-                horizon_day,
-        )
-
-
-        # ====================================================
-        # AGREGAR TEMPORALMENTE
-        # ====================================================
-
-        temp_history = pd.concat(
-
-            [
                 history,
 
+                forecast_date,
+
+                day,
+
+                exog_future,
+
+                upstream_future,
+            )
+        )
+
+        # ====================================================
+        # INSERTAR FILA TEMPORAL PARA GENERAR FEATURES
+        # ====================================================
+
+        temporary = pd.concat(
+            [
+                history,
                 pd.DataFrame(
                     [
                         future_row
                     ]
                 ),
             ],
-
             ignore_index=True,
-
             sort=False,
         )
 
+        feature_table = crear_features(
 
-        # ====================================================
-        # FEATURES DE LA FILA FUTURA
-        # ====================================================
-
-        temp_features = crear_features(
-
-            temp_history,
+            temporary,
 
             propagation_lags=
                 propagation_lags,
         )
 
-
-        row_features = (
-            temp_features.iloc[
+        feature_row = (
+            feature_table.iloc[
                 -1
             ]
         )
 
-
-        X_row = {}
-
+        X_values = []
 
         for feature in feature_names:
 
             value = _safe_float(
-                row_features.get(
+                feature_row.get(
                     feature
-                ),
-                None,
+                )
             )
 
+            if not np.isfinite(
+                value
+            ):
 
-            if value is None:
-
-                value = fill_values.get(
-                    feature,
+                value = _safe_float(
+                    fill_values.get(
+                        feature
+                    ),
                     0.0,
                 )
 
+            X_values.append(
+                value
+            )
 
-            X_row[
-                feature
-            ] = value
-
-
-        X_row = pd.DataFrame(
+        X_pred = pd.DataFrame(
             [
-                X_row
+                X_values
             ],
             columns=
                 feature_names,
         )
-
 
         # ====================================================
         # MODELO ML
@@ -3804,10 +3684,9 @@ def predict(
 
         ml_delta = float(
             model.predict(
-                X_row
+                X_pred
             )[0]
         )
-
 
         ml_delta = float(
             np.clip(
@@ -3817,54 +3696,100 @@ def predict(
             )
         )
 
-
         # ====================================================
         # SEÑAL HIDROLÓGICA
         # ====================================================
 
-        hydro = calcular_senal_hidrologica(
+        hydro_signal = (
+            calcular_senal_hidrologica(
 
-            history,
+                history,
 
-            future_row=
                 future_row,
+
+                hydrology=
+                    hydrology,
+            )
         )
 
-
-        hydro_delta = hydro[
-            "combined"
-        ]
-
-
         # ====================================================
-        # TENDENCIA LOCAL AMORTIGUADA
+        # ESCENARIO HISTÓRICO PROBABLE
         # ====================================================
 
-        trend_damping = np.exp(
-            -horizon_day
-            / 25.0
+        probable_level = (
+            _hydrology_scenario_level(
+                hydrology,
+                day,
+                "probable",
+            )
         )
 
+        adverse_level = (
+            _hydrology_scenario_level(
+                hydrology,
+                day,
+                "adverse",
+            )
+        )
+
+        extreme_level = (
+            _hydrology_scenario_level(
+                hydrology,
+                day,
+                "extreme",
+            )
+        )
+
+        current_level = float(
+            history[
+                "nivel"
+            ].iloc[-1]
+        )
+
+        if np.isfinite(
+            probable_level
+        ):
+
+            scenario_delta = (
+                probable_level
+                - current_level
+            )
+
+        else:
+
+            scenario_delta = 0.0
+
+        scenario_delta = float(
+            np.clip(
+                scenario_delta,
+                -0.20,
+                0.25,
+            )
+        )
+
+        # ====================================================
+        # TENDENCIA
+        # ====================================================
 
         trend_delta = (
-            local_trend
-            * trend_damping
+            recent_trend
+            * np.exp(
+                -day / 28.0
+            )
         )
-
 
         # ====================================================
         # PESOS
         # ====================================================
 
-        weights = pesos_horizonte(
-            horizon_day
+        weights = _horizon_weights(
+            day
         )
-
 
         combined_delta = (
 
             weights[
-                "model"
+                "ml"
             ]
             * ml_delta
 
@@ -3873,7 +3798,14 @@ def predict(
             weights[
                 "hydrology"
             ]
-            * hydro_delta
+            * hydro_signal
+
+            +
+
+            weights[
+                "scenario"
+            ]
+            * scenario_delta
 
             +
 
@@ -3883,12 +3815,11 @@ def predict(
             * trend_delta
         )
 
-
         # ====================================================
-        # SUAVIZADO
+        # SUAVIZAR
         # ====================================================
 
-        combined_delta = (
+        smoothed_delta = (
 
             0.68
             * previous_delta
@@ -3899,74 +3830,173 @@ def predict(
             * combined_delta
         )
 
-
-        # ====================================================
-        # LÍMITES
-        # ====================================================
-
         min_change, max_change = (
-            limite_cambio_diario(
-
-                horizon_day,
-
-                hydro_signal=
-                    hydro_delta,
+            _daily_change_limits(
+                day,
+                hydro_signal,
             )
         )
 
-
-        combined_delta = float(
+        smoothed_delta = float(
             np.clip(
-
-                combined_delta,
-
+                smoothed_delta,
                 min_change,
-
                 max_change,
             )
         )
 
-
-        # ====================================================
-        # NIVEL NUEVO
-        # ====================================================
+        prediction = (
+            current_level
+            + smoothed_delta
+        )
 
         prediction = float(
             np.clip(
-
-                current_level
-                + combined_delta,
-
+                prediction,
                 LEVEL_MIN,
-
                 LEVEL_MAX,
             )
         )
-
 
         # ====================================================
         # INCERTIDUMBRE
         # ====================================================
 
-        uncertainty = incertidumbre_horizonte(
-            rmse,
-            horizon_day,
+        uncertainty = (
+            _uncertainty(
+                rmse,
+                day,
+            )
         )
 
+        lower = max(
+            LEVEL_MIN,
+            prediction
+            - uncertainty,
+        )
 
-        lower = prediction - uncertainty
+        upper = min(
+            LEVEL_MAX,
+            prediction
+            + uncertainty,
+        )
 
-        upper = prediction + uncertainty
+        # ====================================================
+        # EVITAR QUE ESCENARIOS QUEDEN INVERTIDOS
+        # ====================================================
 
+        if np.isfinite(
+            probable_level
+        ):
+
+            probable_level = max(
+                probable_level,
+                LEVEL_MIN,
+            )
+
+        if np.isfinite(
+            adverse_level
+        ):
+
+            if np.isfinite(
+                probable_level
+            ):
+
+                adverse_level = max(
+                    adverse_level,
+                    probable_level,
+                )
+
+        if np.isfinite(
+            extreme_level
+        ):
+
+            if np.isfinite(
+                adverse_level
+            ):
+
+                extreme_level = max(
+                    extreme_level,
+                    adverse_level,
+                )
+
+        # ====================================================
+        # CAUDAL / LLUVIA RESUMEN
+        # ====================================================
+
+        caudal_value = _safe_float(
+            future_row.get(
+                "caudal_m3s"
+            )
+        )
+
+        if not np.isfinite(
+            caudal_value
+        ):
+
+            # buscar caudal disponible más cercano
+            for station in [
+                "San Nicolás",
+                "Villa Constitución",
+                "Rosario",
+                "Diamante",
+                "Paraná",
+                "La Paz",
+                "Goya",
+                "Corrientes",
+            ]:
+
+                col = FLOW_COLUMNS[
+                    station
+                ]
+
+                q = _safe_float(
+                    future_row.get(
+                        col
+                    )
+                )
+
+                if np.isfinite(q):
+
+                    caudal_value = q
+                    break
+
+        rain_values = []
+
+        for col in RAIN_COLUMNS.values():
+
+            rain = _safe_float(
+                future_row.get(
+                    col
+                ),
+                0.0,
+            )
+
+            rain_values.append(
+                max(
+                    rain,
+                    0.0,
+                )
+            )
+
+        precip_value = (
+            float(
+                np.mean(
+                    rain_values
+                )
+            )
+            if rain_values
+            else 0.0
+        )
 
         # ====================================================
         # SALIDA
         # ====================================================
 
-        output_row = {
+        result_row = {
 
             "datetime":
-                target_date,
+                forecast_date,
 
             "prediction":
                 prediction,
@@ -3977,310 +4007,267 @@ def predict(
             "upper":
                 upper,
 
+            "uncertainty":
+                uncertainty,
+
             "horizon_day":
-                horizon_day,
+                day,
 
             "horizon_group":
-                grupo_horizonte(
-                    horizon_day
+                _horizon_group(
+                    day
                 ),
 
             "forecast_type":
-                tipo_horizonte(
-                    horizon_day
+                _forecast_type(
+                    day
                 ),
 
-            "nivel_base":
+            "base_level":
                 current_level,
 
-            "variacion_dia":
-                combined_delta,
-
-            "delta_prediction":
-                combined_delta,
-
-            "variacion_modelo":
+            "ml_delta":
                 ml_delta,
 
-            "variacion_hidrologica":
-                hydro_delta,
+            "hydro_signal":
+                hydro_signal,
 
-            "variacion_tendencia":
+            "scenario_delta":
+                scenario_delta,
+
+            "trend_delta":
                 trend_delta,
 
-            "upstream_level_signal":
-                hydro[
-                    "level"
-                ],
+            "daily_change":
+                smoothed_delta,
 
-            "upstream_flow_signal":
-                hydro[
-                    "flow"
-                ],
-
-            "rain_signal":
-                hydro[
-                    "rain"
-                ],
-
-            "model_weight":
+            "weight_ml":
                 weights[
-                    "model"
+                    "ml"
                 ],
 
-            "hydrology_weight":
+            "weight_hydrology":
                 weights[
                     "hydrology"
                 ],
 
-            "trend_weight":
+            "weight_scenario":
+                weights[
+                    "scenario"
+                ],
+
+            "weight_trend":
                 weights[
                     "trend"
                 ],
 
+            "scenario_probable":
+                probable_level,
+
+            "scenario_adverse":
+                adverse_level,
+
+            "scenario_extreme":
+                extreme_level,
+
             "precip_mm":
-                future_row.get(
-                    "precip_mm",
-                    np.nan,
-                ),
+                precip_value,
 
             "caudal_m3s":
-                future_row.get(
-                    "caudal_m3s",
-                    np.nan,
-                ),
+                caudal_value,
         }
 
+        # ====================================================
+        # VARIABLES POR ESTACIÓN
+        # ====================================================
 
-        # ----------------------------------------------------
-        # Guardar lluvia por estación.
-        # ----------------------------------------------------
+        for station, col in (
+            LEVEL_COLUMNS.items()
+        ):
 
-        for col in RAIN_COLUMNS.values():
-
-            output_row[
-                col
-            ] = future_row.get(
-                col,
-                np.nan,
+            result_row[col] = (
+                future_row.get(
+                    col
+                )
             )
 
+        for station, col in (
+            FLOW_COLUMNS.items()
+        ):
 
-        # ----------------------------------------------------
-        # Guardar caudal por estación.
-        # ----------------------------------------------------
-
-        for col in FLOW_COLUMNS.values():
-
-            output_row[
-                col
-            ] = future_row.get(
-                col,
-                np.nan,
+            result_row[col] = (
+                future_row.get(
+                    col
+                )
             )
 
-
-        # ----------------------------------------------------
-        # Guardar nivel upstream.
-        # ----------------------------------------------------
-
-        for col in LEVEL_COLUMNS.values():
-
-            output_row[
+            result_row[
                 col
-            ] = future_row.get(
-                col,
-                np.nan,
+                + "_quality"
+            ] = (
+                future_row.get(
+                    col
+                    + "_quality"
+                )
             )
 
+        for station, col in (
+            RAIN_COLUMNS.items()
+        ):
 
-        forecast_rows.append(
-            output_row
+            result_row[col] = (
+                future_row.get(
+                    col,
+                    0.0,
+                )
+            )
+
+        output.append(
+            result_row
         )
 
-
         # ====================================================
-        # ACTUALIZAR HISTORIA RECURSIVA
+        # AGREGAR PREDICCIÓN A HISTORIA
         # ====================================================
 
-        append_row = future_row.copy()
-
-
-        append_row[
+        future_row[
             "nivel"
         ] = prediction
 
-
         history = pd.concat(
-
             [
                 history,
-
                 pd.DataFrame(
                     [
-                        append_row
+                        future_row
                     ]
                 ),
             ],
-
             ignore_index=True,
-
             sort=False,
         )
 
-
-        current_level = prediction
-
         previous_delta = (
-            combined_delta
+            smoothed_delta
         )
 
-
-    forecast = pd.DataFrame(
-        forecast_rows
+    return pd.DataFrame(
+        output
     )
-
-
-    forecast[
-        "datetime"
-    ] = _datetime_naive(
-        forecast[
-            "datetime"
-        ]
-    )
-
-
-    return forecast
 
 
 # ============================================================
-# RESUMEN DE NIVELES
+# RESUMEN DE ESTACIONES
 # ============================================================
 
 def resumen_niveles_estaciones(
-    upstream_history,
+    df,
 ):
 
-    rows = []
-
-
-    upstream = preparar_upstream(
-        upstream_history
-    )
-
-
-    if upstream.empty:
+    if (
+        df is None
+        or not isinstance(
+            df,
+            pd.DataFrame,
+        )
+        or df.empty
+    ):
 
         return pd.DataFrame()
 
+    rows = []
 
-    for station, col in LEVEL_COLUMNS.items():
+    for station, col in (
+        LEVEL_COLUMNS.items()
+    ):
 
-        if col not in upstream.columns:
+        if col not in df.columns:
+
+            rows.append(
+                {
+                    "Estación":
+                        station,
+
+                    "Nivel":
+                        np.nan,
+
+                    "Δ 1 día":
+                        np.nan,
+
+                    "Δ 3 días":
+                        np.nan,
+
+                    "Δ 7 días":
+                        np.nan,
+
+                    "Estado":
+                        "Sin datos",
+                }
+            )
+
             continue
 
-
-        data = (
-            upstream[
-                [
-                    "datetime",
-                    col,
-                ]
-            ]
-            .dropna()
-            .sort_values(
-                "datetime"
+        values = (
+            _numeric(
+                df[col]
             )
+            .dropna()
         )
 
+        if values.empty:
 
-        if data.empty:
             continue
-
 
         current = float(
-            data.iloc[
-                -1
-            ][
-                col
-            ]
+            values.iloc[-1]
         )
 
-
-        delta_1 = None
-        delta_3 = None
-        delta_7 = None
-
-
-        if len(
-            data
-        ) >= 2:
-
-            delta_1 = (
-                current
-                -
-                float(
-                    data.iloc[
-                        -2
-                    ][
-                        col
-                    ]
-                )
+        delta_1 = (
+            current
+            - float(
+                values.iloc[-2]
             )
+            if len(values) >= 2
+            else np.nan
+        )
 
-
-        if len(
-            data
-        ) >= 4:
-
-            delta_3 = (
-                current
-                -
-                float(
-                    data.iloc[
-                        -4
-                    ][
-                        col
-                    ]
-                )
+        delta_3 = (
+            current
+            - float(
+                values.iloc[-4]
             )
+            if len(values) >= 4
+            else np.nan
+        )
 
-
-        if len(
-            data
-        ) >= 8:
-
-            delta_7 = (
-                current
-                -
-                float(
-                    data.iloc[
-                        -8
-                    ][
-                        col
-                    ]
-                )
+        delta_7 = (
+            current
+            - float(
+                values.iloc[-8]
             )
+            if len(values) >= 8
+            else np.nan
+        )
 
-
-        if (
-            delta_3 is not None
-            and delta_3 > 0.03
+        if np.isfinite(
+            delta_3
         ):
 
-            state = "↑ Creciendo"
+            if delta_3 > 0.03:
 
-        elif (
-            delta_3 is not None
-            and delta_3 < -0.03
-        ):
+                state = "↑ Creciendo"
 
-            state = "↓ Bajando"
+            elif delta_3 < -0.03:
+
+                state = "↓ Bajando"
+
+            else:
+
+                state = "→ Estable"
 
         else:
 
-            state = "→ Estable"
-
+            state = "Sin tendencia"
 
         rows.append(
             {
@@ -4304,7 +4291,6 @@ def resumen_niveles_estaciones(
             }
         )
 
-
     return pd.DataFrame(
         rows
     )
@@ -4312,11 +4298,6 @@ def resumen_niveles_estaciones(
 
 # ============================================================
 # BACKTEST ORIENTATIVO
-#
-# Nota:
-# esta rutina utiliza el modelo entrenado actual.
-# No debe considerarse todavía un rolling backtest
-# completamente libre de leakage.
 # ============================================================
 
 def backtest_horizontes(
@@ -4334,109 +4315,91 @@ def backtest_horizontes(
             60,
         ]
 
+    if (
+        df is None
+        or df.empty
+    ):
 
-    local = preparar_nivel_local(
+        return pd.DataFrame()
+
+    x = preparar_nivel_local(
         df
     )
 
-
     rows = []
-
 
     for horizon in horizons:
 
-        if len(
-            local
-        ) <= horizon + 30:
+        if len(x) <= horizon:
 
             continue
 
-
-        cutoff_index = (
-            len(
-                local
-            )
-            - horizon
-            - 1
+        actual = x[
+            "nivel"
+        ].shift(
+            -horizon
         )
 
-
-        cutoff = local.iloc[
-            :cutoff_index + 1
+        baseline = x[
+            "nivel"
         ]
 
+        valid = (
+            actual.notna()
+            &
+            baseline.notna()
+        )
 
-        actual_row = local.iloc[
-            cutoff_index
-            + horizon
-        ]
-
-
-        try:
-
-            pred = predict(
-
-                cutoff,
-
-                models,
-
-                days=
-                    horizon,
-            )
-
-
-            if pred.empty:
-                continue
-
-
-            predicted = float(
-                pred.iloc[
-                    -1
-                ][
-                    "prediction"
-                ]
-            )
-
-
-            actual = float(
-                actual_row[
-                    "nivel"
-                ]
-            )
-
-
-            error = (
-                predicted
-                - actual
-            )
-
-
-            rows.append(
-                {
-                    "horizon":
-                        horizon,
-
-                    "prediction":
-                        predicted,
-
-                    "actual":
-                        actual,
-
-                    "error":
-                        error,
-
-                    "abs_error":
-                        abs(
-                            error
-                        ),
-                }
-            )
-
-
-        except Exception:
+        if not valid.any():
 
             continue
 
+        naive_error = (
+            actual[
+                valid
+            ]
+            -
+            baseline[
+                valid
+            ]
+        )
+
+        rmse = math.sqrt(
+            np.mean(
+                naive_error ** 2
+            )
+        )
+
+        mae = np.mean(
+            np.abs(
+                naive_error
+            )
+        )
+
+        rows.append(
+            {
+                "horizon":
+                    horizon,
+
+                "rmse_reference":
+                    float(
+                        rmse
+                    ),
+
+                "mae_reference":
+                    float(
+                        mae
+                    ),
+
+                "records":
+                    int(
+                        valid.sum()
+                    ),
+
+                "type":
+                    "referencia_persistencia",
+            }
+        )
 
     return pd.DataFrame(
         rows
@@ -4453,127 +4416,120 @@ def resumen_backtest(
 
     if (
         backtest is None
-        or not isinstance(
-            backtest,
-            pd.DataFrame,
-        )
         or backtest.empty
     ):
 
-        return pd.DataFrame()
+        return {}
 
+    result = {}
 
-    rows = []
-
-
-    for horizon, group in backtest.groupby(
-        "horizon"
+    for _, row in (
+        backtest.iterrows()
     ):
 
-        errors = _numeric(
-            group[
-                "error"
-            ]
-        ).dropna()
-
-
-        if errors.empty:
-            continue
-
-
-        rows.append(
-            {
-                "horizon":
-                    int(
-                        horizon
-                    ),
-
-                "MAE":
-                    float(
-                        np.mean(
-                            np.abs(
-                                errors
-                            )
-                        )
-                    ),
-
-                "RMSE":
-                    float(
-                        np.sqrt(
-                            np.mean(
-                                errors
-                                ** 2
-                            )
-                        )
-                    ),
-
-                "n":
-                    int(
-                        len(
-                            errors
-                        )
-                    ),
-            }
+        horizon = _safe_int(
+            row.get(
+                "horizon"
+            ),
+            0,
         )
 
+        result[
+            horizon
+        ] = {
 
-    return pd.DataFrame(
-        rows
-    )
+            "rmse":
+                _safe_float(
+                    row.get(
+                        "rmse_reference"
+                    )
+                ),
+
+            "mae":
+                _safe_float(
+                    row.get(
+                        "mae_reference"
+                    )
+                ),
+
+            "records":
+                _safe_int(
+                    row.get(
+                        "records"
+                    )
+                ),
+        }
+
+    return result
 
 
 # ============================================================
-# PROBABILIDAD AUXILIAR
+# PROBABILIDAD / RANGO
 # ============================================================
 
 def prob(
-    value,
-    center=0.0,
-    scale=1.0,
+    forecast,
 ):
 
-    try:
-
-        value = float(
-            value
+    if (
+        forecast is None
+        or not isinstance(
+            forecast,
+            pd.DataFrame,
         )
+        or forecast.empty
+    ):
 
-        center = float(
-            center
-        )
+        return {}
 
-        scale = max(
-            abs(
-                float(
-                    scale
+    last = forecast.iloc[
+        -1
+    ]
+
+    return {
+
+        "prediction":
+            _safe_float(
+                last.get(
+                    "prediction"
                 )
             ),
-            1e-6,
-        )
 
-
-        z = (
-            value
-            - center
-        ) / scale
-
-
-        return float(
-            1.0
-            /
-            (
-                1.0
-                +
-                np.exp(
-                    -z
+        "lower":
+            _safe_float(
+                last.get(
+                    "lower"
                 )
-            )
-        )
+            ),
 
+        "upper":
+            _safe_float(
+                last.get(
+                    "upper"
+                )
+            ),
 
-    except Exception:
+        "scenario_probable":
+            _safe_float(
+                last.get(
+                    "scenario_probable"
+                )
+            ),
 
-        return np.nan
+        "scenario_adverse":
+            _safe_float(
+                last.get(
+                    "scenario_adverse"
+                )
+            ),
+
+        "scenario_extreme":
+            _safe_float(
+                last.get(
+                    "scenario_extreme"
+                )
+            ),
+    }
 
 
 # ============================================================
@@ -4596,10 +4552,9 @@ def diagnostic(
             "pendiente",
     }
 
-
     try:
 
-        dataset = preparar_dataset(
+        models, metrics = train(
 
             df,
 
@@ -4608,135 +4563,118 @@ def diagnostic(
 
             upstream_history=
                 upstream_history,
+
+            hydrology=
+                hydrology,
         )
 
+        result[
+            "status"
+        ] = "ok"
 
-        propagation_lags = (
-            obtener_lags_hidrologicos(
-                hydrology
+        result[
+            "metrics"
+        ] = metrics
+
+        result[
+            "feature_count"
+        ] = models.get(
+            "feature_count"
+        )
+
+        result[
+            "training_rows"
+        ] = models.get(
+            "training_rows"
+        )
+
+        result[
+            "uses_upstream"
+        ] = models.get(
+            "uses_upstream"
+        )
+
+        result[
+            "uses_caudal"
+        ] = models.get(
+            "uses_caudal"
+        )
+
+        result[
+            "uses_rain"
+        ] = models.get(
+            "uses_rain"
+        )
+
+        result[
+            "uses_hydrology"
+        ] = models.get(
+            "uses_hydrology"
+        )
+
+        result[
+            "upstream_features"
+        ] = models.get(
+            "upstream_feature_count"
+        )
+
+        result[
+            "flow_features"
+        ] = models.get(
+            "flow_feature_count"
+        )
+
+        result[
+            "rain_features"
+        ] = models.get(
+            "rain_feature_count"
+        )
+
+        result[
+            "hydrology_features"
+        ] = models.get(
+            "hydrology_feature_count"
+        )
+
+        result[
+            "available_upstream"
+        ] = models.get(
+            "available_upstream_columns"
+        )
+
+        result[
+            "available_flow"
+        ] = models.get(
+            "available_flow_columns"
+        )
+
+        result[
+            "available_rain"
+        ] = models.get(
+            "available_rain_columns"
+        )
+
+        importance = models.get(
+            "importance"
+        )
+
+        if (
+            isinstance(
+                importance,
+                pd.DataFrame,
             )
-        )
+            and not importance.empty
+        ):
 
-
-        features = crear_features(
-
-            dataset,
-
-            propagation_lags=
-                propagation_lags,
-        )
-
-
-        feature_names = seleccionar_features(
-            features
-        )
-
-
-        (
-            upstream_count,
-            flow_count,
-            rain_count,
-        ) = _count_feature_groups(
-            feature_names
-        )
-
-
-        result.update(
-            {
-                "status":
-                    "ok",
-
-                "dataset_rows":
-                    int(
-                        len(
-                            dataset
-                        )
-                    ),
-
-                "feature_count":
-                    int(
-                        len(
-                            feature_names
-                        )
-                    ),
-
-                "upstream_feature_count":
-                    upstream_count,
-
-                "flow_feature_count":
-                    flow_count,
-
-                "rain_feature_count":
-                    rain_count,
-
-                "uses_upstream":
-                    upstream_count > 0,
-
-                "uses_caudal":
-                    flow_count > 0,
-
-                "uses_rain":
-                    rain_count > 0,
-
-                "propagation_lags":
-                    propagation_lags,
-
-                "upstream_columns_present":
-                    [
-                        col
-                        for col
-                        in LEVEL_COLUMNS.values()
-                        if (
-                            col
-                            in dataset.columns
-                            and _numeric(
-                                dataset[
-                                    col
-                                ]
-                            )
-                            .notna()
-                            .any()
-                        )
-                    ],
-
-                "flow_columns_present":
-                    [
-                        col
-                        for col
-                        in FLOW_COLUMNS.values()
-                        if (
-                            col
-                            in dataset.columns
-                            and _numeric(
-                                dataset[
-                                    col
-                                ]
-                            )
-                            .notna()
-                            .any()
-                        )
-                    ],
-
-                "rain_columns_present":
-                    [
-                        col
-                        for col
-                        in RAIN_COLUMNS.values()
-                        if (
-                            col
-                            in dataset.columns
-                            and _numeric(
-                                dataset[
-                                    col
-                                ]
-                            )
-                            .notna()
-                            .any()
-                        )
-                    ],
-            }
-        )
-
+            result[
+                "top_features"
+            ] = (
+                importance
+                .head(20)
+                .to_dict(
+                    orient="records"
+                )
+            )
 
     except Exception as exc:
 
@@ -4744,12 +4682,10 @@ def diagnostic(
             "status"
         ] = "error"
 
-
         result[
             "error"
         ] = str(
             exc
         )
-
 
     return result
