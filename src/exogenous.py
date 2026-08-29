@@ -1,29 +1,42 @@
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # src/exogenous.py
-# V11.9.3 COMPLETO
+# V11.9.8 COMPLETO
 #
-# MEJORAS
+# OBJETIVOS
 # ------------------------------------------------------------
-# - Lluvia histórica: Open-Meteo
-# - Lluvia prevista: Open-Meteo
-# - Caudal: catálogo oficial INA A5 GeoJSON
-# - Variable INA Caudal: var_id = 4
-# - Busca automáticamente la mejor serie disponible
-# - Valida candidatos contra getObservaciones
-# - Normaliza salida a:
+# - Lluvia histórica Open-Meteo
+# - Lluvia prevista Open-Meteo
+# - Caudal INA A5
+# - Catálogo oficial GeoJSON A5
+# - var_id = 4 = Caudal
+# - Buscar automáticamente la mejor serie
+# - Priorizar estaciones del río Paraná
+# - Validar cada candidato mediante getObservaciones
+# - Evitar usar caudales de ríos no relacionados
+# - Proyectar caudal hasta 60 días
+# - Salida compatible con model.py V11.9.7
 #
-#       datetime
-#       precip_mm
-#       caudal_m3s
+# SALIDA:
 #
-# - Todas las fechas salen SIN timezone
-# - Compatible con app/model actuales
-# - Diagnóstico completo de la serie de caudal utilizada
+# history:
+#   datetime
+#   precip_mm
+#   caudal_m3s
+#
+# future:
+#   datetime
+#   precip_mm
+#   caudal_m3s
+#
+# meta:
+#   diagnóstico completo
+#
 # ============================================================
 
 
 from functools import lru_cache
+
 import unicodedata
 
 import numpy as np
@@ -32,10 +45,10 @@ import requests
 
 
 # ============================================================
-# VERSION
+# VERSIÓN
 # ============================================================
 
-VERSION = "V11.9.3"
+VERSION = "V11.9.8"
 
 
 # ============================================================
@@ -71,126 +84,82 @@ INA_OBSERVATIONS_URL = (
 
 
 # ============================================================
-# VARIABLE CAUDAL INA
+# VARIABLE CAUDAL
 # ============================================================
 
 VAR_ID_CAUDAL = 4
 
 
 # ============================================================
-# HTTP
+# CONFIGURACIÓN
 # ============================================================
 
 REQUEST_TIMEOUT = 45
 
-SESSION = requests.Session()
+MAX_FORECAST_DAYS = 60
 
-SESSION.headers.update(
-    {
-        "User-Agent":
-            "Parana-San-Nicolas/11.9.3",
+CAUDAL_MIN = 0.0
 
-        "Accept":
-            "application/json",
-    }
-)
+CAUDAL_MAX = 200000.0
 
 
 # ============================================================
-# PUNTOS DE LLUVIA
+# ESTACIONES DE LLUVIA
 # ============================================================
 
 RAIN_POINTS = {
 
-    "Corrientes": (
-        -27.4692,
-        -58.8306,
-    ),
+    "Corrientes": {
+        "latitude": -27.4692,
+        "longitude": -58.8306,
+    },
 
-    "Goya": (
-        -29.1399,
-        -59.2634,
-    ),
+    "Goya": {
+        "latitude": -29.1400,
+        "longitude": -59.2634,
+    },
 
-    "La Paz": (
-        -30.7449,
-        -59.6457,
-    ),
+    "La Paz": {
+        "latitude": -30.7449,
+        "longitude": -59.6457,
+    },
 
-    "Paraná": (
-        -31.7413,
-        -60.5115,
-    ),
+    "Paraná": {
+        "latitude": -31.7319,
+        "longitude": -60.5238,
+    },
 
-    "Diamante": (
-        -32.0667,
-        -60.6333,
-    ),
+    "Diamante": {
+        "latitude": -32.0664,
+        "longitude": -60.6384,
+    },
 
-    "Rosario": (
-        -32.9442,
-        -60.6505,
-    ),
+    "Rosario": {
+        "latitude": -32.9442,
+        "longitude": -60.6505,
+    },
 
-    "Villa Constitución": (
-        -33.2278,
-        -60.3297,
-    ),
+    "Villa Constitución": {
+        "latitude": -33.2272,
+        "longitude": -60.3296,
+    },
 
-    "San Nicolás": (
-        -33.3358,
-        -60.2252,
-    ),
+    "San Nicolás": {
+        "latitude": -33.3358,
+        "longitude": -60.2252,
+    },
 }
 
 
 # ============================================================
-# ESTACIONES PREFERIDAS PARA CAUDAL
+# PRIORIDAD DE CAUDAL
 #
-# No se inventa series_id.
-# Se busca primero la estación más representativa disponible.
+# El caudal no necesariamente existe en San Nicolás.
+# Por eso se busca de abajo hacia arriba.
 # ============================================================
 
-CAUDAL_STATIONS = {
+CAUDAL_STATION_PRIORITY = [
 
-    "San Nicolás": [
-        "San Nicolás",
-        "San Nicolas",
-    ],
-
-    "Villa Constitución": [
-        "Villa Constitución",
-        "Villa Constitucion",
-    ],
-
-    "Rosario": [
-        "Rosario",
-    ],
-
-    "Diamante": [
-        "Diamante",
-    ],
-
-    "Paraná": [
-        "Paraná",
-        "Parana",
-    ],
-
-    "La Paz": [
-        "La Paz",
-    ],
-
-    "Goya": [
-        "Goya",
-    ],
-
-    "Corrientes": [
-        "Corrientes",
-    ],
-}
-
-
-CAUDAL_PRIORITY = [
     "San Nicolás",
     "Villa Constitución",
     "Rosario",
@@ -200,6 +169,66 @@ CAUDAL_PRIORITY = [
     "Goya",
     "Corrientes",
 ]
+
+
+# ============================================================
+# ALIAS
+# ============================================================
+
+CAUDAL_ALIASES = {
+
+    "San Nicolás": [
+        "san nicolas",
+        "san nicolás",
+    ],
+
+    "Villa Constitución": [
+        "villa constitucion",
+        "villa constitución",
+    ],
+
+    "Rosario": [
+        "rosario",
+    ],
+
+    "Diamante": [
+        "diamante",
+    ],
+
+    "Paraná": [
+        "parana",
+        "paraná",
+    ],
+
+    "La Paz": [
+        "la paz",
+    ],
+
+    "Goya": [
+        "goya",
+    ],
+
+    "Corrientes": [
+        "corrientes",
+    ],
+}
+
+
+# ============================================================
+# REQUEST SESSION
+# ============================================================
+
+SESSION = requests.Session()
+
+SESSION.headers.update(
+    {
+        "User-Agent":
+            "Parana-San-Nicolas/11.9.8",
+
+        "Accept":
+            "application/json",
+    }
+)
 
 
 # ============================================================
@@ -215,27 +244,19 @@ def _normalizar_texto(
 
     text = str(
         value
-    ).strip()
+    ).strip().lower()
 
     text = unicodedata.normalize(
-        "NFD",
+        "NFKD",
         text,
     )
 
     text = "".join(
         c
         for c in text
-        if unicodedata.category(
+        if not unicodedata.combining(
             c
-        ) != "Mn"
-    )
-
-    text = (
-        text
-        .lower()
-        .replace("_", " ")
-        .replace("–", "-")
-        .replace("—", "-")
+        )
     )
 
     return " ".join(
@@ -272,7 +293,10 @@ def _normalizar_fecha(
     if pd.isna(
         dt
     ):
-        return None
+
+        raise ValueError(
+            f"Fecha inválida: {value}"
+        )
 
     return dt.strftime(
         "%Y-%m-%d"
@@ -289,11 +313,13 @@ def _safe_int(
         if value is None:
             return default
 
-        return int(
+        result = int(
             float(
                 value
             )
         )
+
+        return result
 
     except Exception:
 
@@ -314,11 +340,9 @@ def _safe_float(
         if np.isfinite(
             result
         ):
-
             return result
 
     except Exception:
-
         pass
 
     return default
@@ -327,14 +351,17 @@ def _safe_float(
 def _request_json(
     url,
     params=None,
-    timeout=
-        REQUEST_TIMEOUT,
 ):
 
     response = SESSION.get(
+
         url,
-        params=params,
-        timeout=timeout,
+
+        params=
+            params,
+
+        timeout=
+            REQUEST_TIMEOUT,
     )
 
     response.raise_for_status()
@@ -343,7 +370,125 @@ def _request_json(
 
 
 # ============================================================
-# LLUVIA HISTÓRICA
+# LLUVIA HISTÓRICA DE UN PUNTO
+# ============================================================
+
+def _rain_history_point(
+    latitude,
+    longitude,
+    start,
+    end,
+):
+
+    params = {
+
+        "latitude":
+            latitude,
+
+        "longitude":
+            longitude,
+
+        "start_date":
+            _normalizar_fecha(
+                start
+            ),
+
+        "end_date":
+            _normalizar_fecha(
+                end
+            ),
+
+        "daily":
+            "precipitation_sum",
+
+        "timezone":
+            "America/Argentina/Buenos_Aires",
+    }
+
+    try:
+
+        data = _request_json(
+            HISTORICAL_WEATHER_URL,
+            params=params,
+        )
+
+    except Exception:
+
+        return pd.DataFrame()
+
+
+    daily = data.get(
+        "daily",
+        {},
+    )
+
+
+    dates = daily.get(
+        "time",
+        [],
+    )
+
+    rain = daily.get(
+        "precipitation_sum",
+        [],
+    )
+
+
+    if (
+        not dates
+        or not rain
+    ):
+
+        return pd.DataFrame()
+
+
+    result = pd.DataFrame(
+        {
+            "datetime":
+                dates,
+
+            "precip_mm":
+                rain,
+        }
+    )
+
+
+    result[
+        "datetime"
+    ] = _to_datetime_naive(
+        result[
+            "datetime"
+        ]
+    )
+
+
+    result[
+        "precip_mm"
+    ] = (
+        pd.to_numeric(
+            result[
+                "precip_mm"
+            ],
+            errors="coerce",
+        )
+        .fillna(
+            0.0
+        )
+        .clip(
+            lower=0.0
+        )
+    )
+
+
+    return result.dropna(
+        subset=[
+            "datetime"
+        ]
+    )
+
+
+# ============================================================
+# LLUVIA HISTÓRICA CORREDOR
 # ============================================================
 
 def get_rain_history(
@@ -351,154 +496,62 @@ def get_rain_history(
     end,
 ):
 
-    start_dt = pd.to_datetime(
-        start,
-        errors="coerce",
-    )
-
-    end_dt = pd.to_datetime(
-        end,
-        errors="coerce",
-    )
-
-    today = (
-        pd.Timestamp.today()
-        .normalize()
-    )
-
-    if pd.isna(
-        end_dt
-    ):
-
-        end_dt = today
-
-    end_dt = min(
-        end_dt.normalize(),
-        today,
-    )
-
-    if pd.isna(
-        start_dt
-    ):
-
-        start_dt = (
-            end_dt
-            - pd.Timedelta(
-                days=365
-            )
-        )
-
-    start_dt = min(
-        start_dt.normalize(),
-        end_dt,
-    )
-
     frames = []
+
 
     for (
         station,
-        (
-            latitude,
-            longitude,
-        ),
+        coords,
     ) in RAIN_POINTS.items():
-
-        params = {
-
-            "latitude":
-                latitude,
-
-            "longitude":
-                longitude,
-
-            "start_date":
-                start_dt.strftime(
-                    "%Y-%m-%d"
-                ),
-
-            "end_date":
-                end_dt.strftime(
-                    "%Y-%m-%d"
-                ),
-
-            "daily":
-                "precipitation_sum",
-
-            "timezone":
-                "America/Argentina/Buenos_Aires",
-        }
 
         try:
 
-            data = _request_json(
-                HISTORICAL_WEATHER_URL,
-                params=params,
+            frame = (
+                _rain_history_point(
+
+                    coords[
+                        "latitude"
+                    ],
+
+                    coords[
+                        "longitude"
+                    ],
+
+                    start,
+                    end,
+                )
             )
 
         except Exception:
 
             continue
 
-        daily = data.get(
-            "daily",
-            {},
-        )
 
-        dates = daily.get(
-            "time",
-            [],
-        )
-
-        rain = daily.get(
-            "precipitation_sum",
-            [],
-        )
-
-        if (
-            not dates
-            or len(dates)
-            != len(rain)
-        ):
-
+        if frame.empty:
             continue
 
-        column = (
-            "rain_"
-            + _normalizar_texto(
-                station
-            )
-            .replace(
-                " ",
-                "_",
-            )
-        )
 
-        frame = pd.DataFrame(
-            {
-                "datetime":
-                    pd.to_datetime(
-                        dates,
-                        errors="coerce",
-                    ),
-
-                column:
-                    pd.to_numeric(
-                        rain,
-                        errors="coerce",
-                    ),
+        frame = frame.rename(
+            columns={
+                "precip_mm":
+                    (
+                        "rain_"
+                        + _normalizar_texto(
+                            station
+                        )
+                        .replace(
+                            " ",
+                            "_",
+                        )
+                    )
             }
         )
 
-        frame[column] = (
-            frame[column]
-            .clip(
-                lower=0.0
-            )
-        )
 
         frames.append(
             frame
         )
+
 
     if not frames:
 
@@ -509,23 +562,34 @@ def get_rain_history(
             ]
         )
 
-    result = frames[0]
 
-    for frame in frames[1:]:
+    result = frames[
+        0
+    ]
+
+
+    for frame in frames[
+        1:
+    ]:
 
         result = result.merge(
+
             frame,
+
             on="datetime",
+
             how="outer",
         )
 
+
     rain_cols = [
-        col
-        for col in result.columns
-        if col.startswith(
+        c
+        for c in result.columns
+        if c.startswith(
             "rain_"
         )
     ]
+
 
     result[
         "precip_mm"
@@ -538,6 +602,7 @@ def get_rain_history(
             skipna=True,
         )
     )
+
 
     result[
         "precip_mm"
@@ -556,198 +621,119 @@ def get_rain_history(
         )
     )
 
-    result = result[
-        [
-            "datetime",
-            "precip_mm",
-        ]
-    ].copy()
 
-    result[
-        "datetime"
-    ] = pd.to_datetime(
+    return (
         result[
-            "datetime"
-        ],
-        errors="coerce",
-    )
-
-    result = (
-        result
-        .dropna(
-            subset=[
-                "datetime"
+            [
+                "datetime",
+                "precip_mm",
             ]
-        )
+        ]
         .sort_values(
             "datetime"
-        )
-        .drop_duplicates(
-            subset=[
-                "datetime"
-            ],
-            keep="last",
         )
         .reset_index(
             drop=True
         )
     )
 
-    return result
-
 
 # ============================================================
-# LLUVIA PREVISTA
+# LLUVIA FUTURA POR PUNTO
 # ============================================================
 
-def get_rain_forecast(
+def _rain_forecast_point(
+    latitude,
+    longitude,
     days=15,
 ):
 
-    requested_days = max(
-        1,
-        int(
-            days
-        ),
-    )
-
-    # Open-Meteo permite un horizonte limitado.
     api_days = min(
-        requested_days,
+        max(
+            int(
+                days
+            ),
+            1,
+        ),
         16,
     )
 
-    frames = []
 
-    for (
-        station,
-        (
+    params = {
+
+        "latitude":
             latitude,
+
+        "longitude":
             longitude,
-        ),
-    ) in RAIN_POINTS.items():
 
-        params = {
-
-            "latitude":
-                latitude,
-
-            "longitude":
-                longitude,
-
-            "daily":
-                "precipitation_sum",
-
-            "forecast_days":
-                api_days,
-
-            "timezone":
-                "America/Argentina/Buenos_Aires",
-        }
-
-        try:
-
-            data = _request_json(
-                FORECAST_URL,
-                params=params,
-            )
-
-        except Exception:
-
-            continue
-
-        daily = data.get(
-            "daily",
-            {},
-        )
-
-        dates = daily.get(
-            "time",
-            [],
-        )
-
-        rain = daily.get(
+        "daily":
             "precipitation_sum",
-            [],
+
+        "forecast_days":
+            api_days,
+
+        "timezone":
+            "America/Argentina/Buenos_Aires",
+    }
+
+
+    try:
+
+        data = _request_json(
+            FORECAST_URL,
+            params=params,
         )
 
-        if (
-            not dates
-            or len(dates)
-            != len(rain)
-        ):
+    except Exception:
 
-            continue
+        return pd.DataFrame()
 
-        column = (
-            "rain_"
-            + _normalizar_texto(
-                station
-            )
-            .replace(
-                " ",
-                "_",
-            )
-        )
 
-        frame = pd.DataFrame(
-            {
-                "datetime":
-                    pd.to_datetime(
-                        dates,
-                        errors="coerce",
-                    ),
+    daily = data.get(
+        "daily",
+        {},
+    )
 
-                column:
-                    pd.to_numeric(
-                        rain,
-                        errors="coerce",
-                    ),
-            }
-        )
 
-        frames.append(
-            frame
-        )
+    dates = daily.get(
+        "time",
+        [],
+    )
 
-    if not frames:
+    rain = daily.get(
+        "precipitation_sum",
+        [],
+    )
 
-        return pd.DataFrame(
-            columns=[
-                "datetime",
-                "precip_mm",
-            ]
-        )
 
-    result = frames[0]
+    if (
+        not dates
+        or not rain
+    ):
 
-    for frame in frames[1:]:
+        return pd.DataFrame()
 
-        result = result.merge(
-            frame,
-            on="datetime",
-            how="outer",
-        )
 
-    rain_cols = [
-        col
-        for col in result.columns
-        if col.startswith(
-            "rain_"
-        )
-    ]
+    result = pd.DataFrame(
+        {
+            "datetime":
+                dates,
+
+            "precip_mm":
+                rain,
+        }
+    )
+
 
     result[
-        "precip_mm"
-    ] = (
+        "datetime"
+    ] = _to_datetime_naive(
         result[
-            rain_cols
+            "datetime"
         ]
-        .mean(
-            axis=1,
-            skipna=True,
-        )
     )
+
 
     result[
         "precip_mm"
@@ -766,28 +752,163 @@ def get_rain_forecast(
         )
     )
 
-    result = result[
-        [
-            "datetime",
-            "precip_mm",
-        ]
-    ].copy()
 
-    result = (
-        result
-        .dropna(
-            subset=[
-                "datetime"
+    return result
+
+
+# ============================================================
+# LLUVIA FUTURA CORREDOR
+# ============================================================
+
+def get_rain_forecast(
+    days=15,
+):
+
+    api_days = min(
+        max(
+            int(
+                days
+            ),
+            1,
+        ),
+        16,
+    )
+
+
+    frames = []
+
+
+    for (
+        station,
+        coords,
+    ) in RAIN_POINTS.items():
+
+        try:
+
+            frame = (
+                _rain_forecast_point(
+
+                    coords[
+                        "latitude"
+                    ],
+
+                    coords[
+                        "longitude"
+                    ],
+
+                    api_days,
+                )
+            )
+
+        except Exception:
+
+            continue
+
+
+        if frame.empty:
+            continue
+
+
+        frame = frame.rename(
+            columns={
+                "precip_mm":
+                    (
+                        "rain_"
+                        + _normalizar_texto(
+                            station
+                        )
+                        .replace(
+                            " ",
+                            "_",
+                        )
+                    )
+            }
+        )
+
+
+        frames.append(
+            frame
+        )
+
+
+    if not frames:
+
+        return pd.DataFrame(
+            columns=[
+                "datetime",
+                "precip_mm",
             ]
         )
+
+
+    result = frames[
+        0
+    ]
+
+
+    for frame in frames[
+        1:
+    ]:
+
+        result = result.merge(
+
+            frame,
+
+            on="datetime",
+
+            how="outer",
+        )
+
+
+    rain_cols = [
+        c
+        for c in result.columns
+        if c.startswith(
+            "rain_"
+        )
+    ]
+
+
+    result[
+        "precip_mm"
+    ] = (
+        result[
+            rain_cols
+        ]
+        .mean(
+            axis=1,
+            skipna=True,
+        )
+    )
+
+
+    result[
+        "precip_mm"
+    ] = (
+        pd.to_numeric(
+            result[
+                "precip_mm"
+            ],
+            errors="coerce",
+        )
+        .fillna(
+            0.0
+        )
+        .clip(
+            lower=0.0
+        )
+    )
+
+
+    return (
+        result[
+            [
+                "datetime",
+                "precip_mm",
+            ]
+        ]
         .sort_values(
             "datetime"
-        )
-        .drop_duplicates(
-            subset=[
-                "datetime"
-            ],
-            keep="last",
         )
         .head(
             api_days
@@ -796,8 +917,6 @@ def get_rain_forecast(
             drop=True
         )
     )
-
-    return result
 
 
 # ============================================================
@@ -809,27 +928,31 @@ def get_rain_forecast(
 )
 def _get_ina_catalog():
 
-    data = _request_json(
-        INA_SERIES_GEOJSON_URL,
-        params={
-            "format":
-                "geojson",
-        },
-    )
+    try:
 
-    if not isinstance(
-        data,
-        dict,
-    ):
+        data = _request_json(
+
+            INA_SERIES_GEOJSON_URL,
+
+            params={
+                "format":
+                    "geojson",
+            },
+        )
+
+    except Exception:
 
         return pd.DataFrame()
+
 
     features = data.get(
         "features",
         [],
     )
 
+
     rows = []
+
 
     for feature in features:
 
@@ -837,22 +960,26 @@ def _get_ina_catalog():
             feature,
             dict,
         ):
-
             continue
 
-        properties = feature.get(
+
+        props = feature.get(
             "properties",
             {},
         )
 
+
         if not isinstance(
-            properties,
+            props,
             dict,
         ):
-
             continue
 
-        row = properties.copy()
+
+        row = dict(
+            props
+        )
+
 
         if (
             row.get(
@@ -867,17 +994,60 @@ def _get_ina_catalog():
                 "id"
             )
 
+
+        geometry = feature.get(
+            "geometry"
+        )
+
+
+        if isinstance(
+            geometry,
+            dict,
+        ):
+
+            coords = geometry.get(
+                "coordinates"
+            )
+
+
+            if (
+                isinstance(
+                    coords,
+                    list,
+                )
+                and len(
+                    coords
+                )
+                >= 2
+            ):
+
+                row[
+                    "longitude"
+                ] = coords[
+                    0
+                ]
+
+                row[
+                    "latitude"
+                ] = coords[
+                    1
+                ]
+
+
         rows.append(
             row
         )
+
+
+    if not rows:
+
+        return pd.DataFrame()
+
 
     catalog = pd.DataFrame(
         rows
     )
 
-    if catalog.empty:
-
-        return catalog
 
     for col in [
         "series_id",
@@ -889,10 +1059,15 @@ def _get_ina_catalog():
 
         if col in catalog.columns:
 
-            catalog[col] = pd.to_numeric(
-                catalog[col],
+            catalog[
+                col
+            ] = pd.to_numeric(
+                catalog[
+                    col
+                ],
                 errors="coerce",
             )
+
 
     for col in [
         "timestart",
@@ -901,34 +1076,54 @@ def _get_ina_catalog():
 
         if col in catalog.columns:
 
-            catalog[col] = pd.to_datetime(
-                catalog[col],
+            catalog[
+                col
+            ] = pd.to_datetime(
+                catalog[
+                    col
+                ],
                 errors="coerce",
                 utc=True,
             )
 
+
     if (
         "nombre"
-        in catalog.columns
+        not in catalog.columns
     ):
 
         catalog[
-            "_name"
-        ] = (
-            catalog[
-                "nombre"
-            ]
-            .fillna("")
-            .map(
-                _normalizar_texto
-            )
-        )
+            "nombre"
+        ] = ""
 
-    else:
+
+    if (
+        "rio"
+        not in catalog.columns
+    ):
 
         catalog[
-            "_name"
+            "rio"
         ] = ""
+
+
+    catalog[
+        "_nombre_normalizado"
+    ] = catalog[
+        "nombre"
+    ].apply(
+        _normalizar_texto
+    )
+
+
+    catalog[
+        "_rio_normalizado"
+    ] = catalog[
+        "rio"
+    ].apply(
+        _normalizar_texto
+    )
+
 
     return catalog
 
@@ -937,68 +1132,158 @@ def _get_ina_catalog():
 # SCORE DE ESTACIÓN
 # ============================================================
 
-def _station_score(
-    station_name,
-    aliases,
+def _station_match_score(
+    station,
+    series_name,
 ):
 
-    name = _normalizar_texto(
-        station_name
+    series_name = (
+        _normalizar_texto(
+            series_name
+        )
     )
+
+
+    aliases = (
+        CAUDAL_ALIASES.get(
+            station,
+            [
+                station
+            ],
+        )
+    )
+
 
     best = 0
 
+
     for alias in aliases:
 
-        target = _normalizar_texto(
-            alias
+        alias = (
+            _normalizar_texto(
+                alias
+            )
         )
 
-        if not target:
+
+        if not alias:
             continue
 
-        if name == target:
 
-            score = 1000
-
-        elif name.startswith(
-            target + " "
+        if (
+            series_name
+            == alias
         ):
 
-            score = 900
+            best = max(
+                best,
+                1000,
+            )
 
-        elif name.startswith(
-            target + "-"
-        ):
-
-            score = 900
 
         elif (
-            " "
-            + target
-            + " "
-        ) in (
-            " "
-            + name
-            + " "
+            series_name.startswith(
+                alias
+            )
         ):
 
-            score = 800
+            best = max(
+                best,
+                900,
+            )
 
-        elif target in name:
 
-            score = 700
+        elif (
+            f" {alias} "
+            in
+            f" {series_name} "
+        ):
 
-        else:
+            best = max(
+                best,
+                850,
+            )
 
-            score = 0
 
-        best = max(
-            best,
-            score,
-        )
+        elif (
+            alias
+            in series_name
+        ):
+
+            best = max(
+                best,
+                750,
+            )
+
 
     return best
+
+
+# ============================================================
+# IDENTIFICAR SI ES PARANÁ
+# ============================================================
+
+def _parana_score(
+    rio,
+    nombre,
+):
+
+    rio_text = _normalizar_texto(
+        rio
+    )
+
+    nombre_text = (
+        _normalizar_texto(
+            nombre
+        )
+    )
+
+
+    score = 0
+
+
+    if "parana" in rio_text:
+
+        score += 500
+
+
+    if (
+        "rio parana"
+        in nombre_text
+    ):
+
+        score += 200
+
+
+    # Penalizaciones para tributarios conocidos
+    # cuando el catálogo los explicita.
+
+    tributaries = [
+        "paraguay",
+        "uruguay",
+        "salado",
+        "carcarana",
+        "gualeguay",
+        "gualeguaychu",
+        "bermejo",
+        "pilcomayo",
+        "iguazu",
+    ]
+
+
+    for river in tributaries:
+
+        if (
+            river
+            in rio_text
+            and "parana"
+            not in rio_text
+        ):
+
+            score -= 500
+
+
+    return score
 
 
 # ============================================================
@@ -1012,341 +1297,383 @@ def _find_caudal_candidates(
 
     catalog = _get_ina_catalog()
 
+
     if catalog.empty:
 
         return pd.DataFrame()
 
-    x = catalog.copy()
 
     if (
         "var_id"
-        not in x.columns
+        not in catalog.columns
     ):
 
         return pd.DataFrame()
 
-    x = x[
-        x[
+
+    candidates = catalog[
+        catalog[
             "var_id"
         ]
         == VAR_ID_CAUDAL
     ].copy()
 
-    if x.empty:
 
-        return x
+    if candidates.empty:
 
-    candidates = []
+        return pd.DataFrame()
 
-    for priority_index, station in enumerate(
-        CAUDAL_PRIORITY
-    ):
 
-        aliases = CAUDAL_STATIONS[
-            station
-        ]
-
-        temp = x.copy()
-
-        temp[
-            "_station_score"
-        ] = temp[
-            "nombre"
-        ].fillna(
-            ""
-        ).apply(
-            lambda value:
-                _station_score(
-                    value,
-                    aliases,
-                )
-        )
-
-        temp = temp[
-            temp[
-                "_station_score"
-            ]
-            >= 700
-        ].copy()
-
-        if temp.empty:
-
-            continue
-
-        temp[
-            "_station"
-        ] = station
-
-        # Estaciones más cercanas a San Nicolás primero.
-        temp[
-            "_priority_score"
-        ] = (
-            len(
-                CAUDAL_PRIORITY
-            )
-            - priority_index
-        ) * 20
-
-        candidates.append(
-            temp
-        )
-
-    if not candidates:
-
-        # ----------------------------------------------------
-        # Fallback:
-        # si no hay coincidencia con nuestros nombres,
-        # permitir todas las series de Caudal.
-        # ----------------------------------------------------
-
-        x[
-            "_station"
-        ] = (
-            x[
-                "nombre"
-            ]
-            .fillna(
-                "Serie INA"
-            )
-        )
-
-        x[
-            "_station_score"
-        ] = 0
-
-        x[
-            "_priority_score"
-        ] = 0
-
-        result = x.copy()
-
-    else:
-
-        result = pd.concat(
-            candidates,
-            ignore_index=True,
-        )
-
-    # --------------------------------------------------------
-    # Procedimiento
-    # --------------------------------------------------------
-
-    result[
-        "_proc_score"
-    ] = 0
-
-    if (
-        "proc_id"
-        in result.columns
-    ):
-
-        result.loc[
-            result[
-                "proc_id"
-            ] == 1,
-            "_proc_score",
-        ] = 80
-
-        result.loc[
-            result[
-                "proc_id"
-            ] == 2,
-            "_proc_score",
-        ] = 50
-
-    # --------------------------------------------------------
-    # Cantidad de datos
-    # --------------------------------------------------------
-
-    if (
-        "count"
-        in result.columns
-    ):
-
-        counts = (
-            pd.to_numeric(
-                result[
-                    "count"
-                ],
-                errors="coerce",
-            )
-            .fillna(
-                0
-            )
-        )
-
-        result[
-            "_count_score"
-        ] = (
-            np.log1p(
-                counts
-            )
-            * 5
-        )
-
-    else:
-
-        result[
-            "_count_score"
-        ] = 0
-
-    # --------------------------------------------------------
-    # Actualidad
-    # --------------------------------------------------------
-
-    result[
-        "_recent_score"
-    ] = 0
-
-    if (
-        "timeend"
-        in result.columns
-    ):
-
-        now = pd.Timestamp.now(
-            tz="UTC"
-        )
-
-        age = (
-            now
-            - result[
-                "timeend"
-            ]
-        ).dt.days
-
-        result.loc[
-            age <= 7,
-            "_recent_score",
-        ] = 100
-
-        result.loc[
-            (age > 7)
-            & (age <= 30),
-            "_recent_score",
-        ] = 80
-
-        result.loc[
-            (age > 30)
-            & (age <= 180),
-            "_recent_score",
-        ] = 50
-
-        result.loc[
-            (age > 180)
-            & (age <= 365),
-            "_recent_score",
-        ] = 25
-
-    # --------------------------------------------------------
-    # Solapamiento con rango solicitado
-    # --------------------------------------------------------
-
-    result[
-        "_overlap_score"
-    ] = 0
-
-    start_dt = pd.to_datetime(
+    requested_start = pd.to_datetime(
         start,
         errors="coerce",
         utc=True,
     )
 
-    end_dt = pd.to_datetime(
+
+    requested_end = pd.to_datetime(
         end,
         errors="coerce",
         utc=True,
     )
 
-    if (
-        pd.notna(
-            start_dt
-        )
-        and pd.notna(
-            end_dt
-        )
-        and "timestart"
-        in result.columns
-        and "timeend"
-        in result.columns
-    ):
 
-        overlap = (
-            (
-                result[
-                    "timestart"
-                ].isna()
-            )
-            |
-            (
-                result[
-                    "timestart"
-                ]
-                <= end_dt
-            )
-        ) & (
-            (
-                result[
-                    "timeend"
-                ].isna()
-            )
-            |
-            (
-                result[
-                    "timeend"
-                ]
-                >= start_dt
+    rows = []
+
+
+    for _, row in candidates.iterrows():
+
+        series_id = _safe_int(
+            row.get(
+                "series_id"
             )
         )
 
-        result.loc[
-            overlap,
-            "_overlap_score",
-        ] = 150
 
-    result[
-        "_total_score"
-    ] = (
-        result[
-            "_station_score"
-        ]
-        + result[
-            "_priority_score"
-        ]
-        + result[
-            "_proc_score"
-        ]
-        + result[
-            "_count_score"
-        ]
-        + result[
-            "_recent_score"
-        ]
-        + result[
-            "_overlap_score"
-        ]
+        if series_id is None:
+            continue
+
+
+        series_name = str(
+            row.get(
+                "nombre",
+                "",
+            )
+            or ""
+        )
+
+
+        rio = str(
+            row.get(
+                "rio",
+                "",
+            )
+            or ""
+        )
+
+
+        best_station = None
+
+        station_score = 0
+
+        priority_score = 0
+
+
+        for (
+            priority_index,
+            station,
+        ) in enumerate(
+            CAUDAL_STATION_PRIORITY
+        ):
+
+            score = (
+                _station_match_score(
+                    station,
+                    series_name,
+                )
+            )
+
+
+            if (
+                score
+                > station_score
+            ):
+
+                station_score = score
+
+                best_station = station
+
+                priority_score = (
+                    len(
+                        CAUDAL_STATION_PRIORITY
+                    )
+                    - priority_index
+                ) * 20
+
+
+        parana_score = (
+            _parana_score(
+                rio,
+                series_name,
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # Si no encontramos estación prioritaria y tampoco
+        # está relacionado claramente con Paraná, descartamos.
+        # ----------------------------------------------------
+
+        if (
+            station_score
+            <= 0
+            and parana_score
+            <= 0
+        ):
+
+            continue
+
+
+        proc_id = _safe_int(
+            row.get(
+                "proc_id"
+            ),
+            -1,
+        )
+
+
+        count = _safe_int(
+            row.get(
+                "count"
+            ),
+            0,
+        )
+
+
+        catalog_start = row.get(
+            "timestart"
+        )
+
+        catalog_end = row.get(
+            "timeend"
+        )
+
+
+        total_score = (
+            station_score
+            + priority_score
+            + parana_score
+        )
+
+
+        # ----------------------------------------------------
+        # PROCEDIMIENTO
+        # ----------------------------------------------------
+
+        if proc_id == 1:
+
+            total_score += 100
+
+        elif proc_id == 2:
+
+            total_score += 60
+
+
+        # ----------------------------------------------------
+        # CANTIDAD DE DATOS
+        # ----------------------------------------------------
+
+        if count > 10000:
+
+            total_score += 100
+
+        elif count > 1000:
+
+            total_score += 70
+
+        elif count > 100:
+
+            total_score += 40
+
+        elif count > 0:
+
+            total_score += 20
+
+
+        # ----------------------------------------------------
+        # RECENCIA
+        # ----------------------------------------------------
+
+        if pd.notna(
+            catalog_end
+        ):
+
+            now = pd.Timestamp.now(
+                tz="UTC"
+            )
+
+            age_days = (
+                now
+                - catalog_end
+            ).days
+
+
+            if age_days <= 7:
+
+                total_score += 150
+
+            elif age_days <= 30:
+
+                total_score += 120
+
+            elif age_days <= 180:
+
+                total_score += 80
+
+            elif age_days <= 365:
+
+                total_score += 40
+
+
+        # ----------------------------------------------------
+        # SOLAPAMIENTO CON PERÍODO SOLICITADO
+        # ----------------------------------------------------
+
+        overlap = True
+
+
+        if (
+            pd.notna(
+                requested_start
+            )
+            and pd.notna(
+                catalog_end
+            )
+            and catalog_end
+            < requested_start
+        ):
+
+            overlap = False
+
+
+        if (
+            pd.notna(
+                requested_end
+            )
+            and pd.notna(
+                catalog_start
+            )
+            and catalog_start
+            > requested_end
+        ):
+
+            overlap = False
+
+
+        if overlap:
+
+            total_score += 150
+
+        else:
+
+            total_score -= 500
+
+
+        rows.append(
+            {
+
+                "series_id":
+                    series_id,
+
+                "station":
+                    best_station,
+
+                "series_name":
+                    series_name,
+
+                "rio":
+                    rio,
+
+                "var_id":
+                    VAR_ID_CAUDAL,
+
+                "proc_id":
+                    proc_id,
+
+                "unit_id":
+                    _safe_int(
+                        row.get(
+                            "unit_id"
+                        )
+                    ),
+
+                "count":
+                    count,
+
+                "timestart":
+                    catalog_start,
+
+                "timeend":
+                    catalog_end,
+
+                "latitude":
+                    row.get(
+                        "latitude"
+                    ),
+
+                "longitude":
+                    row.get(
+                        "longitude"
+                    ),
+
+                "score":
+                    total_score,
+
+                "station_score":
+                    station_score,
+
+                "parana_score":
+                    parana_score,
+
+                "overlap":
+                    overlap,
+            }
+        )
+
+
+    if not rows:
+
+        return pd.DataFrame()
+
+
+    result = pd.DataFrame(
+        rows
     )
+
 
     result = (
         result
         .sort_values(
-            "_total_score",
-            ascending=False,
-        )
-        .drop_duplicates(
-            subset=[
-                "series_id"
-            ]
+            [
+                "score",
+                "count",
+            ],
+            ascending=[
+                False,
+                False,
+            ],
         )
         .reset_index(
             drop=True
         )
     )
 
+
     return result
 
 
 # ============================================================
-# EXTRAER OBSERVACIONES DEL JSON
+# PARSER OBSERVACIONES INA
 # ============================================================
 
 def _extract_observation_records(
@@ -1371,57 +1698,67 @@ def _extract_observation_records(
 
             keys = set()
 
-            for item in data[:5]:
+
+            for item in data[
+                :5
+            ]:
 
                 keys.update(
                     item.keys()
                 )
 
+
             if keys.intersection(
                 {
                     "timestart",
-                    "valor",
-                    "value",
                     "datetime",
                     "fecha",
-                    "time",
+                    "valor",
+                    "value",
                 }
             ):
 
                 return data
 
+
         for item in data:
 
-            records = (
+            result = (
                 _extract_observation_records(
                     item
                 )
             )
 
-            if records:
+            if result:
 
-                return records
+                return result
+
 
         return []
+
 
     if isinstance(
         data,
         dict,
     ):
 
-        for key in [
+        preferred = [
+
             "observaciones",
             "observations",
-            "data",
             "datos",
+            "data",
             "records",
             "values",
             "result",
-        ]:
+        ]
+
+
+        for key in preferred:
 
             if key in data:
 
-                records = (
+                result = (
                     _extract_observation_records(
                         data[
                             key
@@ -1429,21 +1766,23 @@ def _extract_observation_records(
                     )
                 )
 
-                if records:
+                if result:
 
-                    return records
+                    return result
+
 
         for value in data.values():
 
-            records = (
+            result = (
                 _extract_observation_records(
                     value
                 )
             )
 
-            if records:
+            if result:
 
-                return records
+                return result
+
 
     return []
 
@@ -1462,6 +1801,7 @@ def _normalizar_caudal_response(
         )
     )
 
+
     if not records:
 
         return pd.DataFrame(
@@ -1471,9 +1811,9 @@ def _normalizar_caudal_response(
             ]
         )
 
-    rows = []
 
     date_fields = [
+
         "timestart",
         "datetime",
         "timestamp",
@@ -1483,17 +1823,34 @@ def _normalizar_caudal_response(
         "obs_date",
     ]
 
+
     value_fields = [
+
         "valor",
         "value",
         "caudal",
         "obs_value",
+        "valor_num",
     ]
+
+
+    rows = []
+
 
     for record in records:
 
-        date_value = None
-        flow_value = None
+        if not isinstance(
+            record,
+            dict,
+        ):
+
+            continue
+
+
+        dt = None
+
+        value = None
+
 
         for field in date_fields:
 
@@ -1501,14 +1858,16 @@ def _normalizar_caudal_response(
                 field in record
                 and record[
                     field
-                ] is not None
+                ]
+                is not None
             ):
 
-                date_value = record[
+                dt = record[
                     field
                 ]
 
                 break
+
 
         for field in value_fields:
 
@@ -1516,48 +1875,56 @@ def _normalizar_caudal_response(
                 field in record
                 and record[
                     field
-                ] is not None
+                ]
+                is not None
             ):
 
-                flow_value = record[
+                value = record[
                     field
                 ]
 
                 break
 
+
         dt = pd.to_datetime(
-            date_value,
+            dt,
             errors="coerce",
             utc=True,
         )
 
-        flow = pd.to_numeric(
-            flow_value,
+
+        value = pd.to_numeric(
+            value,
             errors="coerce",
         )
+
 
         if (
             pd.isna(
                 dt
             )
             or pd.isna(
-                flow
+                value
             )
         ):
 
             continue
 
-        flow = float(
-            flow
+
+        value = float(
+            value
         )
 
-        # Rango amplio de control de calidad.
+
         if (
-            flow < 0
-            or flow > 200000
+            value
+            < CAUDAL_MIN
+            or value
+            > CAUDAL_MAX
         ):
 
             continue
+
 
         rows.append(
             {
@@ -1565,9 +1932,10 @@ def _normalizar_caudal_response(
                     dt,
 
                 "caudal_m3s":
-                    flow,
+                    value,
             }
         )
+
 
     if not rows:
 
@@ -1578,32 +1946,40 @@ def _normalizar_caudal_response(
             ]
         )
 
-    df = pd.DataFrame(
+
+    result = pd.DataFrame(
         rows
     )
 
-    df[
+
+    result[
         "datetime"
     ] = _to_datetime_naive(
-        df[
+        result[
             "datetime"
         ]
     )
 
-    df[
+
+    result[
         "datetime"
     ] = (
-        df[
+        result[
             "datetime"
         ]
         .dt
         .normalize()
     )
 
-    # Varias observaciones en un mismo día:
-    # utilizar mediana diaria.
-    df = (
-        df
+
+    result = (
+        result
+        .dropna(
+            subset=[
+                "datetime",
+                "caudal_m3s",
+            ]
+        )
         .groupby(
             "datetime",
             as_index=False,
@@ -1619,7 +1995,8 @@ def _normalizar_caudal_response(
         )
     )
 
-    return df
+
+    return result
 
 
 # ============================================================
@@ -1653,10 +2030,15 @@ def _query_caudal_series(
             ),
     }
 
+
     data = _request_json(
+
         INA_OBSERVATIONS_URL,
-        params=params,
+
+        params=
+            params,
     )
+
 
     return (
         _normalizar_caudal_response(
@@ -1666,13 +2048,148 @@ def _query_caudal_series(
 
 
 # ============================================================
-# SELECCIONAR MEJOR SERIE REAL
+# VENTANA DE VALIDACIÓN
+# ============================================================
+
+def _candidate_validation_window(
+    candidate,
+    requested_start,
+    requested_end,
+):
+
+    req_start = pd.to_datetime(
+        requested_start,
+        errors="coerce",
+        utc=True,
+    )
+
+
+    req_end = pd.to_datetime(
+        requested_end,
+        errors="coerce",
+        utc=True,
+    )
+
+
+    cat_start = candidate.get(
+        "timestart"
+    )
+
+
+    cat_end = candidate.get(
+        "timeend"
+    )
+
+
+    if pd.isna(
+        req_end
+    ):
+
+        req_end = pd.Timestamp.now(
+            tz="UTC"
+        )
+
+
+    if pd.isna(
+        req_start
+    ):
+
+        req_start = (
+            req_end
+            - pd.Timedelta(
+                days=365
+            )
+        )
+
+
+    overlap_start = req_start
+
+    overlap_end = req_end
+
+
+    if pd.notna(
+        cat_start
+    ):
+
+        overlap_start = max(
+            overlap_start,
+            cat_start,
+        )
+
+
+    if pd.notna(
+        cat_end
+    ):
+
+        overlap_end = min(
+            overlap_end,
+            cat_end,
+        )
+
+
+    if (
+        overlap_end
+        < overlap_start
+    ):
+
+        return (
+            None,
+            None,
+        )
+
+
+    validation_start = max(
+
+        overlap_start,
+
+        overlap_end
+        - pd.Timedelta(
+            days=180
+        ),
+    )
+
+
+    return (
+
+        validation_start
+        .tz_localize(
+            None
+        ),
+
+        overlap_end
+        .tz_localize(
+            None
+        ),
+    )
+
+
+# ============================================================
+# BUSCAR Y VALIDAR MEJOR SERIE
 # ============================================================
 
 def find_best_caudal_series(
     start=None,
     end=None,
 ):
+
+    if end is None:
+
+        end = pd.Timestamp.today().strftime(
+            "%Y-%m-%d"
+        )
+
+
+    if start is None:
+
+        start = (
+            pd.Timestamp.today()
+            - pd.Timedelta(
+                days=365
+            )
+        ).strftime(
+            "%Y-%m-%d"
+        )
+
 
     candidates = (
         _find_caudal_candidates(
@@ -1681,165 +2198,164 @@ def find_best_caudal_series(
         )
     )
 
+
     if candidates.empty:
 
         return None
 
-    requested_end = pd.to_datetime(
-        end,
-        errors="coerce",
-        utc=True,
-    )
 
-    if pd.isna(
-        requested_end
-    ):
+    # ========================================================
+    # PROBAR LOS MEJORES 30
+    # ========================================================
 
-        requested_end = (
-            pd.Timestamp.now(
-                tz="UTC"
-            )
-        )
-
-    for index, row in (
+    for index, candidate in (
         candidates
-        .head(20)
+        .head(
+            30
+        )
         .iterrows()
     ):
 
-        series_id = _safe_int(
-            row.get(
-                "series_id"
+        (
+            validation_start,
+            validation_end,
+        ) = (
+            _candidate_validation_window(
+                candidate,
+                start,
+                end,
             )
         )
 
-        if series_id is None:
-
-            continue
-
-        catalog_start = pd.to_datetime(
-            row.get(
-                "timestart"
-            ),
-            errors="coerce",
-            utc=True,
-        )
-
-        catalog_end = pd.to_datetime(
-            row.get(
-                "timeend"
-            ),
-            errors="coerce",
-            utc=True,
-        )
-
-        validation_end = (
-            min(
-                catalog_end,
-                requested_end,
-            )
-            if pd.notna(
-                catalog_end
-            )
-            else requested_end
-        )
-
-        validation_start = (
-            validation_end
-            - pd.Timedelta(
-                days=180
-            )
-        )
-
-        if pd.notna(
-            catalog_start
-        ):
-
-            validation_start = max(
-                validation_start,
-                catalog_start,
-            )
 
         if (
             validation_start
-            > validation_end
+            is None
+            or validation_end
+            is None
         ):
 
             continue
 
+
         try:
 
-            test = _query_caudal_series(
-                series_id,
-                validation_start,
-                validation_end,
+            observations = (
+                _query_caudal_series(
+
+                    int(
+                        candidate[
+                            "series_id"
+                        ]
+                    ),
+
+                    validation_start,
+
+                    validation_end,
+                )
             )
 
         except Exception:
 
             continue
 
-        if test.empty:
+
+        if (
+            observations.empty
+            or "caudal_m3s"
+            not in observations.columns
+        ):
 
             continue
+
+
+        valid = (
+            observations[
+                "caudal_m3s"
+            ]
+            .dropna()
+        )
+
+
+        if len(
+            valid
+        ) < 3:
+
+            continue
+
+
+        current_flow = float(
+            valid.iloc[-1]
+        )
+
+
+        # ----------------------------------------------------
+        # Validación física básica
+        # ----------------------------------------------------
+
+        if (
+            current_flow
+            <= 0
+            or current_flow
+            > CAUDAL_MAX
+        ):
+
+            continue
+
 
         return {
 
             "series_id":
-                series_id,
+                int(
+                    candidate[
+                        "series_id"
+                    ]
+                ),
 
             "station":
-                row.get(
-                    "_station"
-                )
-                or row.get(
-                    "nombre"
+                candidate.get(
+                    "station"
                 ),
 
             "series_name":
-                row.get(
-                    "nombre"
+                candidate.get(
+                    "series_name"
+                ),
+
+            "river":
+                candidate.get(
+                    "rio"
                 ),
 
             "var_id":
-                _safe_int(
-                    row.get(
-                        "var_id"
-                    )
-                ),
+                VAR_ID_CAUDAL,
 
             "variable":
-                row.get(
-                    "var_nombre"
-                ),
+                "Caudal",
 
             "proc_id":
                 _safe_int(
-                    row.get(
+                    candidate.get(
                         "proc_id"
                     )
                 ),
 
             "unit_id":
                 _safe_int(
-                    row.get(
+                    candidate.get(
                         "unit_id"
                     )
                 ),
 
             "source":
-                row.get(
-                    "fuente"
-                ),
+                "INA A5",
 
             "availability":
-                row.get(
-                    "data_availability"
-                ),
+                True,
 
             "catalog_count":
                 _safe_int(
-                    row.get(
+                    candidate.get(
                         "count"
                     ),
                     0,
@@ -1847,44 +2363,80 @@ def find_best_caudal_series(
 
             "catalog_start":
                 (
-                    catalog_start.strftime(
-                        "%Y-%m-%d"
-                    )
+                    candidate[
+                        "timestart"
+                    ].isoformat()
                     if pd.notna(
-                        catalog_start
+                        candidate.get(
+                            "timestart"
+                        )
                     )
                     else None
                 ),
 
             "catalog_end":
                 (
-                    catalog_end.strftime(
-                        "%Y-%m-%d"
-                    )
+                    candidate[
+                        "timeend"
+                    ].isoformat()
                     if pd.notna(
-                        catalog_end
+                        candidate.get(
+                            "timeend"
+                        )
                     )
                     else None
+                ),
+
+            "validation_start":
+                str(
+                    validation_start.date()
+                ),
+
+            "validation_end":
+                str(
+                    validation_end.date()
                 ),
 
             "validation_records":
                 int(
                     len(
-                        test
+                        observations
                     )
                 ),
 
+            "validation_current_flow":
+                current_flow,
+
             "candidate_number":
                 int(
-                    index + 1
+                    index
+                )
+                + 1,
+
+            "score":
+                _safe_float(
+                    candidate.get(
+                        "score"
+                    )
+                ),
+
+            "latitude":
+                candidate.get(
+                    "latitude"
+                ),
+
+            "longitude":
+                candidate.get(
+                    "longitude"
                 ),
         }
+
 
     return None
 
 
 # ============================================================
-# CAUDAL HISTÓRICO
+# OBTENER HISTORIAL DE CAUDAL
 # ============================================================
 
 def get_caudal_history(
@@ -1899,120 +2451,179 @@ def get_caudal_history(
         ]
     )
 
-    info = find_best_caudal_series(
-        start,
-        end,
-    )
+
+    try:
+
+        info = (
+            find_best_caudal_series(
+                start,
+                end,
+            )
+        )
+
+    except Exception as exc:
+
+        return (
+
+            empty,
+
+            {
+                "status":
+                    "error_busqueda",
+
+                "error":
+                    str(
+                        exc
+                    ),
+            },
+        )
+
 
     if info is None:
 
         return (
+
             empty,
+
             {
                 "status":
                     "sin_serie",
 
                 "message":
-                    "INA no devolvió una serie de caudal "
-                    "validada para las estaciones analizadas.",
+                    (
+                        "No fue posible validar una serie "
+                        "de caudal del río Paraná."
+                    ),
             },
         )
 
+
     try:
 
-        df = _query_caudal_series(
-            info[
-                "series_id"
-            ],
-            start,
-            end,
+        result = (
+            _query_caudal_series(
+
+                info[
+                    "series_id"
+                ],
+
+                start,
+
+                end,
+            )
         )
 
     except Exception as exc:
 
-        info = info.copy()
+        return (
 
-        info[
-            "status"
-        ] = "error_consulta"
+            empty,
 
-        info[
-            "error"
-        ] = str(
-            exc
+            {
+                **info,
+
+                "status":
+                    "error_consulta",
+
+                "error":
+                    str(
+                        exc
+                    ),
+            },
         )
+
+
+    if result.empty:
 
         return (
+
             empty,
-            info,
+
+            {
+                **info,
+
+                "status":
+                    "sin_observaciones",
+
+                "records":
+                    0,
+            },
         )
 
-    info = info.copy()
 
-    if df.empty:
-
-        info[
-            "status"
-        ] = "sin_observaciones"
-
-        info[
-            "records"
-        ] = 0
-
-        return (
-            empty,
-            info,
-        )
-
-    info[
-        "status"
-    ] = "ok"
-
-    info[
-        "records"
-    ] = int(
-        len(
-            df
-        )
-    )
-
-    info[
-        "first_date"
-    ] = (
-        df[
-            "datetime"
-        ]
-        .min()
-        .strftime(
-            "%Y-%m-%d"
-        )
-    )
-
-    info[
-        "last_date"
-    ] = (
-        df[
-            "datetime"
-        ]
-        .max()
-        .strftime(
-            "%Y-%m-%d"
-        )
-    )
-
-    info[
-        "current_flow"
-    ] = float(
-        df[
+    valid = (
+        result[
             "caudal_m3s"
         ]
         .dropna()
-        .iloc[-1]
     )
 
+
+    metadata = {
+
+        **info,
+
+        "status":
+            "ok",
+
+        "records":
+            int(
+                len(
+                    result
+                )
+            ),
+
+        "first_date":
+            result[
+                "datetime"
+            ].min(),
+
+        "last_date":
+            result[
+                "datetime"
+            ].max(),
+
+        "current_flow":
+            (
+                float(
+                    valid.iloc[-1]
+                )
+                if not valid.empty
+                else None
+            ),
+
+        "mean_flow":
+            (
+                float(
+                    valid.mean()
+                )
+                if not valid.empty
+                else None
+            ),
+
+        "max_flow":
+            (
+                float(
+                    valid.max()
+                )
+                if not valid.empty
+                else None
+            ),
+
+        "min_flow":
+            (
+                float(
+                    valid.min()
+                )
+                if not valid.empty
+                else None
+            ),
+    }
+
+
     return (
-        df,
-        info,
+        result,
+        metadata,
     )
 
 
@@ -2025,22 +2636,6 @@ def project_caudal(
     future_dates,
 ):
 
-    dates = pd.to_datetime(
-        future_dates,
-        errors="coerce",
-    )
-
-    output = pd.DataFrame(
-        {
-            "datetime":
-                dates,
-        }
-    )
-
-    output[
-        "caudal_m3s"
-    ] = np.nan
-
     if (
         history is None
         or not isinstance(
@@ -2052,115 +2647,326 @@ def project_caudal(
         not in history.columns
     ):
 
-        return output
+        return pd.Series(
+            np.nan,
+            index=
+                range(
+                    len(
+                        future_dates
+                    )
+                ),
+            dtype=float,
+        )
 
-    q = history.copy()
-
-    q[
-        "caudal_m3s"
-    ] = pd.to_numeric(
-        q[
-            "caudal_m3s"
-        ],
-        errors="coerce",
-    )
 
     values = (
-        q[
-            "caudal_m3s"
-        ]
+        pd.to_numeric(
+            history[
+                "caudal_m3s"
+            ],
+            errors="coerce",
+        )
         .dropna()
         .tail(
-            14
+            21
         )
     )
 
+
     if values.empty:
 
-        return output
+        return pd.Series(
+            np.nan,
+            index=
+                range(
+                    len(
+                        future_dates
+                    )
+                ),
+            dtype=float,
+        )
+
 
     current = float(
         values.iloc[-1]
     )
 
+
+    # ========================================================
+    # TENDENCIA RECIENTE
+    # ========================================================
+
     if len(
         values
     ) >= 5:
 
-        y = values.to_numpy(
-            dtype=float
-        )
-
         x = np.arange(
             len(
-                y
+                values
             ),
             dtype=float,
         )
 
-        slope = float(
-            np.polyfit(
-                x,
-                y,
-                1,
-            )[0]
-        )
 
-        # Evitar proyecciones absurdas.
-        max_daily = max(
-            current * 0.025,
-            50.0,
-        )
+        try:
 
-        slope = float(
-            np.clip(
-                slope,
-                -max_daily,
-                max_daily,
+            slope = float(
+                np.polyfit(
+                    x,
+                    values.to_numpy(
+                        dtype=float
+                    ),
+                    1,
+                )[0]
             )
-        )
+
+        except Exception:
+
+            slope = 0.0
 
     else:
 
         slope = 0.0
 
-    projected = []
 
-    level = current
+    # ========================================================
+    # LIMITAR CAMBIO DIARIO
+    # ========================================================
+
+    max_daily_change = max(
+
+        abs(
+            current
+        )
+        * 0.025,
+
+        50.0,
+    )
+
+
+    slope = float(
+        np.clip(
+            slope,
+            -max_daily_change,
+            max_daily_change,
+        )
+    )
+
+
+    # ========================================================
+    # PROYECCIÓN AMORTIGUADA
+    # ========================================================
+
+    output = []
+
+    value = current
+
 
     for step in range(
         1,
         len(
-            output
+            future_dates
         )
         + 1,
     ):
 
         damping = np.exp(
             -step
-            / 12.0
+            / 18.0
         )
+
 
         daily_change = (
             slope
             * damping
         )
 
-        level = max(
+
+        value = max(
+
             0.0,
-            level
+
+            value
             + daily_change,
         )
 
-        projected.append(
-            level
+
+        output.append(
+            value
         )
 
-    output[
-        "caudal_m3s"
-    ] = projected
 
-    return output
+    return pd.Series(
+        output,
+        dtype=float,
+    )
+
+
+# ============================================================
+# COMPLETAR FUTURO DE LLUVIA
+#
+# Open-Meteo suele aportar ~16 días.
+# Para horizontes mayores no inventamos lluvia:
+# se completa con 0 y queda explícito en metadata.
+# ============================================================
+
+def _build_future_rain(
+    base_end,
+    days,
+):
+
+    end_date = pd.to_datetime(
+        base_end,
+        errors="coerce",
+    )
+
+
+    if pd.isna(
+        end_date
+    ):
+
+        end_date = (
+            pd.Timestamp.today()
+            .normalize()
+        )
+
+
+    future_dates = pd.date_range(
+
+        start=
+            end_date
+            + pd.Timedelta(
+                days=1
+            ),
+
+        periods=
+            int(
+                days
+            ),
+
+        freq="D",
+    )
+
+
+    result = pd.DataFrame(
+        {
+            "datetime":
+                future_dates,
+
+            "precip_mm":
+                0.0,
+        }
+    )
+
+
+    try:
+
+        rain = get_rain_forecast(
+            min(
+                int(
+                    days
+                ),
+                16,
+            )
+        )
+
+    except Exception:
+
+        rain = pd.DataFrame()
+
+
+    if (
+        not rain.empty
+        and "datetime"
+        in rain.columns
+    ):
+
+        rain = rain.copy()
+
+
+        rain[
+            "datetime"
+        ] = _to_datetime_naive(
+            rain[
+                "datetime"
+            ]
+        )
+
+
+        rain[
+            "datetime"
+        ] = (
+            rain[
+                "datetime"
+            ]
+            .dt
+            .normalize()
+        )
+
+
+        rain[
+            "precip_mm"
+        ] = (
+            pd.to_numeric(
+                rain[
+                    "precip_mm"
+                ],
+                errors="coerce",
+            )
+            .fillna(
+                0.0
+            )
+            .clip(
+                lower=0.0
+            )
+        )
+
+
+        result = result.merge(
+
+            rain[
+                [
+                    "datetime",
+                    "precip_mm",
+                ]
+            ],
+
+            on=
+                "datetime",
+
+            how=
+                "left",
+
+            suffixes=(
+                "_default",
+                "_forecast",
+            ),
+        )
+
+
+        result[
+            "precip_mm"
+        ] = (
+            result[
+                "precip_mm_forecast"
+            ]
+            .fillna(
+                result[
+                    "precip_mm_default"
+                ]
+            )
+        )
+
+
+        result = result[
+            [
+                "datetime",
+                "precip_mm",
+            ]
+        ]
+
+
+    return result
 
 
 # ============================================================
@@ -2173,114 +2979,139 @@ def get_exogenous_data(
     forecast_days=15,
 ):
 
-    start_text = _normalizar_fecha(
-        start
+    forecast_days = max(
+        1,
+        min(
+            int(
+                forecast_days
+            ),
+            MAX_FORECAST_DAYS,
+        ),
     )
 
-    end_text = _normalizar_fecha(
-        end
-    )
-
-    if (
-        start_text is None
-        or end_text is None
-    ):
-
-        raise ValueError(
-            "Fechas inválidas para variables exógenas."
-        )
 
     # ========================================================
     # LLUVIA HISTÓRICA
     # ========================================================
 
-    rain_history = get_rain_history(
-        start_text,
-        end_text,
-    )
+    try:
 
-    # ========================================================
-    # LLUVIA FUTURA
-    # ========================================================
+        rain_history = (
+            get_rain_history(
+                start,
+                end,
+            )
+        )
 
-    rain_future = get_rain_forecast(
-        forecast_days,
-    )
+    except Exception:
+
+        rain_history = pd.DataFrame(
+            columns=[
+                "datetime",
+                "precip_mm",
+            ]
+        )
+
 
     # ========================================================
     # CAUDAL HISTÓRICO
     # ========================================================
 
-    (
-        caudal_history,
-        caudal_info,
-    ) = get_caudal_history(
-        start_text,
-        end_text,
+    caudal_history = pd.DataFrame(
+        columns=[
+            "datetime",
+            "caudal_m3s",
+        ]
     )
 
-    # ========================================================
-    # UNIFICAR HISTÓRICO
-    # ========================================================
 
-    if rain_history.empty:
+    caudal_meta = {
+        "status":
+            "sin_datos",
+    }
 
-        history = pd.DataFrame(
-            {
-                "datetime":
-                    pd.date_range(
-                        start=start_text,
-                        end=end_text,
-                        freq="D",
-                    ),
 
-                "precip_mm":
-                    0.0,
-            }
-        )
+    try:
 
-    else:
-
-        history = (
-            rain_history.copy()
-        )
-
-    history[
-        "datetime"
-    ] = pd.to_datetime(
-        history[
-            "datetime"
-        ],
-        errors="coerce",
-    )
-
-    if (
-        caudal_history is not None
-        and isinstance(
+        (
             caudal_history,
-            pd.DataFrame,
-        )
-        and not caudal_history.empty
-    ):
-
-        flow = (
-            caudal_history.copy()
+            caudal_meta,
+        ) = get_caudal_history(
+            start,
+            end,
         )
 
-        flow[
-            "datetime"
-        ] = pd.to_datetime(
-            flow[
-                "datetime"
-            ],
-            errors="coerce",
-        )
+    except Exception as exc:
+
+        caudal_meta = {
+
+            "status":
+                "error",
+
+            "error":
+                str(
+                    exc
+                ),
+        }
+
+
+    # ========================================================
+    # HISTORY
+    # ========================================================
+
+    history_dates = pd.date_range(
+
+        start=
+            pd.to_datetime(
+                start
+            ),
+
+        end=
+            pd.to_datetime(
+                end
+            ),
+
+        freq="D",
+    )
+
+
+    history = pd.DataFrame(
+        {
+            "datetime":
+                history_dates
+        }
+    )
+
+
+    if not rain_history.empty:
 
         history = history.merge(
-            flow,
-            on="datetime",
-            how="outer",
+
+            rain_history,
+
+            on=
+                "datetime",
+
+            how=
+                "left",
         )
+
+
+    if (
+        not caudal_history.empty
+    ):
+
+        history = history.merge(
+
+            caudal_history,
+
+            on=
+                "datetime",
+
+            how=
+                "left",
+        )
+
 
     if (
         "precip_mm"
@@ -2291,6 +3122,7 @@ def get_exogenous_data(
             "precip_mm"
         ] = 0.0
 
+
     if (
         "caudal_m3s"
         not in history.columns
@@ -2299,6 +3131,7 @@ def get_exogenous_data(
         history[
             "caudal_m3s"
         ] = np.nan
+
 
     history[
         "precip_mm"
@@ -2317,6 +3150,7 @@ def get_exogenous_data(
         )
     )
 
+
     history[
         "caudal_m3s"
     ] = pd.to_numeric(
@@ -2326,169 +3160,93 @@ def get_exogenous_data(
         errors="coerce",
     )
 
+
+    # --------------------------------------------------------
+    # Interpolación limitada de caudal
+    # --------------------------------------------------------
+
+    if (
+        history[
+            "caudal_m3s"
+        ]
+        .notna()
+        .sum()
+        >= 5
+    ):
+
+        history[
+            "caudal_m3s"
+        ] = (
+            history[
+                "caudal_m3s"
+            ]
+            .interpolate(
+                limit=5,
+                limit_direction=
+                    "both",
+            )
+        )
+
+
     history = (
         history
-        .dropna(
-            subset=[
-                "datetime"
-            ]
-        )
         .sort_values(
             "datetime"
-        )
-        .drop_duplicates(
-            subset=[
-                "datetime"
-            ],
-            keep="last",
         )
         .reset_index(
             drop=True
         )
     )
 
+
     # ========================================================
     # FUTURO
     # ========================================================
 
-    forecast_days = max(
-        1,
-        int(
-            forecast_days
-        ),
-    )
-
-    # Fechas futuras respecto a la última fecha seleccionada.
-    end_dt = pd.to_datetime(
-        end_text
-    )
-
-    future_dates = pd.date_range(
-        start=
-            end_dt
-            + pd.Timedelta(
-                days=1
-            ),
-        periods=
+    future = (
+        _build_future_rain(
+            end,
             forecast_days,
-        freq="D",
+        )
     )
 
-    future = pd.DataFrame(
-        {
-            "datetime":
-                future_dates,
 
-            "precip_mm":
-                0.0,
-        }
-    )
-
-    # --------------------------------------------------------
-    # Lluvia prevista únicamente puede corresponder a fechas
-    # actuales/futuras reales de Open-Meteo.
-    # --------------------------------------------------------
-
-    if (
-        rain_future is not None
-        and isinstance(
-            rain_future,
-            pd.DataFrame,
-        )
-        and not rain_future.empty
-    ):
-
-        rain_future = (
-            rain_future.copy()
-        )
-
-        rain_future[
-            "datetime"
-        ] = pd.to_datetime(
-            rain_future[
-                "datetime"
-            ],
-            errors="coerce",
-        )
-
-        future = (
-            future
-            .drop(
-                columns=[
-                    "precip_mm"
-                ]
-            )
-            .merge(
-                rain_future[
-                    [
-                        "datetime",
-                        "precip_mm",
-                    ]
-                ],
-                on="datetime",
-                how="left",
-            )
-        )
-
-        future[
-            "precip_mm"
-        ] = (
-            pd.to_numeric(
-                future[
-                    "precip_mm"
-                ],
-                errors="coerce",
-            )
-            .fillna(
-                0.0
-            )
-            .clip(
-                lower=0.0
-            )
-        )
-
-    # --------------------------------------------------------
-    # Proyección de caudal
-    # --------------------------------------------------------
-
-    caudal_future = project_caudal(
-        caudal_history,
-        future[
-            "datetime"
-        ],
-    )
-
-    future = future.merge(
-        caudal_future,
-        on="datetime",
-        how="left",
-    )
+    # ========================================================
+    # PROYECCIÓN DE CAUDAL
+    # ========================================================
 
     future[
-        "datetime"
-    ] = pd.to_datetime(
+        "caudal_m3s"
+    ] = project_caudal(
+
+        caudal_history,
+
         future[
             "datetime"
         ],
-        errors="coerce",
     )
 
+
     # ========================================================
-    # META
+    # METADATA
     # ========================================================
 
-    valid_flow = int(
+    valid_flow = (
         history[
             "caudal_m3s"
         ]
-        .notna()
-        .sum()
+        .dropna()
     )
+
 
     meta = {
 
         "version":
             VERSION,
+
+        # ----------------------------------------------------
+        # LLUVIA
+        # ----------------------------------------------------
 
         "rain_source":
             "Open-Meteo",
@@ -2512,32 +3270,102 @@ def get_exogenous_data(
                 float(
                     history[
                         "precip_mm"
-                    ]
-                    .max()
+                    ].max()
                 )
                 if not history.empty
-                else 0.0
+                else None
             ),
+
+        "rain_forecast_real_days":
+            min(
+                forecast_days,
+                16,
+            ),
+
+        "rain_extended_days_assumption":
+            (
+                "0 mm después del horizonte "
+                "disponible de Open-Meteo"
+            ),
+
+        # ----------------------------------------------------
+        # CAUDAL
+        # ----------------------------------------------------
 
         "caudal_source":
             "INA A5",
 
         "caudal_series":
-            caudal_info,
+            caudal_meta,
+
+        "caudal_status":
+            (
+                caudal_meta.get(
+                    "status"
+                )
+                if isinstance(
+                    caudal_meta,
+                    dict,
+                )
+                else None
+            ),
 
         "caudal_records":
-            valid_flow,
+            int(
+                len(
+                    caudal_history
+                )
+            ),
 
         "uses_caudal":
             bool(
-                valid_flow > 0
+                not valid_flow.empty
             ),
 
+        "current_flow_m3s":
+            (
+                float(
+                    valid_flow.iloc[-1]
+                )
+                if not valid_flow.empty
+                else None
+            ),
+
+        "historical_flow_max_m3s":
+            (
+                float(
+                    valid_flow.max()
+                )
+                if not valid_flow.empty
+                else None
+            ),
+
+        "historical_flow_min_m3s":
+            (
+                float(
+                    valid_flow.min()
+                )
+                if not valid_flow.empty
+                else None
+            ),
+
+        # ----------------------------------------------------
+        # GENERAL
+        # ----------------------------------------------------
+
         "historical_start":
-            start_text,
+            str(
+                pd.to_datetime(
+                    start
+                ).date()
+            ),
 
         "historical_end":
-            end_text,
+            str(
+                pd.to_datetime(
+                    end
+                ).date()
+            ),
 
         "forecast_days":
             forecast_days,
@@ -2545,6 +3373,7 @@ def get_exogenous_data(
         "datetime_timezone":
             "naive",
     }
+
 
     return (
         history,
@@ -2562,45 +3391,44 @@ def diagnostic(
     end,
 ):
 
-    report = {
+    result = {
 
         "version":
             VERSION,
 
-        "ina_catalog":
+        "ina_catalog_url":
             INA_SERIES_GEOJSON_URL,
 
-        "ina_observations":
+        "ina_observations_url":
             INA_OBSERVATIONS_URL,
 
         "caudal_var_id":
             VAR_ID_CAUDAL,
 
-        "start":
-            _normalizar_fecha(
+        "requested_start":
+            str(
                 start
             ),
 
-        "end":
-            _normalizar_fecha(
+        "requested_end":
+            str(
                 end
             ),
-
-        "catalog_records":
-            0,
-
-        "caudal_candidates":
-            0,
-
-        "selected_series":
-            None,
     }
+
+
+    # ========================================================
+    # CATÁLOGO
+    # ========================================================
 
     try:
 
-        catalog = _get_ina_catalog()
+        catalog = (
+            _get_ina_catalog()
+        )
 
-        report[
+
+        result[
             "catalog_records"
         ] = int(
             len(
@@ -2608,15 +3436,37 @@ def diagnostic(
             )
         )
 
+
+        if (
+            not catalog.empty
+            and "var_id"
+            in catalog.columns
+        ):
+
+            result[
+                "catalog_caudal_records"
+            ] = int(
+                (
+                    catalog[
+                        "var_id"
+                    ]
+                    == VAR_ID_CAUDAL
+                ).sum()
+            )
+
+
     except Exception as exc:
 
-        report[
+        result[
             "catalog_error"
         ] = str(
             exc
         )
 
-        return report
+
+    # ========================================================
+    # CANDIDATOS
+    # ========================================================
 
     try:
 
@@ -2627,84 +3477,69 @@ def diagnostic(
             )
         )
 
-        report[
-            "caudal_candidates"
+
+        result[
+            "candidate_count"
         ] = int(
             len(
                 candidates
             )
         )
 
-        preview = []
 
-        for _, row in (
-            candidates
-            .head(10)
-            .iterrows()
-        ):
+        if not candidates.empty:
 
-            preview.append(
-                {
-                    "series_id":
-                        _safe_int(
-                            row.get(
-                                "series_id"
-                            )
-                        ),
+            preview_cols = [
+                c
+                for c in [
+                    "series_id",
+                    "station",
+                    "series_name",
+                    "rio",
+                    "proc_id",
+                    "count",
+                    "timestart",
+                    "timeend",
+                    "score",
+                    "station_score",
+                    "parana_score",
+                    "overlap",
+                ]
+                if c
+                in candidates.columns
+            ]
 
-                    "station":
-                        row.get(
-                            "_station"
-                        ),
 
-                    "name":
-                        row.get(
-                            "nombre"
-                        ),
-
-                    "var_id":
-                        _safe_int(
-                            row.get(
-                                "var_id"
-                            )
-                        ),
-
-                    "proc_id":
-                        _safe_int(
-                            row.get(
-                                "proc_id"
-                            )
-                        ),
-
-                    "count":
-                        _safe_int(
-                            row.get(
-                                "count"
-                            ),
-                            0,
-                        ),
-
-                    "score":
-                        _safe_float(
-                            row.get(
-                                "_total_score"
-                            ),
-                            0.0,
-                        ),
-                }
+            result[
+                "top_candidates"
+            ] = (
+                candidates[
+                    preview_cols
+                ]
+                .head(
+                    15
+                )
+                .astype(
+                    str
+                )
+                .to_dict(
+                    orient="records"
+                )
             )
 
-        report[
-            "candidate_preview"
-        ] = preview
 
     except Exception as exc:
 
-        report[
+        result[
             "candidate_error"
         ] = str(
             exc
         )
+
+
+    # ========================================================
+    # SERIE ELEGIDA
+    # ========================================================
 
     try:
 
@@ -2715,16 +3550,88 @@ def diagnostic(
             )
         )
 
-        report[
+
+        result[
             "selected_series"
         ] = selected
 
+
     except Exception as exc:
 
-        report[
-            "selection_error"
+        result[
+            "selected_series_error"
         ] = str(
             exc
         )
 
-    return report
+
+    # ========================================================
+    # DATOS
+    # ========================================================
+
+    try:
+
+        (
+            flow,
+            flow_meta,
+        ) = get_caudal_history(
+            start,
+            end,
+        )
+
+
+        result[
+            "flow_records"
+        ] = int(
+            len(
+                flow
+            )
+        )
+
+
+        result[
+            "flow_meta"
+        ] = flow_meta
+
+
+        if not flow.empty:
+
+            result[
+                "first_flow_date"
+            ] = str(
+                flow[
+                    "datetime"
+                ].min()
+            )
+
+
+            result[
+                "last_flow_date"
+            ] = str(
+                flow[
+                    "datetime"
+                ].max()
+            )
+
+
+            result[
+                "current_flow_m3s"
+            ] = float(
+                flow[
+                    "caudal_m3s"
+                ]
+                .dropna()
+                .iloc[-1]
+            )
+
+
+    except Exception as exc:
+
+        result[
+            "flow_error"
+        ] = str(
+            exc
+        )
+
+
+    return result
