@@ -1,48 +1,36 @@
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # src/hydrology.py
-# V11.9.6 COMPLETO
+# V11.10 COMPLETO
 #
-# OBJETIVO
+# PROPAGACIÓN HIDROLÓGICA MULTIESTACIÓN
+#
+# OBJETIVOS
 # ------------------------------------------------------------
-# Analizar propagación hidrológica:
-#
-#       CORRIENTES  --->  SAN NICOLÁS
-#
-# utilizando:
-#
-# - todo el historial disponible
-# - nivel diario Corrientes
-# - nivel diario San Nicolás
-# - máximos históricos
-# - velocidad de creciente
-# - demora entre máximos
-# - respuesta de San Nicolás
-# - caudal
-# - precipitación
-#
-# Devuelve:
-#
-# - desfase histórico global
-# - eventos históricos de creciente
-# - demora media / mediana
-# - demora mínima / máxima
-# - eventos similares al estado actual
-# - demora actual probable
-# - rango probable de demora
-# - respuesta probable en San Nicolás
+# - Analizar niveles históricos aguas arriba
+# - Incorporar caudales históricos por estación
+# - Incorporar lluvias históricas por estación
+# - Calcular retardos entre estaciones
+# - Calcular retardo Corrientes -> San Nicolás
+# - Detectar eventos históricos de creciente
+# - Relacionar:
+#       nivel
+#       variación de nivel
+#       caudal
+#       variación de caudal
+#       lluvia acumulada
+#       tiempo de propagación
+#       respuesta en San Nicolás
+# - Buscar eventos históricos similares al estado actual
+# - Crear features para model.py
+# - Mantener compatibilidad con app.py actual
 #
 # IMPORTANTE
 # ------------------------------------------------------------
-# Este archivo NO modifica src/ina.py.
-#
-# San Nicolás:
-#     INA A5
-#     series_id = 36
-#
-# Corrientes:
-#     se recibe desde upstream_history
-#
+# Los niveles de distintas estaciones tienen ceros hidrométricos
+# diferentes. El análisis se basa principalmente en variaciones,
+# tendencias y eventos, no en asumir que 4 m en Corrientes
+# equivalen físicamente a 4 m en San Nicolás.
 # ============================================================
 
 
@@ -57,16 +45,14 @@ import requests
 # VERSIÓN
 # ============================================================
 
-VERSION = "V11.9.6"
+VERSION = "V11.10"
 
 
 # ============================================================
 # INA
 # ============================================================
 
-INA_BASE_URL = (
-    "https://alerta.ina.gob.ar/a5"
-)
+INA_BASE_URL = "https://alerta.ina.gob.ar/a5"
 
 INA_OBSERVATIONS_URL = (
     INA_BASE_URL
@@ -78,6 +64,11 @@ INA_SERIES_GEOJSON_URL = (
     + "/obs/puntual/series"
 )
 
+
+# ============================================================
+# SAN NICOLÁS
+# ============================================================
+
 SAN_NICOLAS_SERIES_ID = 36
 
 
@@ -87,29 +78,193 @@ SAN_NICOLAS_SERIES_ID = 36
 
 REQUEST_TIMEOUT = 45
 
-DEFAULT_HISTORY_START = (
-    "1900-01-01"
-)
+DEFAULT_HISTORY_START = "1900-01-01"
 
 HISTORY_BLOCK_YEARS = 5
 
-DEFAULT_MAX_LAG = 20
+MAX_LAG_DAYS = 35
+
+DEFAULT_LAG_ANALYSIS_DAYS = 30
+
+MIN_CORRELATION_SAMPLES = 30
 
 MIN_EVENT_DISTANCE_DAYS = 8
 
 EVENT_QUANTILE = 0.85
 
-DEFAULT_EVENT_WINDOW_BEFORE = 2
+EVENT_BASELINE_DAYS = 7
 
-DEFAULT_EVENT_WINDOW_AFTER = 20
+EVENT_SEARCH_BEFORE = 3
 
-MIN_EVENT_RISE = 0.10
+EVENT_SEARCH_AFTER = 30
+
+MIN_EVENT_RISE = 0.08
 
 CURRENT_LOOKBACK_DAYS = 7
 
+SIMILAR_EVENTS_DEFAULT = 8
+
 
 # ============================================================
-# REQUEST
+# CORREDOR HIDROLÓGICO
+# ============================================================
+
+STATIONS = [
+    "Corrientes",
+    "Goya",
+    "La Paz",
+    "Paraná",
+    "Diamante",
+    "Rosario",
+    "Villa Constitución",
+    "San Nicolás",
+]
+
+
+UPSTREAM_STATIONS = [
+    "Corrientes",
+    "Goya",
+    "La Paz",
+    "Paraná",
+    "Diamante",
+    "Rosario",
+    "Villa Constitución",
+]
+
+
+# ============================================================
+# NOMBRES DE COLUMNAS
+# ============================================================
+
+LEVEL_COLUMNS = {
+
+    "Corrientes":
+        "nivel_corrientes",
+
+    "Goya":
+        "nivel_goya",
+
+    "La Paz":
+        "nivel_la_paz",
+
+    "Paraná":
+        "nivel_parana",
+
+    "Diamante":
+        "nivel_diamante",
+
+    "Rosario":
+        "nivel_rosario",
+
+    "Villa Constitución":
+        "nivel_villa_constitucion",
+
+    "San Nicolás":
+        "nivel",
+}
+
+
+FLOW_COLUMNS = {
+
+    "Corrientes":
+        "q_corrientes",
+
+    "Goya":
+        "q_goya",
+
+    "La Paz":
+        "q_la_paz",
+
+    "Paraná":
+        "q_parana",
+
+    "Diamante":
+        "q_diamante",
+
+    "Rosario":
+        "q_rosario",
+
+    "Villa Constitución":
+        "q_villa_constitucion",
+
+    "San Nicolás":
+        "q_san_nicolas",
+}
+
+
+RAIN_COLUMNS = {
+
+    "Corrientes":
+        "rain_corrientes",
+
+    "Goya":
+        "rain_goya",
+
+    "La Paz":
+        "rain_la_paz",
+
+    "Paraná":
+        "rain_parana",
+
+    "Diamante":
+        "rain_diamante",
+
+    "Rosario":
+        "rain_rosario",
+
+    "Villa Constitución":
+        "rain_villa_constitucion",
+
+    "San Nicolás":
+        "rain_san_nicolas",
+}
+
+
+# ============================================================
+# TRAMOS
+# ============================================================
+
+SEGMENTS = [
+
+    (
+        "Corrientes",
+        "Goya",
+    ),
+
+    (
+        "Goya",
+        "La Paz",
+    ),
+
+    (
+        "La Paz",
+        "Paraná",
+    ),
+
+    (
+        "Paraná",
+        "Diamante",
+    ),
+
+    (
+        "Diamante",
+        "Rosario",
+    ),
+
+    (
+        "Rosario",
+        "Villa Constitución",
+    ),
+
+    (
+        "Villa Constitución",
+        "San Nicolás",
+    ),
+]
+
+
+# ============================================================
+# REQUEST SESSION
 # ============================================================
 
 SESSION = requests.Session()
@@ -117,7 +272,7 @@ SESSION = requests.Session()
 SESSION.headers.update(
     {
         "User-Agent":
-            "Parana-San-Nicolas-Hydrology/11.9.6",
+            "Parana-San-Nicolas-Hydrology/11.10",
 
         "Accept":
             "application/json",
@@ -129,26 +284,20 @@ SESSION.headers.update(
 # UTILIDADES
 # ============================================================
 
-def _to_datetime_naive(
-    series,
-):
+def _normalizar_datetime(values):
 
     return (
         pd.to_datetime(
-            series,
+            values,
             errors="coerce",
             utc=True,
         )
         .dt
-        .tz_localize(
-            None
-        )
+        .tz_localize(None)
     )
 
 
-def _safe_datetime(
-    value,
-):
+def _safe_datetime(value):
 
     dt = pd.to_datetime(
         value,
@@ -156,12 +305,12 @@ def _safe_datetime(
         utc=True,
     )
 
-    if pd.isna(
-        dt
-    ):
-        return pd.NaT
+    if pd.isna(dt):
+        return None
 
-    return dt
+    return dt.tz_localize(
+        None
+    )
 
 
 def _safe_float(
@@ -171,14 +320,14 @@ def _safe_float(
 
     try:
 
-        value = float(
+        result = float(
             value
         )
 
         if np.isfinite(
-            value
+            result
         ):
-            return value
+            return result
 
     except Exception:
         pass
@@ -186,9 +335,28 @@ def _safe_float(
     return default
 
 
-def _to_numeric(
-    series,
+def _safe_int(
+    value,
+    default=None,
 ):
+
+    try:
+
+        if value is None:
+            return default
+
+        return int(
+            float(
+                value
+            )
+        )
+
+    except Exception:
+
+        return default
+
+
+def _to_numeric(series):
 
     return pd.to_numeric(
         series,
@@ -199,59 +367,85 @@ def _to_numeric(
 def _safe_corr(
     a,
     b,
-    min_samples=10,
 ):
 
-    temp = pd.DataFrame(
+    data = pd.DataFrame(
         {
             "a":
-                pd.to_numeric(
-                    a,
-                    errors="coerce",
+                _to_numeric(
+                    a
                 ),
 
             "b":
-                pd.to_numeric(
-                    b,
-                    errors="coerce",
+                _to_numeric(
+                    b
                 ),
         }
     ).dropna()
 
-    if len(
-        temp
-    ) < min_samples:
+
+    if len(data) < 5:
 
         return np.nan
 
+
     if (
-        temp["a"].std()
+        data["a"].std()
         == 0
-        or temp["b"].std()
+        or data["b"].std()
         == 0
     ):
 
         return np.nan
 
+
     return float(
-        temp[
-            "a"
-        ].corr(
-            temp[
-                "b"
-            ]
+        data["a"].corr(
+            data["b"]
         )
     )
 
 
-# ============================================================
-# NORMALIZACIÓN DIARIA
-# ============================================================
+def _slug(
+    station,
+):
 
-def _normalize_daily(
+    replacements = {
+
+        "á": "a",
+        "é": "e",
+        "í": "i",
+        "ó": "o",
+        "ú": "u",
+        "ñ": "n",
+    }
+
+
+    text = station.lower()
+
+
+    for old, new in (
+        replacements.items()
+    ):
+
+        text = text.replace(
+            old,
+            new,
+        )
+
+
+    return (
+        text
+        .replace(
+            " ",
+            "_",
+        )
+    )
+
+
+def _normalizar_diario(
     df,
-    datetime_col="datetime",
-    value_col="value",
+    value_cols=None,
 ):
 
     if (
@@ -261,82 +455,98 @@ def _normalize_daily(
             pd.DataFrame,
         )
         or df.empty
-        or datetime_col
-        not in df.columns
-        or value_col
-        not in df.columns
     ):
 
-        return pd.DataFrame(
-            columns=[
-                "datetime",
-                "value",
-            ]
+        return pd.DataFrame()
+
+
+    work = df.copy()
+
+
+    if "datetime" not in work.columns:
+
+        return pd.DataFrame()
+
+
+    work["datetime"] = (
+        _normalizar_datetime(
+            work["datetime"]
         )
-
-    x = df[
-        [
-            datetime_col,
-            value_col,
-        ]
-    ].copy()
-
-    x.columns = [
-        "datetime",
-        "value",
-    ]
-
-    x[
-        "datetime"
-    ] = _to_datetime_naive(
-        x[
-            "datetime"
-        ]
     )
 
-    x[
-        "value"
-    ] = _to_numeric(
-        x[
-            "value"
-        ]
-    )
 
-    x = x.dropna(
+    work = work.dropna(
         subset=[
-            "datetime",
-            "value",
+            "datetime"
         ]
     )
 
-    if x.empty:
 
-        return pd.DataFrame(
-            columns=[
-                "datetime",
-                "value",
-            ]
-        )
-
-    x[
-        "datetime"
-    ] = (
-        x[
-            "datetime"
-        ]
+    work["datetime"] = (
+        work["datetime"]
         .dt
         .normalize()
     )
 
-    x = (
-        x
+
+    if value_cols is None:
+
+        value_cols = [
+            c
+            for c in work.columns
+            if c != "datetime"
+        ]
+
+
+    available = []
+
+
+    for col in value_cols:
+
+        if col not in work.columns:
+            continue
+
+
+        work[col] = (
+            _to_numeric(
+                work[col]
+            )
+        )
+
+
+        available.append(
+            col
+        )
+
+
+    if not available:
+
+        return (
+            work[
+                ["datetime"]
+            ]
+            .drop_duplicates()
+            .sort_values(
+                "datetime"
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+
+    return (
+        work[
+            [
+                "datetime",
+                *available,
+            ]
+        ]
         .groupby(
             "datetime",
             as_index=False,
-        )[
-            "value"
-        ]
-        .median()
+        )[available]
+        .mean()
         .sort_values(
             "datetime"
         )
@@ -344,8 +554,6 @@ def _normalize_daily(
             drop=True
         )
     )
-
-    return x
 
 
 # ============================================================
@@ -365,53 +573,55 @@ def _extract_records(
             data
             and all(
                 isinstance(
-                    item,
+                    x,
                     dict,
                 )
-                for item in data
+                for x in data
             )
         ):
 
-            keys = set()
+            sample_keys = set()
 
-            for item in data[:5]:
 
-                keys.update(
-                    item.keys()
+            for row in data[
+                :5
+            ]:
+
+                sample_keys.update(
+                    row.keys()
                 )
 
-            if keys.intersection(
+
+            if sample_keys.intersection(
                 {
                     "timestart",
-                    "valor",
-                    "value",
                     "datetime",
                     "fecha",
+                    "valor",
+                    "value",
                 }
             ):
 
                 return data
 
+
         for item in data:
 
-            result = (
-                _extract_records(
-                    item
-                )
+            result = _extract_records(
+                item
             )
 
             if result:
-
                 return result
 
-        return []
 
-    if isinstance(
+    elif isinstance(
         data,
         dict,
     ):
 
-        preferred = [
+        for key in [
+
             "observaciones",
             "observations",
             "datos",
@@ -419,35 +629,30 @@ def _extract_records(
             "records",
             "values",
             "result",
-        ]
 
-        for key in preferred:
+        ]:
 
             if key in data:
 
-                result = (
-                    _extract_records(
-                        data[
-                            key
-                        ]
-                    )
+                result = _extract_records(
+                    data[
+                        key
+                    ]
                 )
 
                 if result:
-
                     return result
+
 
         for value in data.values():
 
-            result = (
-                _extract_records(
-                    value
-                )
+            result = _extract_records(
+                value
             )
 
             if result:
-
                 return result
+
 
     return []
 
@@ -456,60 +661,51 @@ def _normalizar_respuesta_ina(
     data,
 ):
 
-    records = (
-        _extract_records(
-            data
-        )
+    records = _extract_records(
+        data
     )
 
-    if not records:
 
-        return pd.DataFrame(
-            columns=[
-                "datetime",
-                "value",
-            ]
-        )
+    rows = []
+
 
     date_fields = [
+
         "timestart",
         "datetime",
         "timestamp",
-        "date",
         "fecha",
+        "date",
         "time",
         "obs_date",
+
     ]
 
+
     value_fields = [
+
         "valor",
         "value",
         "nivel",
         "obs_value",
         "valor_num",
+
     ]
 
-    rows = []
 
     for record in records:
-
-        if not isinstance(
-            record,
-            dict,
-        ):
-
-            continue
 
         dt = None
         value = None
 
+
         for field in date_fields:
 
             if (
-                field in record
-                and record[
+                record.get(
                     field
-                ] is not None
+                )
+                is not None
             ):
 
                 dt = record[
@@ -518,13 +714,14 @@ def _normalizar_respuesta_ina(
 
                 break
 
+
         for field in value_fields:
 
             if (
-                field in record
-                and record[
+                record.get(
                     field
-                ] is not None
+                )
+                is not None
             ):
 
                 value = record[
@@ -533,31 +730,30 @@ def _normalizar_respuesta_ina(
 
                 break
 
+
         dt = pd.to_datetime(
             dt,
             errors="coerce",
             utc=True,
         )
 
-        value = pd.to_numeric(
-            value,
-            errors="coerce",
+
+        value = _safe_float(
+            value
         )
+
 
         if (
             pd.isna(
                 dt
             )
-            or pd.isna(
+            or not np.isfinite(
                 value
             )
         ):
 
             continue
 
-        value = float(
-            value
-        )
 
         if (
             value < -5
@@ -566,55 +762,67 @@ def _normalizar_respuesta_ina(
 
             continue
 
+
         rows.append(
             {
                 "datetime":
                     dt,
 
-                "value":
+                "nivel":
                     value,
             }
         )
+
 
     if not rows:
 
         return pd.DataFrame(
             columns=[
                 "datetime",
-                "value",
+                "nivel",
             ]
         )
+
 
     result = pd.DataFrame(
         rows
     )
 
+
     result[
         "datetime"
-    ] = _to_datetime_naive(
+    ] = _normalizar_datetime(
         result[
             "datetime"
         ]
     )
 
-    result = (
+
+    result[
+        "datetime"
+    ] = (
+        result[
+            "datetime"
+        ]
+        .dt
+        .normalize()
+    )
+
+
+    return (
         result
-        .dropna()
+        .groupby(
+            "datetime",
+            as_index=False,
+        )["nivel"]
+        .median()
         .sort_values(
             "datetime"
-        )
-        .drop_duplicates(
-            subset=[
-                "datetime"
-            ],
-            keep="last",
         )
         .reset_index(
             drop=True
         )
     )
-
-    return result
 
 
 # ============================================================
@@ -626,140 +834,106 @@ def _normalizar_respuesta_ina(
 )
 def _get_san_nicolas_catalog_dates():
 
+    fallback_start = pd.Timestamp(
+        DEFAULT_HISTORY_START
+    )
+
+    fallback_end = (
+        pd.Timestamp.today()
+        .normalize()
+    )
+
+
     try:
 
         response = SESSION.get(
+
             INA_SERIES_GEOJSON_URL,
+
             params={
                 "format":
                     "geojson",
             },
+
             timeout=
                 REQUEST_TIMEOUT,
         )
+
 
         response.raise_for_status()
 
         data = response.json()
 
-    except Exception:
 
-        return (
-            pd.Timestamp(
-                DEFAULT_HISTORY_START
-            ),
-            pd.Timestamp.today()
-            .normalize(),
-        )
-
-    features = data.get(
-        "features",
-        [],
-    )
-
-    for feature in features:
-
-        if not isinstance(
-            feature,
-            dict,
+        for feature in data.get(
+            "features",
+            [],
         ):
 
-            continue
-
-        props = feature.get(
-            "properties",
-            {},
-        )
-
-        if not isinstance(
-            props,
-            dict,
-        ):
-
-            continue
-
-        series_id = props.get(
-            "series_id"
-        )
-
-        if series_id is None:
-
-            series_id = feature.get(
-                "id"
+            props = feature.get(
+                "properties",
+                {},
             )
 
-        try:
 
-            series_id = int(
-                float(
-                    series_id
+            series_id = _safe_int(
+                props.get(
+                    "series_id"
+                )
+                or feature.get(
+                    "id"
                 )
             )
 
-        except Exception:
 
-            continue
+            if (
+                series_id
+                != SAN_NICOLAS_SERIES_ID
+            ):
 
-        if (
-            series_id
-            != SAN_NICOLAS_SERIES_ID
-        ):
+                continue
 
-            continue
 
-        start = pd.to_datetime(
-            props.get(
-                "timestart"
-            ),
-            errors="coerce",
-            utc=True,
-        )
-
-        end = pd.to_datetime(
-            props.get(
-                "timeend"
-            ),
-            errors="coerce",
-            utc=True,
-        )
-
-        if pd.isna(
-            start
-        ):
-
-            start = pd.Timestamp(
-                DEFAULT_HISTORY_START,
-                tz="UTC",
+            start = _safe_datetime(
+                props.get(
+                    "timestart"
+                )
             )
 
-        if pd.isna(
-            end
-        ):
 
-            end = pd.Timestamp.now(
-                tz="UTC"
+            end = _safe_datetime(
+                props.get(
+                    "timeend"
+                )
             )
 
-        return (
-            start.tz_localize(
-                None
-            ),
-            end.tz_localize(
-                None
-            ),
-        )
+
+            if start is None:
+                start = fallback_start
+
+
+            if end is None:
+                end = fallback_end
+
+
+            return (
+                start.normalize(),
+                end.normalize(),
+            )
+
+
+    except Exception:
+        pass
+
 
     return (
-        pd.Timestamp(
-            DEFAULT_HISTORY_START
-        ),
-        pd.Timestamp.today()
-        .normalize(),
+        fallback_start,
+        fallback_end,
     )
 
 
 # ============================================================
-# CONSULTAR SAN NICOLÁS
+# CONSULTAR SERIE 36
 # ============================================================
 
 def _query_san_nicolas(
@@ -767,61 +941,47 @@ def _query_san_nicolas(
     end,
 ):
 
-    start_dt = pd.to_datetime(
-        start,
-        errors="coerce",
-    )
+    params = {
 
-    end_dt = pd.to_datetime(
-        end,
-        errors="coerce",
-    )
+        "tipo":
+            "puntual",
 
-    if (
-        pd.isna(
-            start_dt
-        )
-        or pd.isna(
-            end_dt
-        )
-    ):
+        "series_id":
+            SAN_NICOLAS_SERIES_ID,
 
-        return pd.DataFrame(
-            columns=[
-                "datetime",
-                "value",
-            ]
-        )
+        "timestart":
+            pd.to_datetime(
+                start
+            ).strftime(
+                "%Y-%m-%d"
+            ),
+
+        "timeend":
+            pd.to_datetime(
+                end
+            ).strftime(
+                "%Y-%m-%d"
+            ),
+    }
+
 
     response = SESSION.get(
+
         INA_OBSERVATIONS_URL,
-        params={
-            "tipo":
-                "puntual",
 
-            "series_id":
-                SAN_NICOLAS_SERIES_ID,
+        params=
+            params,
 
-            "timestart":
-                start_dt.strftime(
-                    "%Y-%m-%d"
-                ),
-
-            "timeend":
-                end_dt.strftime(
-                    "%Y-%m-%d"
-                ),
-        },
         timeout=
             REQUEST_TIMEOUT,
     )
 
+
     response.raise_for_status()
 
-    return (
-        _normalizar_respuesta_ina(
-            response.json()
-        )
+
+    return _normalizar_respuesta_ina(
+        response.json()
     )
 
 
@@ -836,85 +996,81 @@ def get_san_nicolas_full_history(
     end_date=None,
 ):
 
-    catalog_start, catalog_end = (
+    (
+        catalog_start,
+        catalog_end,
+    ) = (
         _get_san_nicolas_catalog_dates()
     )
 
-    if end_date is None:
 
-        requested_end = (
-            pd.Timestamp.today()
-            .normalize()
-        )
-
-    else:
+    if end_date is not None:
 
         requested_end = pd.to_datetime(
             end_date,
             errors="coerce",
         )
 
-        if pd.isna(
+
+        if pd.notna(
             requested_end
         ):
 
-            requested_end = (
-                pd.Timestamp.today()
-                .normalize()
+            catalog_end = min(
+                catalog_end,
+                requested_end,
             )
 
-    end = min(
-        catalog_end,
-        requested_end,
-    )
-
-    start = catalog_start
 
     frames = []
 
-    cursor = start
 
-    while cursor <= end:
+    current = catalog_start
 
-        block_end = (
-            cursor
+
+    while current <= catalog_end:
+
+        block_end = min(
+
+            current
             + pd.DateOffset(
                 years=
                     HISTORY_BLOCK_YEARS
             )
             - pd.Timedelta(
                 days=1
-            )
+            ),
+
+            catalog_end,
         )
 
-        block_end = min(
-            block_end,
-            end,
-        )
 
         try:
 
-            part = _query_san_nicolas(
-                cursor,
+            frame = _query_san_nicolas(
+                current,
                 block_end,
             )
 
-            if not part.empty:
-
-                frames.append(
-                    part
-                )
-
         except Exception:
 
-            pass
+            frame = pd.DataFrame()
 
-        cursor = (
+
+        if not frame.empty:
+
+            frames.append(
+                frame
+            )
+
+
+        current = (
             block_end
             + pd.Timedelta(
                 days=1
             )
         )
+
 
     if not frames:
 
@@ -925,31 +1081,42 @@ def get_san_nicolas_full_history(
             ]
         )
 
+
     result = pd.concat(
         frames,
         ignore_index=True,
     )
 
-    result = _normalize_daily(
-        result,
-        datetime_col=
-            "datetime",
-        value_col=
-            "value",
+
+    result = (
+        result
+        .drop_duplicates(
+            subset=[
+                "datetime"
+            ]
+        )
+        .sort_values(
+            "datetime"
+        )
+        .reset_index(
+            drop=True
+        )
     )
+
 
     result = result.rename(
         columns={
-            "value":
+            "nivel":
                 "nivel_san_nicolas"
         }
     )
+
 
     return result
 
 
 # ============================================================
-# PREPARAR SAN NICOLÁS
+# PREPARAR NIVEL SAN NICOLÁS
 # ============================================================
 
 def preparar_san_nicolas(
@@ -968,58 +1135,78 @@ def preparar_san_nicolas(
         return pd.DataFrame(
             columns=[
                 "datetime",
-                "nivel_san_nicolas",
+                "nivel",
             ]
         )
 
-    if "nivel_san_nicolas" in df.columns:
 
-        value_col = (
-            "nivel_san_nicolas"
-        )
+    work = df.copy()
 
-    elif "nivel" in df.columns:
 
-        value_col = (
-            "nivel"
-        )
-
-    elif "value" in df.columns:
-
-        value_col = (
-            "value"
-        )
-
-    else:
+    if "datetime" not in work.columns:
 
         return pd.DataFrame(
             columns=[
                 "datetime",
-                "nivel_san_nicolas",
+                "nivel",
             ]
         )
 
-    result = _normalize_daily(
-        df,
-        datetime_col=
-            "datetime",
-        value_col=
-            value_col,
-    )
 
-    return result.rename(
+    level_col = None
+
+
+    for col in [
+        "nivel",
+        "value",
+        "nivel_san_nicolas",
+    ]:
+
+        if col in work.columns:
+
+            level_col = col
+            break
+
+
+    if level_col is None:
+
+        return pd.DataFrame(
+            columns=[
+                "datetime",
+                "nivel",
+            ]
+        )
+
+
+    work = work[
+        [
+            "datetime",
+            level_col,
+        ]
+    ].copy()
+
+
+    work = work.rename(
         columns={
-            "value":
-                "nivel_san_nicolas"
+            level_col:
+                "nivel"
         }
     )
 
 
+    return _normalizar_diario(
+        work,
+        [
+            "nivel"
+        ],
+    )
+
+
 # ============================================================
-# PREPARAR CORRIENTES
+# PREPARAR AGUAS ARRIBA
 # ============================================================
 
-def preparar_corrientes(
+def preparar_upstream(
     upstream_history,
 ):
 
@@ -1030,174 +1217,267 @@ def preparar_corrientes(
             pd.DataFrame,
         )
         or upstream_history.empty
-        or "datetime"
-        not in upstream_history.columns
-        or "nivel_corrientes"
-        not in upstream_history.columns
-    ):
-
-        return pd.DataFrame(
-            columns=[
-                "datetime",
-                "nivel_corrientes",
-            ]
-        )
-
-    result = _normalize_daily(
-        upstream_history,
-        datetime_col=
-            "datetime",
-        value_col=
-            "nivel_corrientes",
-    )
-
-    return result.rename(
-        columns={
-            "value":
-                "nivel_corrientes"
-        }
-    )
-
-
-# ============================================================
-# RELACIÓN BASE
-# ============================================================
-
-def construir_relacion_base(
-    san_nicolas,
-    upstream_history,
-):
-
-    sn = preparar_san_nicolas(
-        san_nicolas
-    )
-
-    corr = preparar_corrientes(
-        upstream_history
-    )
-
-    if (
-        sn.empty
-        or corr.empty
     ):
 
         return pd.DataFrame()
 
-    result = corr.merge(
-        sn,
-        on="datetime",
-        how="inner",
+
+    cols = [
+        c
+        for c in (
+            LEVEL_COLUMNS.values()
+        )
+        if (
+            c != "nivel"
+            and c
+            in upstream_history.columns
+        )
+    ]
+
+
+    if not cols:
+
+        return pd.DataFrame()
+
+
+    return _normalizar_diario(
+        upstream_history,
+        cols,
     )
-
-    result = result.sort_values(
-        "datetime"
-    ).reset_index(
-        drop=True
-    )
-
-    # --------------------------------------------------------
-    # CAMBIOS
-    # --------------------------------------------------------
-
-    result[
-        "delta_corrientes_1d"
-    ] = (
-        result[
-            "nivel_corrientes"
-        ].diff()
-    )
-
-    result[
-        "delta_san_nicolas_1d"
-    ] = (
-        result[
-            "nivel_san_nicolas"
-        ].diff()
-    )
-
-    result[
-        "corrientes_change_3d"
-    ] = (
-        result[
-            "nivel_corrientes"
-        ]
-        - result[
-            "nivel_corrientes"
-        ].shift(3)
-    )
-
-    result[
-        "corrientes_change_7d"
-    ] = (
-        result[
-            "nivel_corrientes"
-        ]
-        - result[
-            "nivel_corrientes"
-        ].shift(7)
-    )
-
-    result[
-        "san_nicolas_change_3d"
-    ] = (
-        result[
-            "nivel_san_nicolas"
-        ]
-        - result[
-            "nivel_san_nicolas"
-        ].shift(3)
-    )
-
-    result[
-        "san_nicolas_change_7d"
-    ] = (
-        result[
-            "nivel_san_nicolas"
-        ]
-        - result[
-            "nivel_san_nicolas"
-        ].shift(7)
-    )
-
-    return result
 
 
 # ============================================================
-# LAG GLOBAL
-#
-# Se usa CAMBIO de nivel y no únicamente nivel absoluto.
-#
-# Esto reduce la influencia de:
-# - estacionalidad
-# - tendencias de largo plazo
+# PREPARAR EXÓGENAS
 # ============================================================
 
-def calcular_lag_corrientes_san_nicolas(
-    san_nicolas,
-    upstream_history,
-    max_lag=
-        DEFAULT_MAX_LAG,
+def preparar_exogenas(
+    exog_history,
 ):
 
-    sn = preparar_san_nicolas(
-        san_nicolas
+    if (
+        exog_history is None
+        or not isinstance(
+            exog_history,
+            pd.DataFrame,
+        )
+        or exog_history.empty
+    ):
+
+        return pd.DataFrame()
+
+
+    wanted = []
+
+
+    for col in exog_history.columns:
+
+        if col == "datetime":
+
+            continue
+
+
+        if (
+            col.startswith(
+                "q_"
+            )
+            or col.startswith(
+                "rain_"
+            )
+            or col in [
+                "caudal_m3s",
+                "precip_mm",
+            ]
+        ):
+
+            wanted.append(
+                col
+            )
+
+
+    return _normalizar_diario(
+        exog_history,
+        wanted,
     )
 
-    corr = preparar_corrientes(
+
+# ============================================================
+# CONSTRUIR DATASET HIDROLÓGICO COMPLETO
+# ============================================================
+
+def construir_dataset_hidrologico(
+    df,
+    upstream_history=None,
+    exog_history=None,
+    usar_historial_completo=True,
+):
+
+    local = preparar_san_nicolas(
+        df
+    )
+
+
+    if local.empty:
+
+        return pd.DataFrame()
+
+
+    # ========================================================
+    # HISTORIAL COMPLETO DE SAN NICOLÁS
+    # ========================================================
+
+    if usar_historial_completo:
+
+        try:
+
+            full_sn = (
+                get_san_nicolas_full_history(
+                    str(
+                        local[
+                            "datetime"
+                        ].max().date()
+                    )
+                )
+                .copy()
+            )
+
+        except Exception:
+
+            full_sn = pd.DataFrame()
+
+
+        if not full_sn.empty:
+
+            full_sn = full_sn.rename(
+                columns={
+                    "nivel_san_nicolas":
+                        "nivel"
+                }
+            )
+
+
+            local = (
+                pd.concat(
+                    [
+                        full_sn[
+                            [
+                                "datetime",
+                                "nivel",
+                            ]
+                        ],
+                        local[
+                            [
+                                "datetime",
+                                "nivel",
+                            ]
+                        ],
+                    ],
+                    ignore_index=True,
+                )
+                .drop_duplicates(
+                    subset=[
+                        "datetime"
+                    ],
+                    keep="last",
+                )
+                .sort_values(
+                    "datetime"
+                )
+                .reset_index(
+                    drop=True
+                )
+            )
+
+
+    result = local.copy()
+
+
+    # ========================================================
+    # UPSTREAM
+    # ========================================================
+
+    upstream = preparar_upstream(
         upstream_history
     )
 
+
+    if not upstream.empty:
+
+        result = result.merge(
+            upstream,
+            on="datetime",
+            how="outer",
+        )
+
+
+    # ========================================================
+    # EXÓGENAS
+    # ========================================================
+
+    exog = preparar_exogenas(
+        exog_history
+    )
+
+
+    if not exog.empty:
+
+        result = result.merge(
+            exog,
+            on="datetime",
+            how="left",
+        )
+
+
+    result[
+        "datetime"
+    ] = _normalizar_datetime(
+        result[
+            "datetime"
+        ]
+    )
+
+
+    return (
+        result
+        .sort_values(
+            "datetime"
+        )
+        .drop_duplicates(
+            subset=[
+                "datetime"
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+# ============================================================
+# CORRELACIÓN POR LAG
+# ============================================================
+
+def calcular_lag_entre_series(
+    df,
+    upstream_col,
+    downstream_col,
+    max_lag=MAX_LAG_DAYS,
+):
+
     if (
-        sn.empty
-        or corr.empty
+        df is None
+        or df.empty
+        or upstream_col
+        not in df.columns
+        or downstream_col
+        not in df.columns
     ):
 
         return {
             "best_lag_days":
-                np.nan,
+                None,
 
             "correlation":
-                np.nan,
+                None,
 
             "samples":
                 0,
@@ -1206,97 +1486,126 @@ def calcular_lag_corrientes_san_nicolas(
                 pd.DataFrame(),
         }
 
-    merged = corr.merge(
-        sn,
-        on="datetime",
-        how="inner",
-    )
 
-    if merged.empty:
-
-        return {
-            "best_lag_days":
-                np.nan,
-
-            "correlation":
-                np.nan,
-
-            "samples":
-                0,
-
-            "lag_table":
-                pd.DataFrame(),
-        }
-
-    merged = merged.sort_values(
-        "datetime"
-    )
-
-    # --------------------------------------------------------
-    # CAMBIOS 3 DÍAS
-    # --------------------------------------------------------
-
-    merged[
-        "corr_change"
-    ] = (
-        merged[
-            "nivel_corrientes"
+    work = df[
+        [
+            "datetime",
+            upstream_col,
+            downstream_col,
         ]
-        - merged[
-            "nivel_corrientes"
-        ].shift(3)
+    ].copy()
+
+
+    work[upstream_col] = (
+        _to_numeric(
+            work[
+                upstream_col
+            ]
+        )
     )
 
-    merged[
-        "sn_change"
-    ] = (
-        merged[
-            "nivel_san_nicolas"
-        ]
-        - merged[
-            "nivel_san_nicolas"
-        ].shift(3)
+
+    work[downstream_col] = (
+        _to_numeric(
+            work[
+                downstream_col
+            ]
+        )
     )
+
+
+    # ========================================================
+    # Usamos variaciones de 3 días
+    # para reducir sesgo por estacionalidad
+    # ========================================================
+
+    work[
+        "up_change"
+    ] = (
+        work[
+            upstream_col
+        ].diff(
+            3
+        )
+    )
+
+
+    work[
+        "down_change"
+    ] = (
+        work[
+            downstream_col
+        ].diff(
+            3
+        )
+    )
+
 
     rows = []
+
 
     for lag in range(
         0,
         int(
             max_lag
-        ) + 1,
+        )
+        + 1,
     ):
 
-        # Corrientes hoy comparado con
-        # San Nicolás "lag" días después.
+        # ----------------------------------------------------
+        # upstream en t debe correlacionar con downstream
+        # en t + lag
+        # ----------------------------------------------------
 
-        shifted_sn = (
-            merged[
-                "sn_change"
-            ].shift(
+        shifted_down = (
+            work[
+                "down_change"
+            ]
+            .shift(
                 -lag
             )
         )
 
-        corr_value = _safe_corr(
-            merged[
-                "corr_change"
-            ],
-            shifted_sn,
-            min_samples=20,
-        )
 
-        valid = pd.DataFrame(
+        temp = pd.DataFrame(
             {
-                "a":
-                    merged[
-                        "corr_change"
+                "up":
+                    work[
+                        "up_change"
                     ],
 
-                "b":
-                    shifted_sn,
+                "down":
+                    shifted_down,
             }
         ).dropna()
+
+
+        if (
+            len(
+                temp
+            )
+            < MIN_CORRELATION_SAMPLES
+        ):
+
+            continue
+
+
+        corr = _safe_corr(
+            temp[
+                "up"
+            ],
+            temp[
+                "down"
+            ],
+        )
+
+
+        if not np.isfinite(
+            corr
+        ):
+
+            continue
+
 
         rows.append(
             {
@@ -1304,52 +1613,62 @@ def calcular_lag_corrientes_san_nicolas(
                     lag,
 
                 "correlation":
-                    corr_value,
+                    corr,
+
+                "abs_correlation":
+                    abs(
+                        corr
+                    ),
 
                 "samples":
                     len(
-                        valid
+                        temp
                     ),
             }
         )
 
-    lag_table = pd.DataFrame(
-        rows
-    )
 
-    valid_table = lag_table.dropna(
-        subset=[
-            "correlation"
-        ]
-    )
-
-    if valid_table.empty:
+    if not rows:
 
         return {
             "best_lag_days":
-                np.nan,
+                None,
 
             "correlation":
-                np.nan,
+                None,
 
             "samples":
                 0,
 
             "lag_table":
-                lag_table,
+                pd.DataFrame(),
         }
 
-    best_index = (
-        valid_table[
-            "correlation"
-        ]
-        .abs()
-        .idxmax()
+
+    table = (
+        pd.DataFrame(
+            rows
+        )
+        .sort_values(
+            [
+                "abs_correlation",
+                "samples",
+            ],
+            ascending=[
+                False,
+                False,
+            ],
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
-    best = valid_table.loc[
-        best_index
+
+    best = table.iloc[
+        0
     ]
+
 
     return {
         "best_lag_days":
@@ -1374,8 +1693,127 @@ def calcular_lag_corrientes_san_nicolas(
             ),
 
         "lag_table":
-            lag_table,
+            table,
     }
+
+
+# ============================================================
+# LAGS ENTRE TODOS LOS TRAMOS
+# ============================================================
+
+def calcular_retardos_corredor(
+    dataset,
+):
+
+    results = []
+
+
+    for (
+        upstream_station,
+        downstream_station,
+    ) in SEGMENTS:
+
+        up_col = LEVEL_COLUMNS[
+            upstream_station
+        ]
+
+        down_col = LEVEL_COLUMNS[
+            downstream_station
+        ]
+
+
+        if (
+            up_col
+            not in dataset.columns
+            or down_col
+            not in dataset.columns
+        ):
+
+            results.append(
+                {
+                    "upstream":
+                        upstream_station,
+
+                    "downstream":
+                        downstream_station,
+
+                    "lag_days":
+                        None,
+
+                    "correlation":
+                        None,
+
+                    "samples":
+                        0,
+                }
+            )
+
+            continue
+
+
+        lag = calcular_lag_entre_series(
+
+            dataset,
+
+            up_col,
+
+            down_col,
+
+            max_lag=
+                DEFAULT_LAG_ANALYSIS_DAYS,
+        )
+
+
+        results.append(
+            {
+                "upstream":
+                    upstream_station,
+
+                "downstream":
+                    downstream_station,
+
+                "lag_days":
+                    lag.get(
+                        "best_lag_days"
+                    ),
+
+                "correlation":
+                    lag.get(
+                        "correlation"
+                    ),
+
+                "samples":
+                    lag.get(
+                        "samples"
+                    ),
+            }
+        )
+
+
+    return pd.DataFrame(
+        results
+    )
+
+
+# ============================================================
+# LAG CORRIENTES -> SAN NICOLÁS
+# ============================================================
+
+def calcular_lag_corrientes_san_nicolas(
+    dataset,
+):
+
+    return calcular_lag_entre_series(
+
+        dataset,
+
+        "nivel_corrientes",
+
+        "nivel",
+
+        max_lag=
+            MAX_LAG_DAYS,
+    )
 
 
 # ============================================================
@@ -1384,179 +1822,166 @@ def calcular_lag_corrientes_san_nicolas(
 
 def detectar_maximos_locales(
     df,
-    value_col,
-    min_distance_days=
-        MIN_EVENT_DISTANCE_DAYS,
-    quantile=
-        EVENT_QUANTILE,
+    column,
+    quantile=EVENT_QUANTILE,
+    min_distance=MIN_EVENT_DISTANCE_DAYS,
 ):
 
     if (
         df is None
         or df.empty
-        or value_col
-        not in df.columns
+        or column not in df.columns
     ):
 
         return pd.DataFrame()
 
-    x = df[
-        [
-            "datetime",
-            value_col,
+
+    values = _to_numeric(
+        df[
+            column
         ]
-    ].copy()
-
-    x[
-        value_col
-    ] = pd.to_numeric(
-        x[
-            value_col
-        ],
-        errors="coerce",
     )
 
-    x = (
-        x
-        .dropna()
-        .sort_values(
-            "datetime"
-        )
-        .reset_index(
-            drop=True
-        )
-    )
+
+    valid = values.dropna()
+
 
     if len(
-        x
-    ) < 5:
+        valid
+    ) < 30:
 
         return pd.DataFrame()
 
-    threshold = float(
-        x[
-            value_col
-        ].quantile(
-            quantile
-        )
+
+    threshold = valid.quantile(
+        quantile
     )
 
-    x[
-        "prev"
-    ] = (
-        x[
-            value_col
-        ].shift(1)
-    )
 
-    x[
-        "next"
-    ] = (
-        x[
-            value_col
-        ].shift(-1)
-    )
+    candidate_indexes = []
 
-    peaks = x[
-        (
-            x[
-                value_col
-            ]
-            >= threshold
+
+    for i in range(
+        1,
+        len(
+            values
         )
-        &
-        (
-            x[
-                value_col
-            ]
-            >= x[
-                "prev"
-            ]
-        )
-        &
-        (
-            x[
-                value_col
-            ]
-            >= x[
-                "next"
-            ]
-        )
-    ].copy()
+        - 1,
+    ):
 
-    if peaks.empty:
+        current = values.iloc[
+            i
+        ]
 
-        return pd.DataFrame()
 
-    # --------------------------------------------------------
-    # SEPARAR EVENTOS
-    # --------------------------------------------------------
-
-    selected = []
-
-    for _, row in peaks.iterrows():
-
-        if not selected:
-
-            selected.append(
-                row
-            )
+        if not np.isfinite(
+            current
+        ):
 
             continue
 
-        previous = selected[-1]
 
-        distance = (
-            row[
-                "datetime"
-            ]
-            - previous[
-                "datetime"
-            ]
-        ).days
+        if current < threshold:
+            continue
+
+
+        prev_value = values.iloc[
+            i - 1
+        ]
+
+        next_value = values.iloc[
+            i + 1
+        ]
+
 
         if (
-            distance
-            >= min_distance_days
+            np.isfinite(
+                prev_value
+            )
+            and np.isfinite(
+                next_value
+            )
+            and current
+            >= prev_value
+            and current
+            >= next_value
+        ):
+
+            candidate_indexes.append(
+                i
+            )
+
+
+    if not candidate_indexes:
+
+        return pd.DataFrame()
+
+
+    selected = []
+
+
+    last_date = None
+
+
+    for idx in candidate_indexes:
+
+        date = df[
+            "datetime"
+        ].iloc[
+            idx
+        ]
+
+
+        if (
+            last_date is None
+            or (
+                date
+                - last_date
+            ).days
+            >= min_distance
         ):
 
             selected.append(
-                row
+                idx
             )
+
+            last_date = date
+
 
         else:
 
-            # En el mismo episodio quedarse
-            # con el máximo más alto.
+            previous_idx = selected[
+                -1
+            ]
+
 
             if (
-                row[
-                    value_col
+                values.iloc[
+                    idx
                 ]
-                > previous[
-                    value_col
+                >
+                values.iloc[
+                    previous_idx
                 ]
             ):
 
                 selected[
                     -1
-                ] = row
+                ] = idx
 
-    if not selected:
+                last_date = date
 
-        return pd.DataFrame()
-
-    result = pd.DataFrame(
-        selected
-    )
 
     return (
-        result[
+        df.iloc[
+            selected
+        ][
             [
                 "datetime",
-                value_col,
+                column,
             ]
         ]
+        .copy()
         .reset_index(
             drop=True
         )
@@ -1564,157 +1989,289 @@ def detectar_maximos_locales(
 
 
 # ============================================================
-# EVENTOS CORRIENTES -> SAN NICOLÁS
+# VALOR MEDIO EN VENTANA
+# ============================================================
+
+def _window_mean(
+    dataset,
+    column,
+    start,
+    end,
+):
+
+    if (
+        column
+        not in dataset.columns
+    ):
+
+        return np.nan
+
+
+    mask = (
+        (
+            dataset[
+                "datetime"
+            ]
+            >= start
+        )
+        &
+        (
+            dataset[
+                "datetime"
+            ]
+            <= end
+        )
+    )
+
+
+    values = (
+        _to_numeric(
+            dataset.loc[
+                mask,
+                column,
+            ]
+        )
+        .dropna()
+    )
+
+
+    if values.empty:
+
+        return np.nan
+
+
+    return float(
+        values.mean()
+    )
+
+
+# ============================================================
+# VALOR MÁXIMO EN VENTANA
+# ============================================================
+
+def _window_max(
+    dataset,
+    column,
+    start,
+    end,
+):
+
+    if (
+        column
+        not in dataset.columns
+    ):
+
+        return np.nan
+
+
+    mask = (
+        (
+            dataset[
+                "datetime"
+            ]
+            >= start
+        )
+        &
+        (
+            dataset[
+                "datetime"
+            ]
+            <= end
+        )
+    )
+
+
+    values = (
+        _to_numeric(
+            dataset.loc[
+                mask,
+                column,
+            ]
+        )
+        .dropna()
+    )
+
+
+    if values.empty:
+
+        return np.nan
+
+
+    return float(
+        values.max()
+    )
+
+
+# ============================================================
+# LLUVIA ACUMULADA
+# ============================================================
+
+def _rain_sum(
+    dataset,
+    column,
+    start,
+    end,
+):
+
+    if column not in dataset.columns:
+
+        return np.nan
+
+
+    mask = (
+        (
+            dataset[
+                "datetime"
+            ]
+            >= start
+        )
+        &
+        (
+            dataset[
+                "datetime"
+            ]
+            <= end
+        )
+    )
+
+
+    values = (
+        _to_numeric(
+            dataset.loc[
+                mask,
+                column,
+            ]
+        )
+        .fillna(
+            0.0
+        )
+    )
+
+
+    if values.empty:
+
+        return np.nan
+
+
+    return float(
+        values.sum()
+    )
+
+
+# ============================================================
+# CONSTRUIR EVENTOS CORRIENTES -> SAN NICOLÁS
 # ============================================================
 
 def construir_eventos_corrientes_san_nicolas(
-    san_nicolas,
-    upstream_history,
+    dataset,
     expected_lag=None,
-    window_before=
-        DEFAULT_EVENT_WINDOW_BEFORE,
-    window_after=
-        DEFAULT_EVENT_WINDOW_AFTER,
 ):
 
-    sn = preparar_san_nicolas(
-        san_nicolas
-    )
+    required = [
+        "datetime",
+        "nivel_corrientes",
+        "nivel",
+    ]
 
-    corr = preparar_corrientes(
-        upstream_history
-    )
 
-    if (
-        sn.empty
-        or corr.empty
+    if any(
+        c not in dataset.columns
+        for c in required
     ):
 
         return pd.DataFrame()
+
+
+    peaks = detectar_maximos_locales(
+        dataset,
+        "nivel_corrientes",
+    )
+
+
+    if peaks.empty:
+
+        return pd.DataFrame()
+
 
     if expected_lag is None:
 
-        lag_info = (
-            calcular_lag_corrientes_san_nicolas(
-                sn,
-                corr,
-            )
-        )
+        expected_lag = 15
 
-        expected_lag = (
-            lag_info.get(
-                "best_lag_days"
-            )
-        )
-
-    if (
-        expected_lag is None
-        or not np.isfinite(
-            _safe_float(
-                expected_lag
-            )
-        )
-    ):
-
-        expected_lag = 8
-
-    expected_lag = int(
-        expected_lag
-    )
-
-    corr_peaks = (
-        detectar_maximos_locales(
-            corr,
-            "nivel_corrientes",
-        )
-    )
-
-    if corr_peaks.empty:
-
-        return pd.DataFrame()
 
     events = []
 
-    for _, peak in (
-        corr_peaks.iterrows()
-    ):
+
+    for _, peak in peaks.iterrows():
 
         corr_date = peak[
             "datetime"
         ]
 
-        corr_level = float(
+        corr_peak = _safe_float(
             peak[
                 "nivel_corrientes"
             ]
         )
 
-        # ----------------------------------------------------
-        # NIVEL BASE CORRIENTES
-        # ----------------------------------------------------
 
-        corr_previous = corr[
-            (
-                corr[
-                    "datetime"
-                ]
-                >= (
-                    corr_date
-                    - pd.Timedelta(
-                        days=7
-                    )
-                )
+        baseline_start = (
+            corr_date
+            - pd.Timedelta(
+                days=
+                    EVENT_BASELINE_DAYS
             )
-            &
-            (
-                corr[
-                    "datetime"
-                ]
-                < corr_date
+        )
+
+
+        baseline_end = (
+            corr_date
+            - pd.Timedelta(
+                days=1
             )
-        ]
+        )
 
-        if corr_previous.empty:
 
-            corr_base = np.nan
-            corr_rise = np.nan
-            corr_speed = np.nan
+        corr_base = _window_mean(
 
-        else:
+            dataset,
 
-            corr_base = float(
-                corr_previous[
-                    "nivel_corrientes"
-                ].mean()
-            )
+            "nivel_corrientes",
 
-            corr_rise = (
-                corr_level
-                - corr_base
-            )
+            baseline_start,
 
-            corr_speed = (
-                corr_rise
-                / max(
-                    len(
-                        corr_previous
-                    ),
-                    1,
-                )
-            )
+            baseline_end,
+        )
 
-        # Evitar máximos que no representen
-        # un evento de creciente real.
+
+        if not np.isfinite(
+            corr_base
+        ):
+
+            continue
+
+
+        corr_rise = (
+            corr_peak
+            - corr_base
+        )
+
 
         if (
-            np.isfinite(
-                corr_rise
-            )
-            and corr_rise
+            corr_rise
             < MIN_EVENT_RISE
         ):
 
             continue
+
+
+        corr_speed = (
+            corr_rise
+            / max(
+                EVENT_BASELINE_DAYS,
+                1,
+            )
+        )
+
 
         target_date = (
             corr_date
@@ -1724,200 +2281,338 @@ def construir_eventos_corrientes_san_nicolas(
             )
         )
 
+
         search_start = (
             target_date
             - pd.Timedelta(
                 days=
-                    window_before
+                    EVENT_SEARCH_BEFORE
             )
         )
+
 
         search_end = (
             target_date
             + pd.Timedelta(
                 days=
-                    window_after
+                    EVENT_SEARCH_AFTER
             )
         )
 
-        sn_window = sn[
+
+        mask = (
             (
-                sn[
+                dataset[
                     "datetime"
                 ]
                 >= search_start
             )
             &
             (
-                sn[
+                dataset[
                     "datetime"
                 ]
                 <= search_end
             )
-        ].copy()
+        )
+
+
+        sn_window = dataset.loc[
+            mask,
+            [
+                "datetime",
+                "nivel",
+            ],
+        ].dropna()
+
 
         if sn_window.empty:
 
             continue
 
-        idx = (
+
+        max_idx = (
             sn_window[
-                "nivel_san_nicolas"
+                "nivel"
             ]
             .idxmax()
         )
 
-        sn_peak = (
-            sn_window.loc[
-                idx
-            ]
-        )
 
-        sn_date = sn_peak[
-            "datetime"
+        sn_date = dataset.loc[
+            max_idx,
+            "datetime",
         ]
 
-        sn_level = float(
-            sn_peak[
-                "nivel_san_nicolas"
+
+        sn_peak = _safe_float(
+            dataset.loc[
+                max_idx,
+                "nivel",
             ]
         )
 
-        real_lag = int(
-            (
-                sn_date
-                - corr_date
-            ).days
+
+        lag_real = (
+            sn_date
+            - corr_date
+        ).days
+
+
+        if (
+            lag_real < 0
+            or lag_real > 40
+        ):
+
+            continue
+
+
+        sn_baseline_start = (
+            corr_date
+            - pd.Timedelta(
+                days=
+                    EVENT_BASELINE_DAYS
+            )
         )
 
-        # ----------------------------------------------------
-        # NIVEL BASE SAN NICOLÁS
-        # ----------------------------------------------------
 
-        sn_previous = sn[
-            (
-                sn[
-                    "datetime"
-                ]
-                >= (
-                    corr_date
-                    - pd.Timedelta(
-                        days=7
+        sn_baseline_end = (
+            corr_date
+            + pd.Timedelta(
+                days=
+                    max(
+                        lag_real
+                        - 2,
+                        0,
                     )
-                )
             )
-            &
-            (
-                sn[
-                    "datetime"
-                ]
-                < corr_date
-            )
-        ]
+        )
 
-        if sn_previous.empty:
 
-            sn_base = np.nan
-            sn_response = np.nan
+        sn_base = _window_mean(
 
-        else:
+            dataset,
 
-            sn_base = float(
-                sn_previous[
-                    "nivel_san_nicolas"
-                ].mean()
-            )
+            "nivel",
 
-            sn_response = (
-                sn_level
-                - sn_base
-            )
+            sn_baseline_start,
 
-        response_ratio = (
+            sn_baseline_end,
+        )
+
+
+        if not np.isfinite(
+            sn_base
+        ):
+
+            continue
+
+
+        sn_response = (
+            sn_peak
+            - sn_base
+        )
+
+
+        # ----------------------------------------------------
+        # evitar asociaciones sin respuesta positiva
+        # ----------------------------------------------------
+
+        if sn_response <= 0:
+
+            continue
+
+
+        relative_response = (
             sn_response
             / corr_rise
-            if (
-                np.isfinite(
-                    sn_response
-                )
-                and np.isfinite(
-                    corr_rise
-                )
-                and abs(
-                    corr_rise
-                ) > 0.01
-            )
+            if abs(
+                corr_rise
+            ) > 0.01
             else np.nan
         )
 
-        events.append(
-            {
-                "fecha_max_corrientes":
+
+        # ====================================================
+        # CAUDAL POR ESTACIÓN
+        # ====================================================
+
+        event = {
+
+            "fecha_max_corrientes":
+                corr_date,
+
+            "max_corrientes_m":
+                corr_peak,
+
+            "nivel_base_corrientes_m":
+                corr_base,
+
+            "crecida_corrientes_m":
+                corr_rise,
+
+            "velocidad_corrientes_m_dia":
+                corr_speed,
+
+            "fecha_max_san_nicolas":
+                sn_date,
+
+            "max_san_nicolas_m":
+                sn_peak,
+
+            "nivel_base_san_nicolas_m":
+                sn_base,
+
+            "respuesta_san_nicolas_m":
+                sn_response,
+
+            "respuesta_relativa":
+                relative_response,
+
+            "lag_real_dias":
+                lag_real,
+        }
+
+
+        # ====================================================
+        # CAUDALES PREVIOS AL EVENTO
+        # ====================================================
+
+        for station in STATIONS:
+
+            slug = _slug(
+                station
+            )
+
+
+            q_col = FLOW_COLUMNS[
+                station
+            ]
+
+
+            if q_col in dataset.columns:
+
+                q_mean = _window_mean(
+
+                    dataset,
+
+                    q_col,
+
+                    corr_date
+                    - pd.Timedelta(
+                        days=7
+                    ),
+
                     corr_date,
+                )
 
-                "max_corrientes_m":
-                    corr_level,
 
-                "nivel_base_corrientes_m":
-                    corr_base,
+                q_max = _window_max(
 
-                "crecida_corrientes_m":
-                    corr_rise,
+                    dataset,
 
-                "velocidad_corrientes_m_dia":
-                    corr_speed,
+                    q_col,
 
-                "fecha_max_san_nicolas":
-                    sn_date,
+                    corr_date
+                    - pd.Timedelta(
+                        days=7
+                    ),
 
-                "max_san_nicolas_m":
-                    sn_level,
+                    corr_date,
+                )
 
-                "nivel_base_san_nicolas_m":
-                    sn_base,
 
-                "respuesta_san_nicolas_m":
-                    sn_response,
+                event[
+                    f"q_{slug}_7d_mean"
+                ] = q_mean
 
-                "respuesta_relativa":
-                    response_ratio,
 
-                "lag_real_dias":
-                    real_lag,
-            }
+                event[
+                    f"q_{slug}_7d_max"
+                ] = q_max
+
+
+            rain_col = RAIN_COLUMNS[
+                station
+            ]
+
+
+            if rain_col in dataset.columns:
+
+                rain_7d = _rain_sum(
+
+                    dataset,
+
+                    rain_col,
+
+                    corr_date
+                    - pd.Timedelta(
+                        days=6
+                    ),
+
+                    corr_date,
+                )
+
+
+                rain_15d = _rain_sum(
+
+                    dataset,
+
+                    rain_col,
+
+                    corr_date
+                    - pd.Timedelta(
+                        days=14
+                    ),
+
+                    corr_date,
+                )
+
+
+                rain_30d = _rain_sum(
+
+                    dataset,
+
+                    rain_col,
+
+                    corr_date
+                    - pd.Timedelta(
+                        days=29
+                    ),
+
+                    corr_date,
+                )
+
+
+                event[
+                    f"rain_{slug}_7d"
+                ] = rain_7d
+
+
+                event[
+                    f"rain_{slug}_15d"
+                ] = rain_15d
+
+
+                event[
+                    f"rain_{slug}_30d"
+                ] = rain_30d
+
+
+        events.append(
+            event
         )
+
 
     if not events:
 
         return pd.DataFrame()
 
-    result = pd.DataFrame(
-        events
-    )
-
-    # --------------------------------------------------------
-    # FILTRO DE DEMORAS FÍSICAMENTE ÚTILES
-    # --------------------------------------------------------
-
-    result = result[
-        (
-            result[
-                "lag_real_dias"
-            ]
-            >= 0
-        )
-        &
-        (
-            result[
-                "lag_real_dias"
-            ]
-            <= DEFAULT_MAX_LAG
-            + DEFAULT_EVENT_WINDOW_AFTER
-        )
-    ].copy()
 
     return (
-        result
+        pd.DataFrame(
+            events
+        )
         .sort_values(
             "fecha_max_corrientes"
         )
@@ -1928,310 +2623,7 @@ def construir_eventos_corrientes_san_nicolas(
 
 
 # ============================================================
-# EXÓGENAS
-# ============================================================
-
-def preparar_exogenas(
-    exog_history,
-):
-
-    if (
-        exog_history is None
-        or not isinstance(
-            exog_history,
-            pd.DataFrame,
-        )
-        or exog_history.empty
-        or "datetime"
-        not in exog_history.columns
-    ):
-
-        return pd.DataFrame()
-
-    x = exog_history.copy()
-
-    x[
-        "datetime"
-    ] = _to_datetime_naive(
-        x[
-            "datetime"
-        ]
-    )
-
-    x[
-        "datetime"
-    ] = (
-        x[
-            "datetime"
-        ]
-        .dt
-        .normalize()
-    )
-
-    keep = [
-        "datetime"
-    ]
-
-    if (
-        "caudal_m3s"
-        in x.columns
-    ):
-
-        x[
-            "caudal_m3s"
-        ] = _to_numeric(
-            x[
-                "caudal_m3s"
-            ]
-        )
-
-        keep.append(
-            "caudal_m3s"
-        )
-
-    if (
-        "precip_mm"
-        in x.columns
-    ):
-
-        x[
-            "precip_mm"
-        ] = (
-            _to_numeric(
-                x[
-                    "precip_mm"
-                ]
-            )
-            .clip(
-                lower=0
-            )
-        )
-
-        keep.append(
-            "precip_mm"
-        )
-
-    x = x[
-        keep
-    ].copy()
-
-    agg = {}
-
-    if (
-        "caudal_m3s"
-        in x.columns
-    ):
-
-        agg[
-            "caudal_m3s"
-        ] = "mean"
-
-    if (
-        "precip_mm"
-        in x.columns
-    ):
-
-        agg[
-            "precip_mm"
-        ] = "sum"
-
-    if not agg:
-
-        return pd.DataFrame()
-
-    return (
-        x
-        .groupby(
-            "datetime",
-            as_index=False,
-        )
-        .agg(
-            agg
-        )
-        .sort_values(
-            "datetime"
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-
-# ============================================================
-# ENRIQUECER EVENTOS
-# ============================================================
-
-def enriquecer_eventos_con_exogenas(
-    events,
-    exog_history,
-    rain_window_days=15,
-    flow_window_days=7,
-):
-
-    if (
-        events is None
-        or not isinstance(
-            events,
-            pd.DataFrame,
-        )
-        or events.empty
-    ):
-
-        return pd.DataFrame()
-
-    exog = preparar_exogenas(
-        exog_history
-    )
-
-    result = events.copy()
-
-    if exog.empty:
-
-        result[
-            "lluvia_previa_mm"
-        ] = np.nan
-
-        result[
-            "caudal_medio_m3s"
-        ] = np.nan
-
-        result[
-            "caudal_max_m3s"
-        ] = np.nan
-
-        return result
-
-    rain_values = []
-    flow_means = []
-    flow_maxs = []
-
-    for _, event in (
-        result.iterrows()
-    ):
-
-        date = event[
-            "fecha_max_corrientes"
-        ]
-
-        rain_start = (
-            date
-            - pd.Timedelta(
-                days=
-                    rain_window_days
-            )
-        )
-
-        flow_start = (
-            date
-            - pd.Timedelta(
-                days=
-                    flow_window_days
-            )
-        )
-
-        if (
-            "precip_mm"
-            in exog.columns
-        ):
-
-            rain = exog[
-                (
-                    exog[
-                        "datetime"
-                    ]
-                    >= rain_start
-                )
-                &
-                (
-                    exog[
-                        "datetime"
-                    ]
-                    <= date
-                )
-            ][
-                "precip_mm"
-            ]
-
-            rain_values.append(
-                float(
-                    rain.sum()
-                )
-                if not rain.empty
-                else np.nan
-            )
-
-        else:
-
-            rain_values.append(
-                np.nan
-            )
-
-        if (
-            "caudal_m3s"
-            in exog.columns
-        ):
-
-            flow = exog[
-                (
-                    exog[
-                        "datetime"
-                    ]
-                    >= flow_start
-                )
-                &
-                (
-                    exog[
-                        "datetime"
-                    ]
-                    <= date
-                )
-            ][
-                "caudal_m3s"
-            ].dropna()
-
-            flow_means.append(
-                float(
-                    flow.mean()
-                )
-                if not flow.empty
-                else np.nan
-            )
-
-            flow_maxs.append(
-                float(
-                    flow.max()
-                )
-                if not flow.empty
-                else np.nan
-            )
-
-        else:
-
-            flow_means.append(
-                np.nan
-            )
-
-            flow_maxs.append(
-                np.nan
-            )
-
-    result[
-        "lluvia_previa_mm"
-    ] = rain_values
-
-    result[
-        "caudal_medio_m3s"
-    ] = flow_means
-
-    result[
-        "caudal_max_m3s"
-    ] = flow_maxs
-
-    return result
-
-
-# ============================================================
-# ESTADÍSTICAS
+# ESTADÍSTICAS DE PROPAGACIÓN
 # ============================================================
 
 def estadisticas_propagacion(
@@ -2240,558 +2632,814 @@ def estadisticas_propagacion(
 
     if (
         events is None
-        or not isinstance(
-            events,
-            pd.DataFrame,
-        )
         or events.empty
     ):
 
         return {
-            "eventos":
+            "event_count":
                 0,
 
-            "lag_mediana_dias":
-                np.nan,
+            "median_lag_days":
+                None,
 
-            "lag_promedio_dias":
-                np.nan,
+            "mean_lag_days":
+                None,
 
-            "lag_min_dias":
-                np.nan,
+            "min_lag_days":
+                None,
 
-            "lag_max_dias":
-                np.nan,
+            "max_lag_days":
+                None,
 
-            "respuesta_mediana_m":
-                np.nan,
+            "median_response_m":
+                None,
 
-            "respuesta_promedio_m":
-                np.nan,
+            "mean_response_m":
+                None,
 
-            "respuesta_relativa_mediana":
-                np.nan,
+            "median_response_ratio":
+                None,
 
-            "correlacion_maximos":
-                np.nan,
+            "maxima_correlation":
+                None,
         }
 
-    lag = pd.to_numeric(
+
+    lag = _to_numeric(
         events[
             "lag_real_dias"
-        ],
-        errors="coerce",
+        ]
     ).dropna()
 
-    response = pd.to_numeric(
+
+    response = _to_numeric(
         events[
             "respuesta_san_nicolas_m"
-        ],
-        errors="coerce",
+        ]
     ).dropna()
 
-    relative = pd.to_numeric(
+
+    ratio = _to_numeric(
         events[
             "respuesta_relativa"
-        ],
-        errors="coerce",
-    ).replace(
-        [
-            np.inf,
-            -np.inf,
-        ],
-        np.nan,
+        ]
     ).dropna()
 
-    corr = _safe_corr(
+
+    maxima_corr = _safe_corr(
+
         events[
             "max_corrientes_m"
         ],
+
         events[
             "max_san_nicolas_m"
         ],
-        min_samples=5,
     )
 
+
     return {
-        "eventos":
+
+        "event_count":
             int(
                 len(
                     events
                 )
             ),
 
-        "lag_mediana_dias":
+        "median_lag_days":
             (
                 float(
                     lag.median()
                 )
                 if not lag.empty
-                else np.nan
+                else None
             ),
 
-        "lag_promedio_dias":
+        "mean_lag_days":
             (
                 float(
                     lag.mean()
                 )
                 if not lag.empty
-                else np.nan
+                else None
             ),
 
-        "lag_min_dias":
+        "min_lag_days":
             (
-                float(
+                int(
                     lag.min()
                 )
                 if not lag.empty
-                else np.nan
+                else None
             ),
 
-        "lag_max_dias":
+        "max_lag_days":
             (
-                float(
+                int(
                     lag.max()
                 )
                 if not lag.empty
-                else np.nan
+                else None
             ),
 
-        "respuesta_mediana_m":
+        "median_response_m":
             (
                 float(
                     response.median()
                 )
                 if not response.empty
-                else np.nan
+                else None
             ),
 
-        "respuesta_promedio_m":
+        "mean_response_m":
             (
                 float(
                     response.mean()
                 )
                 if not response.empty
-                else np.nan
+                else None
             ),
 
-        "respuesta_relativa_mediana":
+        "median_response_ratio":
             (
                 float(
-                    relative.median()
+                    ratio.median()
                 )
-                if not relative.empty
-                else np.nan
+                if not ratio.empty
+                else None
             ),
 
-        "correlacion_maximos":
-            corr,
+        "maxima_correlation":
+            maxima_corr,
     }
 
 
 # ============================================================
-# ESTADO ACTUAL CORRIENTES
+# ESTADO ACTUAL POR ESTACIÓN
 # ============================================================
 
-def obtener_estado_actual_corrientes(
-    upstream_history,
-    exog_history=None,
+def obtener_estado_actual_estacion(
+    dataset,
+    station,
 ):
 
-    corr = preparar_corrientes(
-        upstream_history
-    )
+    level_col = LEVEL_COLUMNS[
+        station
+    ]
 
-    result = {
-        "fecha":
-            None,
 
-        "nivel_corrientes":
-            np.nan,
+    if (
+        level_col
+        not in dataset.columns
+    ):
 
-        "variacion_3d":
-            np.nan,
+        return {}
 
-        "variacion_7d":
-            np.nan,
 
-        "velocidad_7d":
-            np.nan,
+    valid = dataset[
+        [
+            "datetime",
+            level_col,
+        ]
+    ].dropna()
 
-        "estado":
-            "Sin datos",
 
-        "caudal_actual":
-            np.nan,
+    if valid.empty:
 
-        "lluvia_15d":
-            np.nan,
-    }
+        return {}
 
-    if corr.empty:
 
-        return result
-
-    latest = corr.iloc[
+    latest = valid.iloc[
         -1
     ]
 
-    result[
-        "fecha"
-    ] = latest[
+
+    current_date = latest[
         "datetime"
     ]
 
-    result[
-        "nivel_corrientes"
-    ] = float(
+
+    current_level = _safe_float(
         latest[
-            "nivel_corrientes"
+            level_col
         ]
     )
 
-    if len(
-        corr
-    ) >= 4:
 
-        result[
-            "variacion_3d"
-        ] = (
-            float(
-                corr[
-                    "nivel_corrientes"
-                ].iloc[-1]
-            )
-            - float(
-                corr[
-                    "nivel_corrientes"
-                ].iloc[-4]
+    before_3 = valid[
+        valid[
+            "datetime"
+        ]
+        <= (
+            current_date
+            - pd.Timedelta(
+                days=3
             )
         )
-
-    if len(
-        corr
-    ) >= 8:
-
-        delta7 = (
-            float(
-                corr[
-                    "nivel_corrientes"
-                ].iloc[-1]
-            )
-            - float(
-                corr[
-                    "nivel_corrientes"
-                ].iloc[-8]
-            )
-        )
-
-        result[
-            "variacion_7d"
-        ] = delta7
-
-        result[
-            "velocidad_7d"
-        ] = (
-            delta7
-            / 7.0
-        )
-
-    delta7 = result[
-        "variacion_7d"
     ]
 
-    if np.isfinite(
-        _safe_float(
-            delta7
+
+    before_7 = valid[
+        valid[
+            "datetime"
+        ]
+        <= (
+            current_date
+            - pd.Timedelta(
+                days=7
+            )
         )
-    ):
+    ]
 
-        if delta7 > 0.08:
 
-            result[
-                "estado"
-            ] = "Creciente"
+    delta_3 = np.nan
+    delta_7 = np.nan
 
-        elif delta7 < -0.08:
 
-            result[
-                "estado"
-            ] = "Decreciente"
+    if not before_3.empty:
 
-        else:
+        delta_3 = (
+            current_level
+            - _safe_float(
+                before_3.iloc[
+                    -1
+                ][
+                    level_col
+                ]
+            )
+        )
 
-            result[
-                "estado"
-            ] = "Estable"
 
-    exog = preparar_exogenas(
-        exog_history
+    if not before_7.empty:
+
+        delta_7 = (
+            current_level
+            - _safe_float(
+                before_7.iloc[
+                    -1
+                ][
+                    level_col
+                ]
+            )
+        )
+
+
+    speed_7 = (
+        delta_7 / 7.0
+        if np.isfinite(
+            delta_7
+        )
+        else np.nan
     )
 
-    if not exog.empty:
 
-        current_date = result[
-            "fecha"
-        ]
+    state = "estable"
 
-        if (
-            "caudal_m3s"
-            in exog.columns
-        ):
 
-            flow = exog[
-                exog[
-                    "datetime"
+    if np.isfinite(
+        delta_7
+    ):
+
+        if delta_7 >= 0.08:
+
+            state = "creciente"
+
+        elif delta_7 <= -0.08:
+
+            state = "decreciente"
+
+
+    result = {
+
+        "station":
+            station,
+
+        "date":
+            current_date,
+
+        "level":
+            current_level,
+
+        "delta_3d":
+            delta_3,
+
+        "delta_7d":
+            delta_7,
+
+        "speed_7d":
+            speed_7,
+
+        "state":
+            state,
+    }
+
+
+    # ========================================================
+    # CAUDAL
+    # ========================================================
+
+    q_col = FLOW_COLUMNS[
+        station
+    ]
+
+
+    if q_col in dataset.columns:
+
+        q_valid = dataset[
+            [
+                "datetime",
+                q_col,
+            ]
+        ].dropna()
+
+
+        if not q_valid.empty:
+
+            result[
+                "flow_m3s"
+            ] = _safe_float(
+                q_valid.iloc[
+                    -1
+                ][
+                    q_col
                 ]
-                <= current_date
-            ][
-                "caudal_m3s"
-            ].dropna()
-
-            if not flow.empty:
-
-                result[
-                    "caudal_actual"
-                ] = float(
-                    flow.iloc[-1]
-                )
-
-        if (
-            "precip_mm"
-            in exog.columns
-        ):
-
-            rain_start = (
-                current_date
-                - pd.Timedelta(
-                    days=15
-                )
             )
 
-            rain = exog[
-                (
-                    exog[
-                        "datetime"
-                    ]
-                    >= rain_start
+
+            q_recent = q_valid[
+                q_valid[
+                    "datetime"
+                ]
+                >= (
+                    current_date
+                    - pd.Timedelta(
+                        days=7
+                    )
                 )
-                &
-                (
-                    exog[
-                        "datetime"
-                    ]
-                    <= current_date
-                )
-            ][
-                "precip_mm"
             ]
 
-            if not rain.empty:
+
+            if len(
+                q_recent
+            ) >= 2:
 
                 result[
-                    "lluvia_15d"
-                ] = float(
-                    rain.sum()
+                    "flow_delta_7d"
+                ] = (
+                    _safe_float(
+                        q_recent.iloc[
+                            -1
+                        ][
+                            q_col
+                        ]
+                    )
+                    -
+                    _safe_float(
+                        q_recent.iloc[
+                            0
+                        ][
+                            q_col
+                        ]
+                    )
                 )
+
+
+    # ========================================================
+    # LLUVIA
+    # ========================================================
+
+    rain_col = RAIN_COLUMNS[
+        station
+    ]
+
+
+    if rain_col in dataset.columns:
+
+        result[
+            "rain_7d"
+        ] = _rain_sum(
+
+            dataset,
+
+            rain_col,
+
+            current_date
+            - pd.Timedelta(
+                days=6
+            ),
+
+            current_date,
+        )
+
+
+        result[
+            "rain_15d"
+        ] = _rain_sum(
+
+            dataset,
+
+            rain_col,
+
+            current_date
+            - pd.Timedelta(
+                days=14
+            ),
+
+            current_date,
+        )
+
+
+        result[
+            "rain_30d"
+        ] = _rain_sum(
+
+            dataset,
+
+            rain_col,
+
+            current_date
+            - pd.Timedelta(
+                days=29
+            ),
+
+            current_date,
+        )
+
 
     return result
 
 
 # ============================================================
-# EVENTOS SIMILARES
+# ESTADO ACTUAL DEL CORREDOR
+# ============================================================
+
+def obtener_estado_actual_corredor(
+    dataset,
+):
+
+    rows = []
+
+
+    for station in STATIONS:
+
+        state = (
+            obtener_estado_actual_estacion(
+                dataset,
+                station,
+            )
+        )
+
+
+        if state:
+
+            rows.append(
+                state
+            )
+
+
+    return pd.DataFrame(
+        rows
+    )
+
+
+# ============================================================
+# ESTADO ACTUAL CORRIENTES
+# compatibilidad
+# ============================================================
+
+def obtener_estado_actual_corrientes(
+    dataset,
+):
+
+    return obtener_estado_actual_estacion(
+        dataset,
+        "Corrientes",
+    )
+
+
+# ============================================================
+# DISTANCIA NORMALIZADA
+# ============================================================
+
+def _normalized_distance(
+    historical,
+    current,
+):
+
+    historical = _to_numeric(
+        historical
+    )
+
+
+    valid = historical.dropna()
+
+
+    if (
+        valid.empty
+        or not np.isfinite(
+            current
+        )
+    ):
+
+        return pd.Series(
+            0.0,
+            index=
+                historical.index,
+        )
+
+
+    std = valid.std()
+
+
+    if (
+        not np.isfinite(
+            std
+        )
+        or std < 1e-9
+    ):
+
+        std = 1.0
+
+
+    return (
+        abs(
+            historical
+            - current
+        )
+        / std
+    )
+
+
+# ============================================================
+# BUSCAR EVENTOS SIMILARES
 # ============================================================
 
 def buscar_eventos_similares(
     events,
-    current_corrientes=None,
-    current_change=None,
-    current_speed=None,
-    current_flow=None,
-    recent_rain=None,
-    top_n=10,
+    current_state,
+    top_n=SIMILAR_EVENTS_DEFAULT,
 ):
 
     if (
         events is None
-        or not isinstance(
-            events,
-            pd.DataFrame,
-        )
         or events.empty
+        or not current_state
     ):
 
         return pd.DataFrame()
 
-    x = events.copy()
 
-    comparisons = []
+    work = events.copy()
 
-    candidates = [
-        (
-            "max_corrientes_m",
-            current_corrientes,
-            1.0,
-        ),
 
-        (
-            "crecida_corrientes_m",
-            current_change,
-            1.4,
-        ),
-
-        (
-            "velocidad_corrientes_m_dia",
-            current_speed,
-            1.5,
-        ),
-
-        (
-            "caudal_medio_m3s",
-            current_flow,
-            0.8,
-        ),
-
-        (
-            "lluvia_previa_mm",
-            recent_rain,
-            0.5,
-        ),
-    ]
-
-    for (
-        column,
-        target,
-        weight,
-    ) in candidates:
-
-        if (
-            column
-            not in x.columns
-            or target is None
-            or not np.isfinite(
-                _safe_float(
-                    target
-                )
-            )
-        ):
-
-            continue
-
-        values = pd.to_numeric(
-            x[
-                column
-            ],
-            errors="coerce",
-        )
-
-        valid = values.dropna()
-
-        if len(
-            valid
-        ) < 3:
-
-            continue
-
-        scale = float(
-            valid.std()
-        )
-
-        if (
-            not np.isfinite(
-                scale
-            )
-            or scale
-            < 1e-8
-        ):
-
-            scale = max(
-                abs(
-                    float(
-                        valid.mean()
-                    )
-                )
-                * 0.1,
-                0.01,
-            )
-
-        distance = (
-            (
-                values
-                - float(
-                    target
-                )
-            )
-            .abs()
-            / scale
-        )
-
-        comparisons.append(
-            (
-                distance,
-                weight,
-            )
-        )
-
-    if not comparisons:
-
-        return pd.DataFrame()
-
-    score = pd.Series(
+    distance = pd.Series(
         0.0,
-        index=x.index,
+        index=
+            work.index,
     )
 
-    weight_total = pd.Series(
-        0.0,
-        index=x.index,
+
+    total_weight = 0.0
+
+
+    # ========================================================
+    # NIVEL CORRIENTES
+    # ========================================================
+
+    current_level = _safe_float(
+        current_state.get(
+            "level"
+        )
     )
 
-    for (
-        distance,
-        weight,
-    ) in comparisons:
 
-        valid = (
-            distance.notna()
+    if (
+        np.isfinite(
+            current_level
         )
+        and "max_corrientes_m"
+        in work.columns
+    ):
 
-        score.loc[
-            valid
-        ] += (
-            distance.loc[
-                valid
-            ]
+        weight = 1.0
+
+
+        distance += (
+            _normalized_distance(
+
+                work[
+                    "max_corrientes_m"
+                ],
+
+                current_level,
+            )
             * weight
         )
 
-        weight_total.loc[
-            valid
-        ] += weight
 
-    score = score / weight_total.replace(
-        0,
-        np.nan,
+        total_weight += weight
+
+
+    # ========================================================
+    # CRECIDA RECIENTE
+    # ========================================================
+
+    current_rise = _safe_float(
+        current_state.get(
+            "delta_7d"
+        )
     )
 
-    x[
-        "similarity_score"
-    ] = score
 
-    x = x.dropna(
-        subset=[
-            "similarity_score"
-        ]
+    if (
+        np.isfinite(
+            current_rise
+        )
+        and "crecida_corrientes_m"
+        in work.columns
+    ):
+
+        weight = 1.6
+
+
+        distance += (
+            _normalized_distance(
+
+                work[
+                    "crecida_corrientes_m"
+                ],
+
+                max(
+                    current_rise,
+                    0.0,
+                ),
+            )
+            * weight
+        )
+
+
+        total_weight += weight
+
+
+    # ========================================================
+    # VELOCIDAD
+    # ========================================================
+
+    speed = _safe_float(
+        current_state.get(
+            "speed_7d"
+        )
     )
 
-    if x.empty:
+
+    if (
+        np.isfinite(
+            speed
+        )
+        and "velocidad_corrientes_m_dia"
+        in work.columns
+    ):
+
+        weight = 1.8
+
+
+        distance += (
+            _normalized_distance(
+
+                work[
+                    "velocidad_corrientes_m_dia"
+                ],
+
+                max(
+                    speed,
+                    0.0,
+                ),
+            )
+            * weight
+        )
+
+
+        total_weight += weight
+
+
+    # ========================================================
+    # CAUDAL CORRIENTES
+    # ========================================================
+
+    flow = _safe_float(
+        current_state.get(
+            "flow_m3s"
+        )
+    )
+
+
+    flow_col = (
+        "q_corrientes_7d_mean"
+    )
+
+
+    if (
+        np.isfinite(
+            flow
+        )
+        and flow_col
+        in work.columns
+    ):
+
+        weight = 1.2
+
+
+        distance += (
+            _normalized_distance(
+
+                work[
+                    flow_col
+                ],
+
+                flow,
+            )
+            * weight
+        )
+
+
+        total_weight += weight
+
+
+    # ========================================================
+    # LLUVIA CORRIENTES
+    # ========================================================
+
+    rain = _safe_float(
+        current_state.get(
+            "rain_15d"
+        )
+    )
+
+
+    rain_col = (
+        "rain_corrientes_15d"
+    )
+
+
+    if (
+        np.isfinite(
+            rain
+        )
+        and rain_col
+        in work.columns
+    ):
+
+        weight = 0.8
+
+
+        distance += (
+            _normalized_distance(
+
+                work[
+                    rain_col
+                ],
+
+                rain,
+            )
+            * weight
+        )
+
+
+        total_weight += weight
+
+
+    if total_weight <= 0:
 
         return pd.DataFrame()
 
+
+    distance = (
+        distance
+        / total_weight
+    )
+
+
+    work[
+        "similarity_distance"
+    ] = distance
+
+
+    work[
+        "similarity_score"
+    ] = (
+        1.0
+        / (
+            1.0
+            + distance
+        )
+    )
+
+
     return (
-        x
+        work
         .sort_values(
-            "similarity_score"
+            "similarity_distance"
         )
         .head(
             int(
@@ -2805,317 +3453,905 @@ def buscar_eventos_similares(
 
 
 # ============================================================
-# ESTIMACIÓN DE DEMORA ACTUAL
+# ESTIMAR PROPAGACIÓN ACTUAL
 # ============================================================
 
 def estimar_demora_actual(
     events,
-    upstream_history,
-    exog_history=None,
-    top_n=12,
+    current_state,
 ):
 
-    current = (
-        obtener_estado_actual_corrientes(
-            upstream_history,
-            exog_history,
-        )
-    )
-
-    current_level = current[
-        "nivel_corrientes"
-    ]
-
-    current_change = current[
-        "variacion_7d"
-    ]
-
-    current_speed = current[
-        "velocidad_7d"
-    ]
-
-    current_flow = current[
-        "caudal_actual"
-    ]
-
-    current_rain = current[
-        "lluvia_15d"
-    ]
-
-    similares = (
+    similar = (
         buscar_eventos_similares(
             events,
-            current_corrientes=
-                current_level,
-            current_change=
-                current_change,
-            current_speed=
-                current_speed,
-            current_flow=
-                current_flow,
-            recent_rain=
-                current_rain,
+            current_state,
             top_n=
-                top_n,
+                SIMILAR_EVENTS_DEFAULT,
         )
     )
 
-    # --------------------------------------------------------
-    # USAR SIMILARES
-    # --------------------------------------------------------
 
-    if (
-        similares is not None
-        and not similares.empty
-    ):
-
-        lags = pd.to_numeric(
-            similares[
-                "lag_real_dias"
-            ],
-            errors="coerce",
-        ).dropna()
-
-        responses = pd.to_numeric(
-            similares[
-                "respuesta_san_nicolas_m"
-            ],
-            errors="coerce",
-        ).dropna()
-
-        ratios = pd.to_numeric(
-            similares[
-                "respuesta_relativa"
-            ],
-            errors="coerce",
-        ).replace(
-            [
-                np.inf,
-                -np.inf,
-            ],
-            np.nan,
-        ).dropna()
-
-    else:
-
-        lags = pd.to_numeric(
-            events.get(
-                "lag_real_dias",
-                pd.Series(
-                    dtype=float
-                ),
-            ),
-            errors="coerce",
-        ).dropna()
-
-        responses = pd.to_numeric(
-            events.get(
-                "respuesta_san_nicolas_m",
-                pd.Series(
-                    dtype=float
-                ),
-            ),
-            errors="coerce",
-        ).dropna()
-
-        ratios = pd.to_numeric(
-            events.get(
-                "respuesta_relativa",
-                pd.Series(
-                    dtype=float
-                ),
-            ),
-            errors="coerce",
-        ).replace(
-            [
-                np.inf,
-                -np.inf,
-            ],
-            np.nan,
-        ).dropna()
-
-    if lags.empty:
+    if similar.empty:
 
         return {
-            "estado_corrientes":
-                current,
-
-            "eventos_similares":
-                similares,
-
-            "demora_probable_dias":
-                np.nan,
-
-            "demora_min_dias":
-                np.nan,
-
-            "demora_max_dias":
-                np.nan,
-
-            "respuesta_probable_m":
-                np.nan,
-
-            "respuesta_relativa":
-                np.nan,
-
-            "fecha_impacto_probable":
+            "delay_days":
                 None,
 
-            "fecha_impacto_desde":
+            "delay_min_days":
                 None,
 
-            "fecha_impacto_hasta":
+            "delay_max_days":
                 None,
+
+            "response_m":
+                None,
+
+            "response_ratio":
+                None,
+
+            "impact_date":
+                None,
+
+            "impact_from":
+                None,
+
+            "impact_to":
+                None,
+
+            "similar_events":
+                similar,
         }
 
-    delay_median = float(
-        lags.median()
-    )
 
-    delay_min = float(
-        lags.quantile(
-            0.25
-        )
-    )
+    lag = _to_numeric(
+        similar[
+            "lag_real_dias"
+        ]
+    ).dropna()
 
-    delay_max = float(
-        lags.quantile(
-            0.75
-        )
-    )
 
-    response = (
+    response = _to_numeric(
+        similar[
+            "respuesta_san_nicolas_m"
+        ]
+    ).dropna()
+
+
+    ratio = _to_numeric(
+        similar[
+            "respuesta_relativa"
+        ]
+    ).dropna()
+
+
+    delay = (
         float(
-            responses.median()
+            lag.median()
         )
-        if not responses.empty
-        else np.nan
+        if not lag.empty
+        else None
     )
 
-    ratio = (
+
+    delay_min = (
         float(
-            ratios.median()
+            lag.quantile(
+                0.25
+            )
         )
-        if not ratios.empty
-        else np.nan
+        if not lag.empty
+        else None
     )
 
-    fecha_corr = current[
-        "fecha"
-    ]
 
-    if (
-        fecha_corr is not None
-        and not pd.isna(
-            fecha_corr
-        )
-    ):
-
-        fecha_probable = (
-            fecha_corr
-            + pd.Timedelta(
-                days=
-                    round(
-                        delay_median
-                    )
+    delay_max = (
+        float(
+            lag.quantile(
+                0.75
             )
         )
+        if not lag.empty
+        else None
+    )
 
-        fecha_desde = (
-            fecha_corr
-            + pd.Timedelta(
-                days=
-                    round(
-                        delay_min
-                    )
-            )
+
+    response_m = (
+        float(
+            response.median()
+        )
+        if not response.empty
+        else None
+    )
+
+
+    response_ratio = (
+        float(
+            ratio.median()
+        )
+        if not ratio.empty
+        else None
+    )
+
+
+    current_date = (
+        current_state.get(
+            "date"
+        )
+    )
+
+
+    impact_date = None
+    impact_from = None
+    impact_to = None
+
+
+    if current_date is not None:
+
+        current_date = pd.to_datetime(
+            current_date
         )
 
-        fecha_hasta = (
-            fecha_corr
-            + pd.Timedelta(
-                days=
-                    round(
-                        delay_max
-                    )
+
+        if delay is not None:
+
+            impact_date = (
+                current_date
+                + pd.Timedelta(
+                    days=
+                        int(
+                            round(
+                                delay
+                            )
+                        )
+                )
             )
-        )
 
-    else:
 
-        fecha_probable = None
-        fecha_desde = None
-        fecha_hasta = None
+        if delay_min is not None:
+
+            impact_from = (
+                current_date
+                + pd.Timedelta(
+                    days=
+                        int(
+                            round(
+                                delay_min
+                            )
+                        )
+                )
+            )
+
+
+        if delay_max is not None:
+
+            impact_to = (
+                current_date
+                + pd.Timedelta(
+                    days=
+                        int(
+                            round(
+                                delay_max
+                            )
+                        )
+                )
+            )
+
 
     return {
-        "estado_corrientes":
-            current,
 
-        "eventos_similares":
-            similares,
+        "delay_days":
+            delay,
 
-        "demora_probable_dias":
-            delay_median,
-
-        "demora_min_dias":
+        "delay_min_days":
             delay_min,
 
-        "demora_max_dias":
+        "delay_max_days":
             delay_max,
 
-        "respuesta_probable_m":
-            response,
+        "response_m":
+            response_m,
 
-        "respuesta_relativa":
-            ratio,
+        "response_ratio":
+            response_ratio,
 
-        "fecha_impacto_probable":
-            fecha_probable,
+        "impact_date":
+            impact_date,
 
-        "fecha_impacto_desde":
-            fecha_desde,
+        "impact_from":
+            impact_from,
 
-        "fecha_impacto_hasta":
-            fecha_hasta,
+        "impact_to":
+            impact_to,
+
+        "similar_events":
+            similar,
     }
 
 
 # ============================================================
-# RESUMEN DE EVENTOS MÁXIMOS
+# CREAR FEATURES HIDROLÓGICAS
+# ============================================================
+
+def crear_features_hidrologicas(
+    dataset,
+    corridor_lags=None,
+):
+
+    if (
+        dataset is None
+        or dataset.empty
+    ):
+
+        return pd.DataFrame()
+
+
+    result = dataset.copy()
+
+
+    result[
+        "datetime"
+    ] = _normalizar_datetime(
+        result[
+            "datetime"
+        ]
+    )
+
+
+    # ========================================================
+    # NIVEL SAN NICOLÁS
+    # ========================================================
+
+    if "nivel" in result.columns:
+
+        nivel = _to_numeric(
+            result[
+                "nivel"
+            ]
+        )
+
+
+        for lag in [
+            1,
+            2,
+            3,
+            5,
+            7,
+            10,
+            14,
+            21,
+            30,
+        ]:
+
+            result[
+                f"nivel_lag_{lag}"
+            ] = nivel.shift(
+                lag
+            )
+
+
+        result[
+            "nivel_diff_1"
+        ] = nivel.diff(
+            1
+        )
+
+
+        result[
+            "nivel_diff_3"
+        ] = nivel.diff(
+            3
+        )
+
+
+        result[
+            "nivel_diff_7"
+        ] = nivel.diff(
+            7
+        )
+
+
+        result[
+            "nivel_mean_7"
+        ] = (
+            nivel
+            .rolling(
+                7,
+                min_periods=2,
+            )
+            .mean()
+        )
+
+
+        result[
+            "nivel_mean_14"
+        ] = (
+            nivel
+            .rolling(
+                14,
+                min_periods=3,
+            )
+            .mean()
+        )
+
+
+        result[
+            "nivel_max_14"
+        ] = (
+            nivel
+            .rolling(
+                14,
+                min_periods=3,
+            )
+            .max()
+        )
+
+
+        result[
+            "nivel_min_14"
+        ] = (
+            nivel
+            .rolling(
+                14,
+                min_periods=3,
+            )
+            .min()
+        )
+
+
+    # ========================================================
+    # NIVELES AGUAS ARRIBA
+    # ========================================================
+
+    for station in UPSTREAM_STATIONS:
+
+        col = LEVEL_COLUMNS[
+            station
+        ]
+
+
+        if col not in result.columns:
+
+            continue
+
+
+        slug = _slug(
+            station
+        )
+
+
+        values = _to_numeric(
+            result[
+                col
+            ]
+        )
+
+
+        result[
+            f"{col}_diff_1"
+        ] = values.diff(
+            1
+        )
+
+
+        result[
+            f"{col}_diff_3"
+        ] = values.diff(
+            3
+        )
+
+
+        result[
+            f"{col}_diff_7"
+        ] = values.diff(
+            7
+        )
+
+
+        result[
+            f"{col}_mean_7"
+        ] = (
+            values
+            .rolling(
+                7,
+                min_periods=2,
+            )
+            .mean()
+        )
+
+
+        result[
+            f"{col}_trend_7"
+        ] = (
+            values
+            - values.shift(
+                7
+            )
+        )
+
+
+        result[
+            f"{col}_max_14"
+        ] = (
+            values
+            .rolling(
+                14,
+                min_periods=3,
+            )
+            .max()
+        )
+
+
+        # ----------------------------------------------------
+        # retardos generales
+        # ----------------------------------------------------
+
+        for lag in [
+            1,
+            3,
+            5,
+            7,
+            10,
+            14,
+            21,
+            30,
+        ]:
+
+            result[
+                f"{col}_lag_{lag}"
+            ] = values.shift(
+                lag
+            )
+
+
+    # ========================================================
+    # LAG APRENDIDO POR TRAMO
+    # ========================================================
+
+    if (
+        corridor_lags is not None
+        and isinstance(
+            corridor_lags,
+            pd.DataFrame,
+        )
+        and not corridor_lags.empty
+    ):
+
+        cumulative = 0
+
+
+        for _, row in (
+            corridor_lags.iterrows()
+        ):
+
+            station = row.get(
+                "upstream"
+            )
+
+
+            lag = _safe_int(
+                row.get(
+                    "lag_days"
+                ),
+                0,
+            )
+
+
+            if (
+                station is None
+                or lag is None
+            ):
+
+                continue
+
+
+            cumulative += max(
+                lag,
+                0,
+            )
+
+
+            if station not in LEVEL_COLUMNS:
+
+                continue
+
+
+            col = LEVEL_COLUMNS[
+                station
+            ]
+
+
+            if col not in result.columns:
+
+                continue
+
+
+            cumulative_lag = int(
+                min(
+                    cumulative,
+                    MAX_LAG_DAYS,
+                )
+            )
+
+
+            result[
+                f"{col}_lag_propagacion"
+            ] = (
+                _to_numeric(
+                    result[
+                        col
+                    ]
+                )
+                .shift(
+                    cumulative_lag
+                )
+            )
+
+
+    # ========================================================
+    # CAUDALES
+    # ========================================================
+
+    for station in STATIONS:
+
+        q_col = FLOW_COLUMNS[
+            station
+        ]
+
+
+        if q_col not in result.columns:
+
+            continue
+
+
+        q = _to_numeric(
+            result[
+                q_col
+            ]
+        )
+
+
+        result[
+            f"{q_col}_diff_1"
+        ] = q.diff(
+            1
+        )
+
+
+        result[
+            f"{q_col}_diff_3"
+        ] = q.diff(
+            3
+        )
+
+
+        result[
+            f"{q_col}_diff_7"
+        ] = q.diff(
+            7
+        )
+
+
+        result[
+            f"{q_col}_mean_3"
+        ] = (
+            q
+            .rolling(
+                3,
+                min_periods=1,
+            )
+            .mean()
+        )
+
+
+        result[
+            f"{q_col}_mean_7"
+        ] = (
+            q
+            .rolling(
+                7,
+                min_periods=2,
+            )
+            .mean()
+        )
+
+
+        result[
+            f"{q_col}_mean_14"
+        ] = (
+            q
+            .rolling(
+                14,
+                min_periods=3,
+            )
+            .mean()
+        )
+
+
+        result[
+            f"{q_col}_trend_7"
+        ] = (
+            q
+            - q.shift(
+                7
+            )
+        )
+
+
+        for lag in [
+            1,
+            3,
+            5,
+            7,
+            10,
+            14,
+            21,
+            30,
+        ]:
+
+            result[
+                f"{q_col}_lag_{lag}"
+            ] = q.shift(
+                lag
+            )
+
+
+    # ========================================================
+    # LLUVIAS
+    # ========================================================
+
+    for station in STATIONS:
+
+        rain_col = RAIN_COLUMNS[
+            station
+        ]
+
+
+        if rain_col not in result.columns:
+
+            continue
+
+
+        rain = (
+            _to_numeric(
+                result[
+                    rain_col
+                ]
+            )
+            .fillna(
+                0.0
+            )
+        )
+
+
+        result[
+            f"{rain_col}_3d"
+        ] = (
+            rain
+            .rolling(
+                3,
+                min_periods=1,
+            )
+            .sum()
+        )
+
+
+        result[
+            f"{rain_col}_7d"
+        ] = (
+            rain
+            .rolling(
+                7,
+                min_periods=1,
+            )
+            .sum()
+        )
+
+
+        result[
+            f"{rain_col}_15d"
+        ] = (
+            rain
+            .rolling(
+                15,
+                min_periods=1,
+            )
+            .sum()
+        )
+
+
+        result[
+            f"{rain_col}_30d"
+        ] = (
+            rain
+            .rolling(
+                30,
+                min_periods=1,
+            )
+            .sum()
+        )
+
+
+    # ========================================================
+    # SEÑAL INTEGRADA AGUAS ARRIBA
+    # ========================================================
+
+    trend_cols = [
+        c
+        for c in result.columns
+        if (
+            c.startswith(
+                "nivel_"
+            )
+            and c.endswith(
+                "_diff_7"
+            )
+        )
+    ]
+
+
+    if trend_cols:
+
+        result[
+            "upstream_level_signal"
+        ] = (
+            result[
+                trend_cols
+            ]
+            .mean(
+                axis=1,
+                skipna=True,
+            )
+        )
+
+
+    flow_trend_cols = [
+        c
+        for c in result.columns
+        if (
+            c.startswith(
+                "q_"
+            )
+            and c.endswith(
+                "_trend_7"
+            )
+        )
+    ]
+
+
+    if flow_trend_cols:
+
+        normalized = []
+
+
+        for col in flow_trend_cols:
+
+            q_base_col = (
+                col.replace(
+                    "_trend_7",
+                    "",
+                )
+            )
+
+
+            if q_base_col not in result.columns:
+
+                continue
+
+
+            ratio = (
+                _to_numeric(
+                    result[
+                        col
+                    ]
+                )
+                /
+                _to_numeric(
+                    result[
+                        q_base_col
+                    ]
+                )
+                .replace(
+                    0,
+                    np.nan,
+                )
+            )
+
+
+            normalized.append(
+                ratio
+            )
+
+
+        if normalized:
+
+            result[
+                "upstream_flow_signal"
+            ] = pd.concat(
+                normalized,
+                axis=1,
+            ).mean(
+                axis=1,
+                skipna=True,
+            )
+
+
+    rain_15_cols = [
+        f"{RAIN_COLUMNS[s]}_15d"
+        for s in STATIONS
+        if (
+            f"{RAIN_COLUMNS[s]}_15d"
+            in result.columns
+        )
+    ]
+
+
+    if rain_15_cols:
+
+        result[
+            "corridor_rain_15d"
+        ] = (
+            result[
+                rain_15_cols
+            ]
+            .mean(
+                axis=1,
+                skipna=True,
+            )
+        )
+
+
+        result[
+            "corridor_rain_15d_max"
+        ] = (
+            result[
+                rain_15_cols
+            ]
+            .max(
+                axis=1,
+                skipna=True,
+            )
+        )
+
+
+    return result
+
+
+# ============================================================
+# RESUMEN DE MÁXIMOS
 # ============================================================
 
 def resumen_eventos_maximos(
     events,
-    top_n=10,
+    n=10,
 ):
 
     if (
         events is None
-        or not isinstance(
-            events,
-            pd.DataFrame,
-        )
         or events.empty
     ):
 
         return pd.DataFrame()
 
-    columns = [
+
+    cols = [
+
         "fecha_max_corrientes",
         "max_corrientes_m",
+        "crecida_corrientes_m",
         "fecha_max_san_nicolas",
         "max_san_nicolas_m",
-        "lag_real_dias",
-        "crecida_corrientes_m",
         "respuesta_san_nicolas_m",
-        "respuesta_relativa",
+        "lag_real_dias",
+
     ]
 
-    available = [
+
+    cols = [
         c
-        for c in columns
+        for c in cols
         if c in events.columns
     ]
+
 
     return (
         events
@@ -3125,10 +4361,10 @@ def resumen_eventos_maximos(
         )
         .head(
             int(
-                top_n
+                n
             )
         )[
-            available
+            cols
         ]
         .reset_index(
             drop=True
@@ -3137,373 +4373,41 @@ def resumen_eventos_maximos(
 
 
 # ============================================================
-# FEATURES HIDROLÓGICAS
-# ============================================================
-
-def crear_features_hidrologicas(
-    san_nicolas,
-    upstream_history=None,
-    exog_history=None,
-):
-
-    sn = preparar_san_nicolas(
-        san_nicolas
-    )
-
-    if sn.empty:
-
-        return pd.DataFrame()
-
-    x = sn.rename(
-        columns={
-            "nivel_san_nicolas":
-                "nivel"
-        }
-    )
-
-    corr = preparar_corrientes(
-        upstream_history
-    )
-
-    if not corr.empty:
-
-        x = x.merge(
-            corr,
-            on="datetime",
-            how="left",
-        )
-
-    exog = preparar_exogenas(
-        exog_history
-    )
-
-    if not exog.empty:
-
-        x = x.merge(
-            exog,
-            on="datetime",
-            how="left",
-        )
-
-    x = x.sort_values(
-        "datetime"
-    ).reset_index(
-        drop=True
-    )
-
-    # --------------------------------------------------------
-    # SAN NICOLÁS
-    # --------------------------------------------------------
-
-    for lag in [
-        1,
-        2,
-        3,
-        5,
-        7,
-        10,
-        14,
-    ]:
-
-        x[
-            f"nivel_sn_lag{lag}"
-        ] = (
-            x[
-                "nivel"
-            ].shift(
-                lag
-            )
-        )
-
-    x[
-        "nivel_sn_diff1"
-    ] = (
-        x[
-            "nivel"
-        ].diff()
-    )
-
-    x[
-        "nivel_sn_diff3"
-    ] = (
-        x[
-            "nivel"
-        ]
-        - x[
-            "nivel"
-        ].shift(3)
-    )
-
-    x[
-        "nivel_sn_media7"
-    ] = (
-        x[
-            "nivel"
-        ]
-        .rolling(
-            7
-        )
-        .mean()
-    )
-
-    # --------------------------------------------------------
-    # CORRIENTES
-    # --------------------------------------------------------
-
-    if (
-        "nivel_corrientes"
-        in x.columns
-    ):
-
-        for lag in [
-            1,
-            3,
-            5,
-            7,
-            10,
-            14,
-        ]:
-
-            x[
-                f"nivel_corrientes_lag{lag}"
-            ] = (
-                x[
-                    "nivel_corrientes"
-                ].shift(
-                    lag
-                )
-            )
-
-        x[
-            "corrientes_diff1"
-        ] = (
-            x[
-                "nivel_corrientes"
-            ].diff()
-        )
-
-        x[
-            "corrientes_diff3"
-        ] = (
-            x[
-                "nivel_corrientes"
-            ]
-            - x[
-                "nivel_corrientes"
-            ].shift(3)
-        )
-
-        x[
-            "corrientes_diff7"
-        ] = (
-            x[
-                "nivel_corrientes"
-            ]
-            - x[
-                "nivel_corrientes"
-            ].shift(7)
-        )
-
-        x[
-            "corrientes_max7"
-        ] = (
-            x[
-                "nivel_corrientes"
-            ]
-            .rolling(
-                7
-            )
-            .max()
-        )
-
-        x[
-            "corrientes_max15"
-        ] = (
-            x[
-                "nivel_corrientes"
-            ]
-            .rolling(
-                15
-            )
-            .max()
-        )
-
-    # --------------------------------------------------------
-    # CAUDAL
-    # --------------------------------------------------------
-
-    if (
-        "caudal_m3s"
-        in x.columns
-    ):
-
-        x[
-            "caudal_diff1"
-        ] = (
-            x[
-                "caudal_m3s"
-            ].diff()
-        )
-
-        x[
-            "caudal_diff3"
-        ] = (
-            x[
-                "caudal_m3s"
-            ]
-            - x[
-                "caudal_m3s"
-            ].shift(3)
-        )
-
-        x[
-            "caudal_media7"
-        ] = (
-            x[
-                "caudal_m3s"
-            ]
-            .rolling(
-                7
-            )
-            .mean()
-        )
-
-    # --------------------------------------------------------
-    # LLUVIA
-    # --------------------------------------------------------
-
-    if (
-        "precip_mm"
-        in x.columns
-    ):
-
-        x[
-            "lluvia_3d"
-        ] = (
-            x[
-                "precip_mm"
-            ]
-            .rolling(
-                3
-            )
-            .sum()
-        )
-
-        x[
-            "lluvia_7d"
-        ] = (
-            x[
-                "precip_mm"
-            ]
-            .rolling(
-                7
-            )
-            .sum()
-        )
-
-        x[
-            "lluvia_15d"
-        ] = (
-            x[
-                "precip_mm"
-            ]
-            .rolling(
-                15
-            )
-            .sum()
-        )
-
-    return x
-
-
-# ============================================================
-# ANÁLISIS PRINCIPAL
+# FUNCIÓN PRINCIPAL
 # ============================================================
 
 def analizar_corrientes_san_nicolas(
-    san_nicolas,
-    upstream_history,
+    df,
+    upstream_history=None,
     exog_history=None,
-    max_lag=
-        DEFAULT_MAX_LAG,
     usar_historial_completo=True,
 ):
 
     # ========================================================
-    # 1. SAN NICOLÁS
+    # DATASET
     # ========================================================
 
-    sn_input = preparar_san_nicolas(
-        san_nicolas
+    dataset = (
+        construir_dataset_hidrologico(
+
+            df,
+
+            upstream_history=
+                upstream_history,
+
+            exog_history=
+                exog_history,
+
+            usar_historial_completo=
+                usar_historial_completo,
+        )
     )
 
-    sn = sn_input.copy()
 
-    history_source = (
-        "periodo_recibido"
-    )
-
-    # --------------------------------------------------------
-    # Intentar historial completo INA serie 36.
-    # --------------------------------------------------------
-
-    if (
-        usar_historial_completo
-        and not sn_input.empty
-    ):
-
-        try:
-
-            end_date = (
-                sn_input[
-                    "datetime"
-                ].max()
-            )
-
-            sn_full = (
-                get_san_nicolas_full_history(
-                    str(
-                        end_date.date()
-                    )
-                )
-            )
-
-            if (
-                isinstance(
-                    sn_full,
-                    pd.DataFrame,
-                )
-                and not sn_full.empty
-            ):
-
-                sn = sn_full
-
-                history_source = (
-                    "INA_A5_serie_36_completo"
-                )
-
-        except Exception:
-
-            pass
-
-    # ========================================================
-    # 2. CORRIENTES
-    # ========================================================
-
-    corr = preparar_corrientes(
-        upstream_history
-    )
-
-    # ========================================================
-    # SIN DATOS
-    # ========================================================
-
-    if (
-        sn.empty
-        or corr.empty
-    ):
+    if dataset.empty:
 
         return {
+
             "version":
                 VERSION,
 
@@ -3511,20 +4415,10 @@ def analizar_corrientes_san_nicolas(
                 "sin_datos",
 
             "history_source":
-                history_source,
+                None,
 
-            "san_nicolas_records":
-                len(
-                    sn
-                ),
-
-            "corrientes_records":
-                len(
-                    corr
-                ),
-
-            "lag":
-                {},
+            "features":
+                pd.DataFrame(),
 
             "events":
                 pd.DataFrame(),
@@ -3532,90 +4426,152 @@ def analizar_corrientes_san_nicolas(
             "statistics":
                 {},
 
-            "similar_events":
+            "lag":
+                {},
+
+            "corridor_lags":
+                pd.DataFrame(),
+
+            "current_state":
                 pd.DataFrame(),
 
             "current_estimate":
                 {},
 
-            "features":
+            "similar_events":
                 pd.DataFrame(),
         }
 
+
     # ========================================================
-    # 3. RANGO HISTÓRICO COINCIDENTE
+    # HISTORIAL
     # ========================================================
 
-    overlap_start = max(
-        sn[
+    valid_sn = dataset[
+        [
+            "datetime",
+            "nivel",
+        ]
+    ].dropna()
+
+
+    history_start = (
+        valid_sn[
             "datetime"
-        ].min(),
-        corr[
-            "datetime"
-        ].min(),
+        ].min()
+        if not valid_sn.empty
+        else None
     )
 
-    overlap_end = min(
-        sn[
+
+    history_end = (
+        valid_sn[
             "datetime"
-        ].max(),
-        corr[
-            "datetime"
-        ].max(),
+        ].max()
+        if not valid_sn.empty
+        else None
     )
 
+
+    historical_years = None
+
+
+    if (
+        history_start is not None
+        and history_end is not None
+    ):
+
+        historical_years = (
+            (
+                history_end
+                - history_start
+            ).days
+            / 365.25
+        )
+
+
     # ========================================================
-    # 4. LAG GLOBAL
+    # RETARDOS POR TRAMO
+    # ========================================================
+
+    corridor_lags = (
+        calcular_retardos_corredor(
+            dataset
+        )
+    )
+
+
+    # ========================================================
+    # CORRIENTES -> SAN NICOLÁS
     # ========================================================
 
     lag = (
         calcular_lag_corrientes_san_nicolas(
-            san_nicolas=
-                sn,
-            upstream_history=
-                corr,
-            max_lag=
-                max_lag,
+            dataset
         )
     )
+
 
     expected_lag = lag.get(
         "best_lag_days"
     )
 
+
+    if expected_lag is None:
+
+        # ----------------------------------------------------
+        # intentar sumar retardos por tramo
+        # ----------------------------------------------------
+
+        valid_segment_lags = (
+            _to_numeric(
+                corridor_lags[
+                    "lag_days"
+                ]
+            )
+            .dropna()
+            if (
+                not corridor_lags.empty
+                and "lag_days"
+                in corridor_lags.columns
+            )
+            else pd.Series(
+                dtype=float
+            )
+        )
+
+
+        if not valid_segment_lags.empty:
+
+            expected_lag = int(
+                min(
+                    valid_segment_lags.sum(),
+                    MAX_LAG_DAYS,
+                )
+            )
+
+        else:
+
+            expected_lag = 15
+
+
     # ========================================================
-    # 5. EVENTOS
+    # EVENTOS HISTÓRICOS
     # ========================================================
 
     events = (
         construir_eventos_corrientes_san_nicolas(
-            san_nicolas=
-                sn,
-            upstream_history=
-                corr,
+
+            dataset,
+
             expected_lag=
                 expected_lag,
         )
     )
 
-    # ========================================================
-    # 6. CAUDAL + LLUVIA
-    # ========================================================
-
-    if (
-        not events.empty
-        and exog_history is not None
-    ):
-
-        events = (
-            enriquecer_eventos_con_exogenas(
-                events,
-                exog_history,
-            )
-        )
 
     # ========================================================
-    # 7. ESTADÍSTICAS
+    # ESTADÍSTICAS
     # ========================================================
 
     statistics = (
@@ -3624,56 +4580,76 @@ def analizar_corrientes_san_nicolas(
         )
     )
 
+
     # ========================================================
-    # 8. ESTADO ACTUAL + DEMORA
+    # ESTADO ACTUAL
     # ========================================================
 
-    current_estimate = {}
-
-    similar_events = pd.DataFrame()
-
-    if not events.empty:
-
-        current_estimate = (
-            estimar_demora_actual(
-                events=
-                    events,
-                upstream_history=
-                    corr,
-                exog_history=
-                    exog_history,
-                top_n=12,
-            )
+    current_state = (
+        obtener_estado_actual_corredor(
+            dataset
         )
+    )
 
-        candidate = current_estimate.get(
-            "eventos_similares"
+
+    current_corrientes = (
+        obtener_estado_actual_corrientes(
+            dataset
         )
+    )
 
-        if isinstance(
-            candidate,
-            pd.DataFrame,
-        ):
-
-            similar_events = candidate
 
     # ========================================================
-    # 9. FEATURES
+    # ESTIMACIÓN ACTUAL
+    # ========================================================
+
+    current_estimate = (
+        estimar_demora_actual(
+
+            events,
+
+            current_corrientes,
+        )
+    )
+
+
+    similar_events = (
+        current_estimate.get(
+            "similar_events",
+            pd.DataFrame(),
+        )
+    )
+
+
+    # ========================================================
+    # FEATURES
     # ========================================================
 
     features = (
         crear_features_hidrologicas(
-            san_nicolas=
-                sn,
-            upstream_history=
-                corr,
-            exog_history=
-                exog_history,
+
+            dataset,
+
+            corridor_lags=
+                corridor_lags,
         )
     )
 
+
     # ========================================================
-    # 10. SALIDA COMPATIBLE + NUEVA
+    # TOP EVENTOS
+    # ========================================================
+
+    top_events = (
+        resumen_eventos_maximos(
+            events,
+            10,
+        )
+    )
+
+
+    # ========================================================
+    # COMPATIBILIDAD CON APP ANTERIOR
     # ========================================================
 
     return {
@@ -3685,43 +4661,68 @@ def analizar_corrientes_san_nicolas(
             "ok",
 
         "history_source":
-            history_source,
+            (
+                "INA A5 serie 36 + "
+                "estaciones aguas arriba + "
+                "lluvias + caudales"
+            ),
 
         "historical_start":
-            overlap_start,
+            history_start,
 
         "historical_end":
-            overlap_end,
+            history_end,
 
         "historical_years":
-            (
-                (
-                    overlap_end
-                    - overlap_start
-                ).days
-                / 365.25
-            ),
+            historical_years,
 
         "san_nicolas_records":
             int(
-                len(
-                    sn
-                )
-            ),
+                dataset[
+                    "nivel"
+                ]
+                .notna()
+                .sum()
+            )
+            if "nivel"
+            in dataset.columns
+            else 0,
 
         "corrientes_records":
             int(
-                len(
-                    corr
-                )
-            ),
+                dataset[
+                    "nivel_corrientes"
+                ]
+                .notna()
+                .sum()
+            )
+            if "nivel_corrientes"
+            in dataset.columns
+            else 0,
 
         # ----------------------------------------------------
-        # Compatibilidad
+        # Datasets
+        # ----------------------------------------------------
+
+        "dataset":
+            dataset,
+
+        "features":
+            features,
+
+        # ----------------------------------------------------
+        # Retardos
         # ----------------------------------------------------
 
         "lag":
             lag,
+
+        "corridor_lags":
+            corridor_lags,
+
+        # ----------------------------------------------------
+        # Eventos
+        # ----------------------------------------------------
 
         "events":
             events,
@@ -3730,17 +4731,17 @@ def analizar_corrientes_san_nicolas(
             statistics,
 
         "top_events":
-            resumen_eventos_maximos(
-                events,
-                top_n=15,
-            ),
-
-        "features":
-            features,
+            top_events,
 
         # ----------------------------------------------------
-        # Nuevos resultados V11.9.6
+        # Estado actual
         # ----------------------------------------------------
+
+        "current_state":
+            current_state,
+
+        "current_corrientes":
+            current_corrientes,
 
         "current_estimate":
             current_estimate,
@@ -3748,42 +4749,328 @@ def analizar_corrientes_san_nicolas(
         "similar_events":
             similar_events,
 
+        # ----------------------------------------------------
+        # Compatibilidad app V11.9.x
+        # ----------------------------------------------------
+
         "demora_probable_dias":
             current_estimate.get(
-                "demora_probable_dias",
-                np.nan,
+                "delay_days"
             ),
 
         "demora_min_dias":
             current_estimate.get(
-                "demora_min_dias",
-                np.nan,
+                "delay_min_days"
             ),
 
         "demora_max_dias":
             current_estimate.get(
-                "demora_max_dias",
-                np.nan,
+                "delay_max_days"
             ),
 
         "respuesta_probable_m":
             current_estimate.get(
-                "respuesta_probable_m",
-                np.nan,
+                "response_m"
+            ),
+
+        "respuesta_relativa":
+            current_estimate.get(
+                "response_ratio"
             ),
 
         "fecha_impacto_probable":
             current_estimate.get(
-                "fecha_impacto_probable"
+                "impact_date"
             ),
 
         "fecha_impacto_desde":
             current_estimate.get(
-                "fecha_impacto_desde"
+                "impact_from"
             ),
 
         "fecha_impacto_hasta":
             current_estimate.get(
-                "fecha_impacto_hasta"
+                "impact_to"
+            ),
+    }
+
+
+# ============================================================
+# ALIAS GENERAL
+# ============================================================
+
+def analyze_hydrology(
+    df,
+    upstream_history=None,
+    exog_history=None,
+    usar_historial_completo=True,
+):
+
+    return analizar_corrientes_san_nicolas(
+
+        df,
+
+        upstream_history=
+            upstream_history,
+
+        exog_history=
+            exog_history,
+
+        usar_historial_completo=
+            usar_historial_completo,
+    )
+
+
+# ============================================================
+# DIAGNÓSTICO
+# ============================================================
+
+def diagnostic(
+    df,
+    upstream_history=None,
+    exog_history=None,
+):
+
+    try:
+
+        result = (
+            analizar_corrientes_san_nicolas(
+
+                df,
+
+                upstream_history=
+                    upstream_history,
+
+                exog_history=
+                    exog_history,
+
+                usar_historial_completo=
+                    True,
+            )
+        )
+
+    except Exception as exc:
+
+        return {
+
+            "version":
+                VERSION,
+
+            "status":
+                "error",
+
+            "error":
+                str(
+                    exc
+                ),
+        }
+
+
+    corridor_lags = result.get(
+        "corridor_lags",
+        pd.DataFrame(),
+    )
+
+
+    lag_rows = []
+
+
+    if isinstance(
+        corridor_lags,
+        pd.DataFrame,
+    ):
+
+        for _, row in (
+            corridor_lags.iterrows()
+        ):
+
+            lag_rows.append(
+                {
+                    "upstream":
+                        row.get(
+                            "upstream"
+                        ),
+
+                    "downstream":
+                        row.get(
+                            "downstream"
+                        ),
+
+                    "lag_days":
+                        row.get(
+                            "lag_days"
+                        ),
+
+                    "correlation":
+                        row.get(
+                            "correlation"
+                        ),
+
+                    "samples":
+                        row.get(
+                            "samples"
+                        ),
+                }
+            )
+
+
+    stats = result.get(
+        "statistics",
+        {},
+    )
+
+
+    current = result.get(
+        "current_state",
+        pd.DataFrame(),
+    )
+
+
+    current_rows = []
+
+
+    if isinstance(
+        current,
+        pd.DataFrame,
+    ):
+
+        current_rows = (
+            current
+            .astype(
+                str
+            )
+            .to_dict(
+                orient="records"
+            )
+        )
+
+
+    return {
+
+        "version":
+            VERSION,
+
+        "status":
+            result.get(
+                "status"
+            ),
+
+        "history_source":
+            result.get(
+                "history_source"
+            ),
+
+        "historical_start":
+            str(
+                result.get(
+                    "historical_start"
+                )
+            ),
+
+        "historical_end":
+            str(
+                result.get(
+                    "historical_end"
+                )
+            ),
+
+        "historical_years":
+            result.get(
+                "historical_years"
+            ),
+
+        "san_nicolas_records":
+            result.get(
+                "san_nicolas_records"
+            ),
+
+        "corrientes_records":
+            result.get(
+                "corrientes_records"
+            ),
+
+        "corridor_lags":
+            lag_rows,
+
+        "corrientes_san_nicolas_lag":
+            result.get(
+                "lag",
+                {},
+            ).get(
+                "best_lag_days"
+            ),
+
+        "corrientes_san_nicolas_correlation":
+            result.get(
+                "lag",
+                {},
+            ).get(
+                "correlation"
+            ),
+
+        "event_count":
+            stats.get(
+                "event_count"
+            ),
+
+        "median_event_delay":
+            stats.get(
+                "median_lag_days"
+            ),
+
+        "median_response_m":
+            stats.get(
+                "median_response_m"
+            ),
+
+        "demora_probable_dias":
+            result.get(
+                "demora_probable_dias"
+            ),
+
+        "demora_min_dias":
+            result.get(
+                "demora_min_dias"
+            ),
+
+        "demora_max_dias":
+            result.get(
+                "demora_max_dias"
+            ),
+
+        "respuesta_probable_m":
+            result.get(
+                "respuesta_probable_m"
+            ),
+
+        "fecha_impacto_probable":
+            str(
+                result.get(
+                    "fecha_impacto_probable"
+                )
+            ),
+
+        "current_state":
+            current_rows,
+
+        "feature_count":
+            (
+                len(
+                    result[
+                        "features"
+                    ].columns
+                )
+                if (
+                    isinstance(
+                        result.get(
+                            "features"
+                        ),
+                        pd.DataFrame,
+                    )
+                    and not result[
+                        "features"
+                    ].empty
+                )
+                else 0
             ),
     }
