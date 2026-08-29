@@ -1,30 +1,71 @@
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # src/upstream.py
-# V11.9.1 COMPLETO
+# V11.10.1 COMPLETO
 #
-# CAMBIOS V11.9.1
+# NIVELES AGUAS ARRIBA - INA A5
+#
+# Objetivos:
 # ------------------------------------------------------------
-# - Corrige conflicto de timezone:
-#       datetime64[us]
-#       vs
-#       datetime64[us, UTC]
+# 1. Detectar automáticamente series de NIVEL (var_id = 2)
+#    para las estaciones del corredor Paraná.
 #
-# - Todas las fechas entregadas por este módulo quedan
-#   normalizadas SIN timezone.
+# 2. Validar cada serie antes de utilizarla.
 #
-# - Mantiene:
-#       catálogo A5 GeoJSON
-#       detección automática series
-#       validación por getObservaciones
-#       historial ampliado Corrientes
-#       diagnóstico por estación
+# 3. Evitar coincidencias falsas por nombre:
+#    - estaciones meteorológicas
+#    - INTA
+#    - aeropuertos
+#    - escuelas
+#    - estaciones que no correspondan al corredor
+#
+# 4. Preferir estaciones asociadas al río Paraná.
+#
+# 5. Consultar observaciones reales INA A5 antes de aceptar
+#    una serie.
+#
+# 6. Mantener fechas timezone-naive para evitar errores:
+#    datetime64[us] vs datetime64[us, UTC]
+#
+# 7. Mantener historial completo de Corrientes para análisis
+#    histórico Corrientes -> San Nicolás.
+#
+# 8. Entregar diagnóstico:
+#    estación
+#    series_id
+#    nombre
+#    río
+#    registros
+#    última fecha
+#    último nivel
+#    estado
+#
+# API PRINCIPAL:
+# ------------------------------------------------------------
+# get_upstream_history(start, end)
+#
+# retorna:
+#     dataframe, metadata
+#
+# COLUMNAS:
+#     datetime
+#     nivel_corrientes
+#     nivel_goya
+#     nivel_la_paz
+#     nivel_parana
+#     nivel_diamante
+#     nivel_rosario
+#     nivel_villa_constitucion
+#
+# IMPORTANTE:
+# San Nicolás continúa siendo serie 36 y debe seguir
+# obteniéndose mediante src/ina.py.
 # ============================================================
 
 
-import unicodedata
-
 from functools import lru_cache
+import re
+import unicodedata
 
 import numpy as np
 import pandas as pd
@@ -32,12 +73,17 @@ import requests
 
 
 # ============================================================
-# CONFIGURACIÓN INA
+# VERSIÓN
 # ============================================================
 
-A5_BASE_URL = (
-    "https://alerta.ina.gob.ar/a5"
-)
+VERSION = "V11.10.1"
+
+
+# ============================================================
+# INA A5
+# ============================================================
+
+A5_BASE_URL = "https://alerta.ina.gob.ar/a5"
 
 A5_SERIES_GEOJSON_URL = (
     A5_BASE_URL
@@ -58,131 +104,173 @@ VAR_ID_NIVEL = 2
 
 
 # ============================================================
-# HISTORIAL CORRIENTES
-# ============================================================
-
-DEFAULT_HISTORY_FLOOR = "1900-01-01"
-
-
-# ============================================================
-# BLOQUES HISTÓRICOS
-# ============================================================
-
-HISTORY_BLOCK_YEARS = 5
-
-
-# ============================================================
-# HTTP
+# CONFIGURACIÓN
 # ============================================================
 
 REQUEST_TIMEOUT = 45
+
+DEFAULT_HISTORY_FLOOR = "1900-01-01"
+
+HISTORY_BLOCK_YEARS = 5
+
+VALIDATION_DAYS = 180
+
+MIN_VALID_OBSERVATIONS = 3
+
+LEVEL_MIN_VALID = -5.0
+
+LEVEL_MAX_VALID = 20.0
 
 
 # ============================================================
 # ESTACIONES
 # ============================================================
 
-STATIONS = {
-    "Corrientes": {
-        "column":
-            "nivel_corrientes",
+STATIONS = [
+    "Corrientes",
+    "Goya",
+    "La Paz",
+    "Paraná",
+    "Diamante",
+    "Rosario",
+    "Villa Constitución",
+]
 
-        "aliases": [
-            "Corrientes",
-        ],
-    },
 
-    "Goya": {
-        "column":
-            "nivel_goya",
+# ============================================================
+# COLUMNAS
+# ============================================================
 
-        "aliases": [
-            "Goya",
-        ],
-    },
+STATION_COLUMNS = {
 
-    "La Paz": {
-        "column":
-            "nivel_la_paz",
+    "Corrientes":
+        "nivel_corrientes",
 
-        "aliases": [
-            "La Paz",
-            "La Paz Entre Rios",
-            "La Paz Entre Ríos",
-        ],
-    },
+    "Goya":
+        "nivel_goya",
 
-    "Paraná": {
-        "column":
-            "nivel_parana",
+    "La Paz":
+        "nivel_la_paz",
 
-        "aliases": [
-            "Paraná",
-            "Parana",
-        ],
-    },
+    "Paraná":
+        "nivel_parana",
 
-    "Diamante": {
-        "column":
-            "nivel_diamante",
+    "Diamante":
+        "nivel_diamante",
 
-        "aliases": [
-            "Diamante",
-        ],
-    },
+    "Rosario":
+        "nivel_rosario",
 
-    "Rosario": {
-        "column":
-            "nivel_rosario",
-
-        "aliases": [
-            "Rosario",
-        ],
-    },
-
-    "Villa Constitución": {
-        "column":
-            "nivel_villa_constitucion",
-
-        "aliases": [
-            "Villa Constitución",
-            "Villa Constitucion",
-        ],
-    },
+    "Villa Constitución":
+        "nivel_villa_constitucion",
 }
 
 
 # ============================================================
-# SESIÓN HTTP
+# ALIAS
 # ============================================================
 
-SESSION = requests.Session()
+STATION_ALIASES = {
 
-SESSION.headers.update(
-    {
-        "User-Agent":
-            "Parana-San-Nicolas-Hydrology/11.9.1",
+    "Corrientes": [
+        "corrientes",
+        "puerto corrientes",
+    ],
 
-        "Accept":
-            "application/json",
-    }
-)
+    "Goya": [
+        "goya",
+        "puerto goya",
+    ],
+
+    "La Paz": [
+        "la paz",
+        "puerto la paz",
+    ],
+
+    "Paraná": [
+        "parana",
+        "paraná",
+        "puerto parana",
+        "puerto paraná",
+    ],
+
+    "Diamante": [
+        "diamante",
+        "puerto diamante",
+    ],
+
+    "Rosario": [
+        "rosario",
+        "puerto rosario",
+    ],
+
+    "Villa Constitución": [
+        "villa constitucion",
+        "villa constitución",
+        "v constitucion",
+        "v. constitucion",
+        "puerto villa constitucion",
+        "puerto villa constitución",
+    ],
+}
+
+
+# ============================================================
+# TÉRMINOS NO DESEADOS
+# ============================================================
+
+BAD_NAME_TERMS = [
+    "meteorologica",
+    "meteorologico",
+    "agrometeorologica",
+    "aeropuerto",
+    "aerodromo",
+    "inta",
+    "escuela",
+    "pluviometrica",
+    "precipitacion",
+    "lluvia",
+    "temperatura",
+]
+
+
+# ============================================================
+# CURSOS SECUNDARIOS / OTROS RÍOS
+#
+# No significa que esas estaciones sean inválidas en INA.
+# Significa que no deben utilizarse como nivel del Paraná
+# troncal para este modelo.
+# ============================================================
+
+NON_PARANA_TERMS = [
+    "arroyo",
+    "canal",
+    "riacho",
+    "laguna",
+    "salado",
+    "carcarana",
+    "carcaraña",
+    "uruguay",
+    "paraguay",
+    "bermejo",
+    "pilcomayo",
+    "iguazu",
+    "iguazú",
+]
 
 
 # ============================================================
 # UTILIDADES
 # ============================================================
 
-def normalizar_texto(
-    value,
-):
+def _normalize_text(value):
 
     if value is None:
         return ""
 
     text = str(
         value
-    ).strip()
+    ).strip().lower()
 
     text = unicodedata.normalize(
         "NFD",
@@ -190,56 +278,51 @@ def normalizar_texto(
     )
 
     text = "".join(
-        char
-        for char in text
+        ch
+        for ch in text
         if unicodedata.category(
-            char
+            ch
         ) != "Mn"
     )
 
-    text = (
-        text
-        .lower()
-        .replace("–", "-")
-        .replace("—", "-")
-        .replace("_", " ")
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
     )
 
-    text = " ".join(
-        text.split()
-    )
-
-    return text
+    return text.strip()
 
 
-def normalizar_fecha(
+def _safe_float(
     value,
-):
-
-    value = pd.to_datetime(
-        value,
-        errors="coerce",
-    )
-
-    if pd.isna(
-        value
-    ):
-        return None
-
-    return value.strftime(
-        "%Y-%m-%d"
-    )
-
-
-def _safe_int(
-    value,
-    default=None,
+    default=np.nan,
 ):
 
     try:
 
-        if value is None:
-            return default
+        value = float(
+            value
+        )
+
+        if np.isfinite(
+            value
+        ):
+
+            return value
+
+    except Exception:
+        pass
+
+    return default
+
+
+def _safe_int(
+    value,
+    default=0,
+):
+
+    try:
 
         return int(
             float(
@@ -252,118 +335,97 @@ def _safe_int(
         return default
 
 
-def _safe_float(
-    value,
-    default=np.nan,
-):
+def _normalize_date(value):
 
-    try:
+    dt = pd.to_datetime(
+        value,
+        errors="coerce",
+    )
 
-        result = float(
-            value
+    if pd.isna(dt):
+
+        raise ValueError(
+            f"Fecha inválida: {value}"
         )
 
-        if np.isfinite(
-            result
-        ):
-            return result
-
-    except Exception:
-        pass
-
-    return default
+    return dt.strftime(
+        "%Y-%m-%d"
+    )
 
 
-def _safe_datetime(
-    value,
-):
+def _to_naive_datetime_series(series):
 
-    result = pd.to_datetime(
+    return (
+        pd.to_datetime(
+            series,
+            errors="coerce",
+            utc=True,
+        )
+        .dt
+        .tz_localize(None)
+    )
+
+
+def _safe_timestamp_naive(value):
+
+    dt = pd.to_datetime(
         value,
         errors="coerce",
         utc=True,
     )
 
     if pd.isna(
-        result
+        dt
     ):
+
         return pd.NaT
 
-    return result
+    try:
 
+        return dt.tz_localize(
+            None
+        )
 
-def _to_naive_datetime_series(
-    series,
-):
+    except Exception:
 
-    # --------------------------------------------------------
-    # CONVERSIÓN UNIFICADA
-    #
-    # Siempre:
-    # 1. interpreta la fecha
-    # 2. normaliza temporalmente a UTC
-    # 3. elimina timezone
-    #
-    # Resultado:
-    # datetime64[ns]
-    # --------------------------------------------------------
+        try:
 
-    return pd.to_datetime(
-        series,
-        errors="coerce",
-        utc=True,
-    ).dt.tz_localize(
-        None
-    )
+            return dt.tz_convert(
+                None
+            )
+
+        except Exception:
+
+            return dt
 
 
 # ============================================================
-# CATÁLOGO GEOJSON
+# CATÁLOGO INA A5
 # ============================================================
 
-@lru_cache(
-    maxsize=1
-)
+@lru_cache(maxsize=1)
 def descargar_catalogo_geojson():
 
-    response = SESSION.get(
+    response = requests.get(
+
         A5_SERIES_GEOJSON_URL,
+
         params={
             "format":
-                "geojson",
+                "geojson"
         },
-        timeout=
-            REQUEST_TIMEOUT,
+
+        timeout=REQUEST_TIMEOUT,
     )
 
     response.raise_for_status()
 
-    data = response.json()
+    payload = response.json()
 
-    if not isinstance(
-        data,
-        dict,
-    ):
-
-        raise ValueError(
-            "El catálogo INA no devolvió "
-            "un objeto GeoJSON válido."
-        )
-
-    features = data.get(
+    features = payload.get(
         "features",
-        [],
+        []
     )
-
-    if not isinstance(
-        features,
-        list,
-    ):
-
-        raise ValueError(
-            "El catálogo INA no contiene "
-            "la lista 'features'."
-        )
 
     rows = []
 
@@ -377,7 +439,7 @@ def descargar_catalogo_geojson():
 
         properties = feature.get(
             "properties",
-            {},
+            {}
         )
 
         if not isinstance(
@@ -386,52 +448,157 @@ def descargar_catalogo_geojson():
         ):
             continue
 
-        row = properties.copy()
-
-        if row.get(
-            "series_id"
-        ) is None:
-
-            row[
-                "series_id"
-            ] = feature.get(
-                "id"
-            )
-
         geometry = feature.get(
             "geometry",
-            {},
+            {}
         )
+
+        coordinates = []
 
         if isinstance(
             geometry,
             dict,
         ):
 
-            coordinates = geometry.get(
-                "coordinates"
+            coordinates = (
+                geometry.get(
+                    "coordinates",
+                    []
+                )
+                or []
             )
 
-            if (
-                isinstance(
-                    coordinates,
-                    list,
-                )
-                and len(
-                    coordinates
-                ) >= 2
-            ):
+        longitude = np.nan
+        latitude = np.nan
 
-                row[
-                    "longitude"
-                ] = coordinates[0]
+        if (
+            isinstance(
+                coordinates,
+                list,
+            )
+            and len(
+                coordinates
+            ) >= 2
+        ):
 
-                row[
-                    "latitude"
-                ] = coordinates[1]
+            longitude = _safe_float(
+                coordinates[0]
+            )
+
+            latitude = _safe_float(
+                coordinates[1]
+            )
 
         rows.append(
-            row
+            {
+                "id":
+                    properties.get(
+                        "id"
+                    ),
+
+                "series_id":
+                    _safe_int(
+                        properties.get(
+                            "series_id"
+                        ),
+                        0,
+                    ),
+
+                "nombre":
+                    properties.get(
+                        "nombre"
+                    ),
+
+                "estacion_id":
+                    properties.get(
+                        "estacion_id"
+                    ),
+
+                "rio":
+                    properties.get(
+                        "rio"
+                    ),
+
+                "var_id":
+                    _safe_int(
+                        properties.get(
+                            "var_id"
+                        ),
+                        0,
+                    ),
+
+                "proc_id":
+                    _safe_int(
+                        properties.get(
+                            "proc_id"
+                        ),
+                        0,
+                    ),
+
+                "unit_id":
+                    properties.get(
+                        "unit_id"
+                    ),
+
+                "var_nombre":
+                    properties.get(
+                        "var_nombre"
+                    ),
+
+                "GeneralCategory":
+                    properties.get(
+                        "GeneralCategory"
+                    ),
+
+                "timestart":
+                    properties.get(
+                        "timestart"
+                    ),
+
+                "timeend":
+                    properties.get(
+                        "timeend"
+                    ),
+
+                "count":
+                    _safe_int(
+                        properties.get(
+                            "count"
+                        ),
+                        0,
+                    ),
+
+                "forecast_date":
+                    properties.get(
+                        "forecast_date"
+                    ),
+
+                "data_availability":
+                    properties.get(
+                        "data_availability"
+                    ),
+
+                "fuente":
+                    properties.get(
+                        "fuente"
+                    ),
+
+                "id_externo":
+                    properties.get(
+                        "id_externo"
+                    ),
+
+                "public":
+                    properties.get(
+                        "public"
+                    ),
+
+                "longitude":
+                    longitude,
+
+                "latitude":
+                    latitude,
+            }
         )
 
     catalog = pd.DataFrame(
@@ -440,404 +607,339 @@ def descargar_catalogo_geojson():
 
     if catalog.empty:
 
-        raise ValueError(
-            "El catálogo INA está vacío."
+        raise RuntimeError(
+            "El catálogo INA A5 no devolvió series."
         )
-
-    if "series_id" in catalog.columns:
-
-        catalog[
-            "series_id"
-        ] = pd.to_numeric(
-            catalog[
-                "series_id"
-            ],
-            errors="coerce",
-        )
-
-    if "var_id" in catalog.columns:
-
-        catalog[
-            "var_id"
-        ] = pd.to_numeric(
-            catalog[
-                "var_id"
-            ],
-            errors="coerce",
-        )
-
-    if "proc_id" in catalog.columns:
-
-        catalog[
-            "proc_id"
-        ] = pd.to_numeric(
-            catalog[
-                "proc_id"
-            ],
-            errors="coerce",
-        )
-
-    if "count" in catalog.columns:
-
-        catalog[
-            "count"
-        ] = pd.to_numeric(
-            catalog[
-                "count"
-            ],
-            errors="coerce",
-        )
-
-    for col in [
-        "timestart",
-        "timeend",
-    ]:
-
-        if col in catalog.columns:
-
-            catalog[col] = pd.to_datetime(
-                catalog[col],
-                errors="coerce",
-                utc=True,
-            )
-
-    if "nombre" in catalog.columns:
-
-        catalog[
-            "_nombre_normalizado"
-        ] = (
-            catalog[
-                "nombre"
-            ]
-            .fillna("")
-            .map(
-                normalizar_texto
-            )
-        )
-
-    else:
-
-        catalog[
-            "_nombre_normalizado"
-        ] = ""
 
     return catalog
 
 
 # ============================================================
-# SCORE ESTACIÓN
+# SCORE DEL NOMBRE
 # ============================================================
 
-def _station_match_score(
+def _station_name_score(
+    station,
     station_name,
-    aliases,
 ):
 
-    station_norm = normalizar_texto(
+    name = _normalize_text(
         station_name
     )
 
-    if not station_norm:
-        return 0
+    if not name:
 
-    best_score = 0
+        return -1000
+
+    aliases = STATION_ALIASES.get(
+        station,
+        [
+            station
+        ],
+    )
+
+    score = -1000
 
     for alias in aliases:
 
-        alias_norm = normalizar_texto(
+        alias = _normalize_text(
             alias
         )
 
-        if not alias_norm:
+        if not alias:
             continue
 
+        if name == alias:
+
+            score = max(
+                score,
+                150,
+            )
+
+        elif name.startswith(
+            alias
+        ):
+
+            score = max(
+                score,
+                125,
+            )
+
+        elif re.search(
+            r"\b"
+            + re.escape(
+                alias
+            )
+            + r"\b",
+            name,
+        ):
+
+            score = max(
+                score,
+                105,
+            )
+
+        elif alias in name:
+
+            score = max(
+                score,
+                75,
+            )
+
+    for bad_term in BAD_NAME_TERMS:
+
         if (
-            station_norm
-            == alias_norm
+            _normalize_text(
+                bad_term
+            )
+            in name
         ):
 
-            score = 1000
+            score -= 150
 
-        elif station_norm.startswith(
-            alias_norm
-            + " "
-        ):
-
-            score = 900
-
-        elif station_norm.startswith(
-            alias_norm
-            + "-"
-        ):
-
-            score = 900
-
-        elif station_norm.endswith(
-            " "
-            + alias_norm
-        ):
-
-            score = 850
-
-        elif (
-            " "
-            + alias_norm
-            + " "
-        ) in (
-            " "
-            + station_norm
-            + " "
-        ):
-
-            score = 800
-
-        elif alias_norm in station_norm:
-
-            score = 700
-
-        else:
-
-            score = 0
-
-        best_score = max(
-            best_score,
-            score,
-        )
-
-    return best_score
+    return score
 
 
 # ============================================================
-# PENALIZAR SERIES NO HIDROMÉTRICAS
+# SCORE DEL RÍO
 # ============================================================
 
-def _penalizacion_nombre(
-    station_name,
+def _river_score(
+    river,
 ):
 
-    name = normalizar_texto(
+    river_name = _normalize_text(
+        river
+    )
+
+    if not river_name:
+
+        return 0
+
+    score = 0
+
+    if "parana" in river_name:
+
+        score += 90
+
+    for term in NON_PARANA_TERMS:
+
+        term = _normalize_text(
+            term
+        )
+
+        if term in river_name:
+
+            score -= 120
+
+    return score
+
+
+# ============================================================
+# ¿CORRESPONDE AL PARANÁ?
+# ============================================================
+
+def _is_parana_candidate(
+    river,
+    station_name=None,
+):
+
+    river_name = _normalize_text(
+        river
+    )
+
+    station_name = _normalize_text(
         station_name
     )
 
-    penalty = 0
+    combined = (
+        river_name
+        + " "
+        + station_name
+    )
 
-    forbidden_terms = [
-        "rmet",
-        "meteorologica",
-        "meteorologico",
-        "precipitacion",
-        "inta",
-        "escuela",
-        "agrometeorologica",
-        "aeropuerto",
-    ]
+    for term in NON_PARANA_TERMS:
 
-    for term in forbidden_terms:
+        term = _normalize_text(
+            term
+        )
 
-        if term in name:
+        if term in combined:
 
-            penalty -= 500
+            return False
 
-    return penalty
+    # --------------------------------------------------------
+    # Si INA declara explícitamente el río, exigimos Paraná.
+    # --------------------------------------------------------
+
+    if river_name:
+
+        return (
+            "parana"
+            in river_name
+        )
+
+    # --------------------------------------------------------
+    # Si INA no tiene campo río, no descartamos automáticamente
+    # una coincidencia fuerte por nombre. La validación con
+    # observaciones reales decidirá después.
+    # --------------------------------------------------------
+
+    return True
 
 
 # ============================================================
-# BUSCAR CANDIDATOS
+# CANDIDATOS DE ESTACIÓN
 # ============================================================
 
 def buscar_candidatos_estacion(
-    catalog,
     station,
+    start=None,
+    end=None,
 ):
 
-    config = STATIONS.get(
-        station
-    )
+    catalog = descargar_catalogo_geojson()
 
-    if config is None:
-
-        return pd.DataFrame()
-
-    aliases = config[
-        "aliases"
-    ]
-
-    if (
-        catalog is None
-        or not isinstance(
-            catalog,
-            pd.DataFrame,
-        )
-        or catalog.empty
-    ):
-
-        return pd.DataFrame()
-
-    x = catalog.copy()
-
-    # --------------------------------------------------------
-    # NIVEL
-    # --------------------------------------------------------
-
-    if "var_id" in x.columns:
-
-        x = x[
-            x["var_id"]
-            == VAR_ID_NIVEL
-        ].copy()
-
-    if x.empty:
-
-        return x
-
-    # --------------------------------------------------------
-    # SCORE NOMBRE
-    # --------------------------------------------------------
-
-    if "nombre" not in x.columns:
-
-        return pd.DataFrame()
-
-    x[
-        "_station_score"
-    ] = x[
-        "nombre"
-    ].fillna(
-        ""
-    ).apply(
-        lambda value:
-            _station_match_score(
-                value,
-                aliases,
-            )
-    )
-
-    x[
-        "_name_penalty"
-    ] = x[
-        "nombre"
-    ].fillna(
-        ""
-    ).apply(
-        _penalizacion_nombre
-    )
-
-    x[
-        "_score"
-    ] = (
-        x[
-            "_station_score"
+    candidates = catalog[
+        catalog[
+            "var_id"
         ]
-        + x[
-            "_name_penalty"
-        ]
-    )
-
-    x = x[
-        x["_station_score"]
-        >= 700
+        == VAR_ID_NIVEL
     ].copy()
 
-    if x.empty:
+    if candidates.empty:
 
-        return x
+        return pd.DataFrame()
 
-    # --------------------------------------------------------
-    # PROCEDIMIENTO
-    # --------------------------------------------------------
-
-    x[
-        "_proc_score"
-    ] = 0
-
-    if "proc_id" in x.columns:
-
-        x.loc[
-            x["proc_id"] == 1,
-            "_proc_score",
-        ] = 100
-
-        x.loc[
-            x["proc_id"] == 2,
-            "_proc_score",
-        ] = 50
+    candidates[
+        "station_score"
+    ] = candidates[
+        "nombre"
+    ].apply(
+        lambda value:
+            _station_name_score(
+                station,
+                value,
+            )
+    )
 
     # --------------------------------------------------------
-    # DISPONIBILIDAD
+    # Exigir coincidencia de estación.
     # --------------------------------------------------------
 
-    x[
-        "_availability_score"
-    ] = 0
+    candidates = candidates[
+        candidates[
+            "station_score"
+        ]
+        > 0
+    ].copy()
 
-    if (
-        "data_availability"
-        in x.columns
-    ):
+    if candidates.empty:
 
-        availability = (
-            x[
-                "data_availability"
-            ]
-            .fillna("")
-            .astype(str)
-            .str.upper()
-        )
+        return pd.DataFrame()
 
-        x.loc[
-            availability == "RT",
-            "_availability_score",
-        ] = 60
+    candidates[
+        "river_score"
+    ] = candidates[
+        "rio"
+    ].apply(
+        _river_score
+    )
 
-        x.loc[
-            availability == "NRT",
-            "_availability_score",
-        ] = 50
+    candidates[
+        "is_parana_candidate"
+    ] = candidates.apply(
+        lambda row:
+            _is_parana_candidate(
+                row.get(
+                    "rio"
+                ),
+                row.get(
+                    "nombre"
+                ),
+            ),
+        axis=1,
+    )
 
-        x.loc[
-            availability == "H",
-            "_availability_score",
-        ] = 30
-
-        x.loc[
-            availability == "C",
-            "_availability_score",
-        ] = 10
+    candidates[
+        "parana_score"
+    ] = np.where(
+        candidates[
+            "is_parana_candidate"
+        ],
+        50,
+        -200,
+    )
 
     # --------------------------------------------------------
-    # CANTIDAD
+    # Disponibilidad temporal
     # --------------------------------------------------------
 
-    if "count" in x.columns:
+    candidates[
+        "start_dt"
+    ] = pd.to_datetime(
+        candidates[
+            "timestart"
+        ],
+        errors="coerce",
+        utc=True,
+    )
 
-        count_values = (
+    candidates[
+        "end_dt"
+    ] = pd.to_datetime(
+        candidates[
+            "timeend"
+        ],
+        errors="coerce",
+        utc=True,
+    )
+
+    candidates[
+        "proc_score"
+    ] = np.where(
+        pd.to_numeric(
+            candidates[
+                "proc_id"
+            ],
+            errors="coerce",
+        ).fillna(
+            0
+        ) > 0,
+        10,
+        0,
+    )
+
+    candidates[
+        "count_score"
+    ] = (
+        np.log10(
             pd.to_numeric(
-                x["count"],
+                candidates[
+                    "count"
+                ],
                 errors="coerce",
             )
-            .fillna(0)
-        )
-
-        x[
-            "_count_score"
-        ] = (
-            np.log1p(
-                count_values
+            .fillna(
+                0
             )
-            * 5
+            .clip(
+                lower=0
+            )
+            + 1
         )
+        * 6.0
+    )
 
-    else:
+    candidates[
+        "recency_score"
+    ] = 0.0
 
-        x[
-            "_count_score"
-        ] = 0
+    valid_end = candidates[
+        "end_dt"
+    ].notna()
 
-    # --------------------------------------------------------
-    # RECIENCIA
-    # --------------------------------------------------------
-
-    if "timeend" in x.columns:
+    if valid_end.any():
 
         now = pd.Timestamp.now(
             tz="UTC"
@@ -845,341 +947,337 @@ def buscar_candidatos_estacion(
 
         age_days = (
             now
-            - x["timeend"]
-        ).dt.total_seconds() / 86400
+            - candidates.loc[
+                valid_end,
+                "end_dt"
+            ]
+        ).dt.days
 
-        age_days = (
-            age_days
-            .fillna(
-                99999
-            )
-        )
-
-        x[
-            "_recent_score"
+        candidates.loc[
+            valid_end,
+            "recency_score"
         ] = np.where(
-            age_days <= 7,
-            80,
+            age_days <= 60,
+            30,
             np.where(
-                age_days <= 30,
-                60,
+                age_days <= 365,
+                20,
                 np.where(
-                    age_days <= 365,
-                    30,
+                    age_days <= 365 * 5,
+                    8,
                     0,
                 ),
             ),
         )
 
-    else:
+    candidates[
+        "overlap_score"
+    ] = 0.0
 
-        x[
-            "_recent_score"
-        ] = 0
+    if (
+        start is not None
+        and end is not None
+    ):
 
-    # --------------------------------------------------------
-    # TOTAL
-    # --------------------------------------------------------
+        request_start = pd.Timestamp(
+            _normalize_date(
+                start
+            ),
+            tz="UTC",
+        )
 
-    x[
-        "_total_score"
+        request_end = pd.Timestamp(
+            _normalize_date(
+                end
+            ),
+            tz="UTC",
+        )
+
+        overlap = (
+            candidates[
+                "start_dt"
+            ].fillna(
+                request_start
+            )
+            <= request_end
+        ) & (
+            candidates[
+                "end_dt"
+            ].fillna(
+                request_end
+            )
+            >= request_start
+        )
+
+        candidates[
+            "overlap_score"
+        ] = np.where(
+            overlap,
+            25,
+            -100,
+        )
+
+    candidates[
+        "score"
     ] = (
-        x[
-            "_score"
+        candidates[
+            "station_score"
         ]
-        + x[
-            "_proc_score"
+        +
+        candidates[
+            "river_score"
         ]
-        + x[
-            "_availability_score"
+        +
+        candidates[
+            "parana_score"
         ]
-        + x[
-            "_count_score"
+        +
+        candidates[
+            "proc_score"
         ]
-        + x[
-            "_recent_score"
+        +
+        candidates[
+            "count_score"
+        ]
+        +
+        candidates[
+            "recency_score"
+        ]
+        +
+        candidates[
+            "overlap_score"
         ]
     )
 
-    sort_columns = [
-        "_total_score"
-    ]
-
-    ascending = [
-        False
-    ]
-
-    if "count" in x.columns:
-
-        sort_columns.append(
-            "count"
+    return (
+        candidates
+        .sort_values(
+            [
+                "score",
+                "count",
+            ],
+            ascending=[
+                False,
+                False,
+            ],
         )
-
-        ascending.append(
-            False
+        .reset_index(
+            drop=True
         )
-
-    x = x.sort_values(
-        sort_columns,
-        ascending=
-            ascending,
-        na_position=
-            "last",
-    )
-
-    return x.reset_index(
-        drop=True
     )
 
 
 # ============================================================
-# BUSCAR OBSERVACIONES EN JSON
+# PARSER RECURSIVO DE OBSERVACIONES
 # ============================================================
 
-def _buscar_lista_observaciones(
-    data,
+def _extract_records(
+    obj,
 ):
 
+    records = []
+
     if isinstance(
-        data,
+        obj,
         list,
     ):
 
-        if len(data) == 0:
+        for item in obj:
 
-            return []
-
-        if all(
-            isinstance(
+            if isinstance(
                 item,
                 dict,
-            )
-            for item in data
-        ):
-
-            sample_keys = set()
-
-            for item in data[:5]:
-
-                sample_keys.update(
-                    item.keys()
-                )
-
-            observation_keys = {
-                "timestart",
-                "time",
-                "fecha",
-                "datetime",
-                "valor",
-                "value",
-                "obs_date",
-            }
-
-            if (
-                sample_keys
-                & observation_keys
             ):
 
-                return data
+                keys = {
+                    str(
+                        key
+                    ).lower()
+                    for key in item.keys()
+                }
 
-        for item in data:
+                date_keys = {
+                    "timestart",
+                    "datetime",
+                    "timestamp",
+                    "fecha",
+                    "time",
+                    "date",
+                }
 
-            result = (
-                _buscar_lista_observaciones(
-                    item
-                )
-            )
+                value_keys = {
+                    "valor",
+                    "value",
+                    "val",
+                    "dato",
+                    "obs",
+                }
 
-            if (
-                isinstance(
-                    result,
-                    list,
-                )
-                and len(
-                    result
-                ) > 0
-            ):
+                if (
+                    keys.intersection(
+                        date_keys
+                    )
+                    and
+                    keys.intersection(
+                        value_keys
+                    )
+                ):
 
-                return result
+                    records.append(
+                        item
+                    )
 
-        return []
+                else:
 
-    if isinstance(
-        data,
+                    records.extend(
+                        _extract_records(
+                            item
+                        )
+                    )
+
+    elif isinstance(
+        obj,
         dict,
     ):
 
-        preferred_keys = [
-            "observaciones",
-            "observations",
-            "data",
-            "datos",
-            "values",
-            "records",
-            "result",
-        ]
+        for value in obj.values():
 
-        for key in preferred_keys:
+            if isinstance(
+                value,
+                (
+                    dict,
+                    list,
+                ),
+            ):
 
-            if key in data:
-
-                result = (
-                    _buscar_lista_observaciones(
-                        data[key]
+                records.extend(
+                    _extract_records(
+                        value
                     )
                 )
 
-                if isinstance(
-                    result,
-                    list,
-                ):
-
-                    return result
-
-        for value in data.values():
-
-            result = (
-                _buscar_lista_observaciones(
-                    value
-                )
-            )
-
-            if (
-                isinstance(
-                    result,
-                    list,
-                )
-                and len(
-                    result
-                ) > 0
-            ):
-
-                return result
-
-    return []
+    return records
 
 
-# ============================================================
-# NORMALIZAR OBSERVACIONES
-# ============================================================
-
-def normalizar_observaciones(
-    data,
+def _record_datetime(
+    record,
 ):
 
-    records = (
-        _buscar_lista_observaciones(
-            data
+    for key in [
+        "timestart",
+        "datetime",
+        "timestamp",
+        "fecha",
+        "time",
+        "date",
+    ]:
+
+        if key not in record:
+            continue
+
+        dt = _safe_timestamp_naive(
+            record.get(
+                key
+            )
         )
+
+        if not pd.isna(
+            dt
+        ):
+
+            return dt
+
+    return pd.NaT
+
+
+def _record_value(
+    record,
+):
+
+    for key in [
+        "valor",
+        "value",
+        "val",
+        "dato",
+        "obs",
+    ]:
+
+        if key not in record:
+            continue
+
+        value = _safe_float(
+            record.get(
+                key
+            )
+        )
+
+        if np.isfinite(
+            value
+        ):
+
+            return value
+
+    return np.nan
+
+
+# ============================================================
+# CONSULTA A5
+# ============================================================
+
+def consultar_a5(
+    series_id,
+    start,
+    end,
+):
+
+    params = {
+
+        "tipo":
+            "puntual",
+
+        "series_id":
+            int(
+                series_id
+            ),
+
+        "timestart":
+            _normalize_date(
+                start
+            ),
+
+        "timeend":
+            _normalize_date(
+                end
+            ),
+    }
+
+    response = requests.get(
+
+        A5_OBSERVATIONS_URL,
+
+        params=params,
+
+        timeout=REQUEST_TIMEOUT,
     )
 
-    if not records:
+    response.raise_for_status()
 
-        return pd.DataFrame(
-            columns=[
-                "datetime",
-                "value",
-            ]
-        )
+    payload = response.json()
+
+    records = _extract_records(
+        payload
+    )
 
     rows = []
 
-    datetime_fields = [
-        "timestart",
-        "timestamp",
-        "datetime",
-        "date",
-        "fecha",
-        "time",
-        "obs_date",
-        "fechaHora",
-        "fecha_hora",
-    ]
-
-    value_fields = [
-        "valor",
-        "value",
-        "nivel",
-        "obs_value",
-        "valor_num",
-    ]
-
     for record in records:
 
-        if not isinstance(
-            record,
-            dict,
-        ):
-
-            continue
-
-        dt = None
-
-        for field in datetime_fields:
-
-            if (
-                field in record
-                and record[
-                    field
-                ] is not None
-            ):
-
-                dt = record[
-                    field
-                ]
-
-                break
-
-        value = None
-
-        for field in value_fields:
-
-            if (
-                field in record
-                and record[
-                    field
-                ] is not None
-            ):
-
-                value = record[
-                    field
-                ]
-
-                break
-
-        if (
-            value is None
-            and isinstance(
-                record.get(
-                    "observation"
-                ),
-                dict,
-            )
-        ):
-
-            obs = record[
-                "observation"
-            ]
-
-            for field in value_fields:
-
-                if field in obs:
-
-                    value = obs[
-                        field
-                    ]
-
-                    break
-
-        dt = pd.to_datetime(
-            dt,
-            errors="coerce",
-            utc=True,
+        dt = _record_datetime(
+            record
         )
 
-        value = pd.to_numeric(
-            value,
-            errors="coerce",
+        value = _record_value(
+            record
         )
 
         if pd.isna(
@@ -1188,19 +1286,21 @@ def normalizar_observaciones(
 
             continue
 
-        if pd.isna(
+        if not np.isfinite(
             value
         ):
 
             continue
 
-        value = float(
-            value
-        )
+        # ----------------------------------------------------
+        # Filtro de seguridad.
+        # No usamos 0-7 aquí porque los ceros de escala
+        # hidrométrica son diferentes entre estaciones.
+        # --------------------------------------------------------
 
         if (
-            value < -5
-            or value > 20
+            value < LEVEL_MIN_VALID
+            or value > LEVEL_MAX_VALID
         ):
 
             continue
@@ -1228,7 +1328,31 @@ def normalizar_observaciones(
         rows
     )
 
-    result = (
+    result[
+        "datetime"
+    ] = _to_naive_datetime_series(
+        result[
+            "datetime"
+        ]
+    )
+
+    result[
+        "value"
+    ] = pd.to_numeric(
+        result[
+            "value"
+        ],
+        errors="coerce",
+    )
+
+    result = result.dropna(
+        subset=[
+            "datetime",
+            "value",
+        ]
+    )
+
+    return (
         result
         .sort_values(
             "datetime"
@@ -1244,215 +1368,321 @@ def normalizar_observaciones(
         )
     )
 
-    return result
-
 
 # ============================================================
-# CONSULTAR A5
+# VENTANA DE VALIDACIÓN
 # ============================================================
 
-def consultar_a5(
-    series_id,
+def _validation_window(
+    candidate,
     start,
     end,
 ):
 
-    series_id = _safe_int(
-        series_id
-    )
-
-    if series_id is None:
-
-        raise ValueError(
-            "series_id inválido."
-        )
-
-    start = normalizar_fecha(
+    request_start = pd.to_datetime(
         start
-    )
+    ).normalize()
 
-    end = normalizar_fecha(
+    request_end = pd.to_datetime(
         end
-    )
+    ).normalize()
 
-    if (
-        start is None
-        or end is None
-    ):
-
-        raise ValueError(
-            "Rango de fechas inválido."
-        )
-
-    response = SESSION.get(
-        A5_OBSERVATIONS_URL,
-        params={
-            "tipo":
-                "puntual",
-
-            "series_id":
-                series_id,
-
-            "timestart":
-                start,
-
-            "timeend":
-                end,
-        },
-        timeout=
-            REQUEST_TIMEOUT,
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    return normalizar_observaciones(
-        data
-    )
-
-
-# ============================================================
-# VALIDAR SERIE
-# ============================================================
-
-def validar_serie(
-    row,
-    requested_start,
-    requested_end,
-):
-
-    series_id = _safe_int(
-        row.get(
-            "series_id"
+    catalog_start = _safe_timestamp_naive(
+        candidate.get(
+            "timestart"
         )
     )
 
-    if series_id is None:
-
-        return {
-            "ok":
-                False,
-
-            "records":
-                0,
-
-            "error":
-                "series_id inválido",
-        }
-
-    catalog_start = (
-        _safe_datetime(
-            row.get(
-                "timestart"
-            )
+    catalog_end = _safe_timestamp_naive(
+        candidate.get(
+            "timeend"
         )
-    )
-
-    catalog_end = (
-        _safe_datetime(
-            row.get(
-                "timeend"
-            )
-        )
-    )
-
-    req_end = pd.to_datetime(
-        requested_end,
-        errors="coerce",
-        utc=True,
     )
 
     if pd.isna(
-        req_end
+        catalog_start
     ):
 
-        req_end = pd.Timestamp.now(
-            tz="UTC"
+        catalog_start = request_start
+
+    else:
+
+        catalog_start = (
+            pd.Timestamp(
+                catalog_start
+            )
+            .normalize()
         )
 
-    validation_end = (
+    if pd.isna(
         catalog_end
-        if not pd.isna(
-            catalog_end
+    ):
+
+        catalog_end = request_end
+
+    else:
+
+        catalog_end = (
+            pd.Timestamp(
+                catalog_end
+            )
+            .normalize()
         )
-        else req_end
+
+    overlap_start = max(
+        request_start,
+        catalog_start,
     )
 
-    validation_end = min(
-        validation_end,
-        req_end,
+    overlap_end = min(
+        request_end,
+        catalog_end,
     )
 
-    validation_start = (
-        validation_end
+    if overlap_end < overlap_start:
+
+        return None
+
+    validation_start = max(
+
+        overlap_start,
+
+        overlap_end
         - pd.Timedelta(
-            days=120
-        )
+            days=
+                VALIDATION_DAYS
+        ),
     )
+
+    return (
+        validation_start,
+        overlap_end,
+    )
+
+
+# ============================================================
+# VALIDACIÓN DE SERIE
+# ============================================================
+
+def validar_serie(
+    station,
+    candidate,
+    data,
+):
+
+    reasons = []
+
+    valid = True
 
     if (
-        not pd.isna(
-            catalog_start
-        )
+        data is None
+        or data.empty
     ):
 
-        validation_start = max(
-            validation_start,
-            catalog_start,
-        )
-
-    try:
-
-        df = consultar_a5(
-            series_id=
-                series_id,
-            start=
-                validation_start,
-            end=
-                validation_end,
-        )
-
-    except Exception as exc:
-
         return {
-            "ok":
+            "valid":
                 False,
 
             "records":
                 0,
 
-            "error":
-                str(exc),
+            "reasons":
+                [
+                    "sin_observaciones"
+                ],
         }
 
+    values = (
+        pd.to_numeric(
+            data[
+                "value"
+            ],
+            errors="coerce",
+        )
+        .dropna()
+    )
+
+    if (
+        len(
+            values
+        )
+        < MIN_VALID_OBSERVATIONS
+    ):
+
+        valid = False
+
+        reasons.append(
+            "pocas_observaciones"
+        )
+
+    # --------------------------------------------------------
+    # Nombre de estación.
+    # --------------------------------------------------------
+
+    station_score = (
+        _station_name_score(
+            station,
+            candidate.get(
+                "nombre"
+            ),
+        )
+    )
+
+    if station_score <= 0:
+
+        valid = False
+
+        reasons.append(
+            "nombre_no_coincide"
+        )
+
+    # --------------------------------------------------------
+    # Río Paraná.
+    # --------------------------------------------------------
+
+    if not _is_parana_candidate(
+        candidate.get(
+            "rio"
+        ),
+        candidate.get(
+            "nombre"
+        ),
+    ):
+
+        valid = False
+
+        reasons.append(
+            "no_corresponde_parana"
+        )
+
+    # --------------------------------------------------------
+    # Rango.
+    # --------------------------------------------------------
+
+    if not values.empty:
+
+        if (
+            values.min()
+            < LEVEL_MIN_VALID
+            or values.max()
+            > LEVEL_MAX_VALID
+        ):
+
+            valid = False
+
+            reasons.append(
+                "nivel_fuera_rango"
+            )
+
+    # --------------------------------------------------------
+    # Evitar series completamente constantes.
+    # --------------------------------------------------------
+
+    if (
+        values.nunique()
+        <= 1
+        and len(
+            values
+        ) >= 5
+    ):
+
+        valid = False
+
+        reasons.append(
+            "serie_constante"
+        )
+
+    # --------------------------------------------------------
+    # Estadísticas.
+    # --------------------------------------------------------
+
+    last_level = (
+        float(
+            values.iloc[
+                -1
+            ]
+        )
+        if not values.empty
+        else np.nan
+    )
+
+    mean_level = (
+        float(
+            values.mean()
+        )
+        if not values.empty
+        else np.nan
+    )
+
+    min_level = (
+        float(
+            values.min()
+        )
+        if not values.empty
+        else np.nan
+    )
+
+    max_level = (
+        float(
+            values.max()
+        )
+        if not values.empty
+        else np.nan
+    )
+
+    last_date = (
+        data[
+            "datetime"
+        ].max()
+        if (
+            "datetime"
+            in data.columns
+            and not data.empty
+        )
+        else pd.NaT
+    )
+
     return {
-        "ok":
-            not df.empty,
+
+        "valid":
+            bool(
+                valid
+            ),
 
         "records":
-            len(df),
-
-        "first_date":
-            (
-                df[
-                    "datetime"
-                ].min()
-                if not df.empty
-                else None
+            int(
+                len(
+                    values
+                )
             ),
+
+        "last_level":
+            last_level,
+
+        "mean_level":
+            mean_level,
+
+        "min_level":
+            min_level,
+
+        "max_level":
+            max_level,
 
         "last_date":
-            (
-                df[
-                    "datetime"
-                ].max()
-                if not df.empty
-                else None
+            last_date,
+
+        "station_score":
+            station_score,
+
+        "river_score":
+            _river_score(
+                candidate.get(
+                    "rio"
+                )
             ),
 
-        "error":
-            None,
+        "reasons":
+            reasons,
     }
 
 
@@ -1461,266 +1691,318 @@ def validar_serie(
 # ============================================================
 
 def seleccionar_serie(
-    catalog,
     station,
-    requested_start,
-    requested_end,
+    start,
+    end,
 ):
 
-    candidates = (
-        buscar_candidatos_estacion(
-            catalog,
-            station,
-        )
+    candidates = buscar_candidatos_estacion(
+        station,
+        start,
+        end,
     )
+
+    metadata = {
+
+        "station":
+            station,
+
+        "status":
+            "sin_serie",
+
+        "candidate_count":
+            int(
+                len(
+                    candidates
+                )
+            ),
+
+        "tested":
+            [],
+    }
 
     if candidates.empty:
 
         return (
             None,
-            {
-                "station":
-                    station,
-
-                "status":
-                    "sin_candidatos",
-
-                "candidates":
-                    0,
-
-                "message":
-                    "No se encontró serie de nivel "
-                    "compatible en catálogo INA.",
-            },
+            metadata,
         )
 
-    attempts = []
+    # --------------------------------------------------------
+    # Validamos candidatos con observaciones reales.
+    # --------------------------------------------------------
 
-    for index, row in (
+    for _, candidate in (
         candidates
-        .head(12)
+        .head(
+            25
+        )
         .iterrows()
     ):
 
-        result = validar_serie(
-            row=
-                row,
-            requested_start=
-                requested_start,
-            requested_end=
-                requested_end,
+        series_id = _safe_int(
+            candidate.get(
+                "series_id"
+            ),
+            0,
         )
 
-        attempt = {
-            "series_id":
-                _safe_int(
-                    row.get(
-                        "series_id"
-                    )
-                ),
+        if series_id <= 0:
+            continue
 
-            "name":
-                row.get(
-                    "nombre"
-                ),
+        window = _validation_window(
+            candidate,
+            start,
+            end,
+        )
 
-            "var_id":
-                _safe_int(
-                    row.get(
-                        "var_id"
-                    )
-                ),
+        if window is None:
+            continue
 
-            "proc_id":
-                _safe_int(
-                    row.get(
-                        "proc_id"
-                    )
-                ),
+        validation_start, validation_end = (
+            window
+        )
 
-            "catalog_count":
-                _safe_int(
-                    row.get(
-                        "count"
+        try:
+
+            observations = consultar_a5(
+
+                series_id,
+
+                validation_start,
+
+                validation_end,
+            )
+
+            validation = validar_serie(
+
+                station,
+
+                candidate,
+
+                observations,
+            )
+
+            tested = {
+
+                "series_id":
+                    series_id,
+
+                "nombre":
+                    candidate.get(
+                        "nombre"
                     ),
-                    0,
-                ),
 
-            "catalog_start":
-                row.get(
-                    "timestart"
-                ),
+                "rio":
+                    candidate.get(
+                        "rio"
+                    ),
 
-            "catalog_end":
-                row.get(
-                    "timeend"
-                ),
+                "score":
+                    _safe_float(
+                        candidate.get(
+                            "score"
+                        ),
+                        0.0,
+                    ),
 
-            "validation_records":
-                result.get(
-                    "records",
-                    0,
-                ),
+                **validation,
+            }
 
-            "validation_ok":
-                result.get(
-                    "ok",
-                    False,
-                ),
+            metadata[
+                "tested"
+            ].append(
+                tested
+            )
 
-            "error":
-                result.get(
-                    "error"
-                ),
-        }
+            if not validation[
+                "valid"
+            ]:
 
-        attempts.append(
-            attempt
-        )
+                continue
 
-        if result.get(
-            "ok",
-            False,
-        ):
+            selected = (
+                candidate.to_dict()
+            )
 
-            return (
-                row,
+            metadata.update(
                 {
-                    "station":
-                        station,
-
                     "status":
                         "ok",
 
-                    "candidates":
-                        len(
-                            candidates
+                    "series_id":
+                        series_id,
+
+                    "series_name":
+                        candidate.get(
+                            "nombre"
                         ),
 
-                    "selected_candidate":
-                        index + 1,
+                    "river":
+                        candidate.get(
+                            "rio"
+                        ),
 
-                    "attempts":
-                        attempts,
-                },
+                    "records_validation":
+                        validation.get(
+                            "records",
+                            0,
+                        ),
+
+                    "last_level_validation":
+                        validation.get(
+                            "last_level"
+                        ),
+
+                    "last_date_validation":
+                        validation.get(
+                            "last_date"
+                        ),
+
+                    "catalog_timestart":
+                        candidate.get(
+                            "timestart"
+                        ),
+
+                    "catalog_timeend":
+                        candidate.get(
+                            "timeend"
+                        ),
+
+                    "catalog_count":
+                        _safe_int(
+                            candidate.get(
+                                "count"
+                            ),
+                            0,
+                        ),
+                }
             )
+
+            return (
+                selected,
+                metadata,
+            )
+
+        except Exception as exc:
+
+            metadata[
+                "tested"
+            ].append(
+                {
+                    "series_id":
+                        series_id,
+
+                    "nombre":
+                        candidate.get(
+                            "nombre"
+                        ),
+
+                    "rio":
+                        candidate.get(
+                            "rio"
+                        ),
+
+                    "valid":
+                        False,
+
+                    "reasons":
+                        [
+                            "error_consulta"
+                        ],
+
+                    "error":
+                        str(
+                            exc
+                        ),
+                }
+            )
+
+    metadata[
+        "status"
+    ] = "sin_serie_validada"
 
     return (
         None,
-        {
-            "station":
-                station,
-
-            "status":
-                "sin_serie_validada",
-
-            "candidates":
-                len(
-                    candidates
-                ),
-
-            "attempts":
-                attempts,
-
-            "message":
-                "Se encontraron candidatos pero ninguno "
-                "devolvió observaciones válidas.",
-        },
+        metadata,
     )
 
 
 # ============================================================
-# CONSULTAR EN BLOQUES
+# CONSULTA EN BLOQUES
 # ============================================================
 
-def consultar_a5_en_bloques(
+def _consultar_historia_bloques(
     series_id,
     start,
     end,
-    block_years=
-        HISTORY_BLOCK_YEARS,
 ):
 
-    start = pd.to_datetime(
-        start,
-        errors="coerce",
-        utc=True,
-    )
+    start_dt = pd.to_datetime(
+        start
+    ).normalize()
 
-    end = pd.to_datetime(
-        end,
-        errors="coerce",
-        utc=True,
-    )
+    end_dt = pd.to_datetime(
+        end
+    ).normalize()
 
-    if (
-        pd.isna(
-            start
-        )
-        or pd.isna(
-            end
-        )
-        or start > end
-    ):
+    if end_dt < start_dt:
 
-        return pd.DataFrame(
-            columns=[
-                "datetime",
-                "value",
-            ]
-        )
+        return pd.DataFrame()
 
-    pieces = []
+    frames = []
 
-    cursor = start
+    block_start = start_dt
 
-    while cursor <= end:
+    while block_start <= end_dt:
 
-        block_end = (
-            cursor
+        block_end = min(
+
+            block_start
             + pd.DateOffset(
                 years=
-                    block_years
+                    HISTORY_BLOCK_YEARS
             )
             - pd.Timedelta(
                 days=1
-            )
-        )
+            ),
 
-        block_end = min(
-            block_end,
-            end,
+            end_dt,
         )
 
         try:
 
             part = consultar_a5(
-                series_id=
-                    series_id,
-                start=
-                    cursor,
-                end=
-                    block_end,
+
+                series_id,
+
+                block_start,
+
+                block_end,
             )
 
-            if not part.empty:
+            if (
+                part is not None
+                and not part.empty
+            ):
 
-                pieces.append(
+                frames.append(
                     part
                 )
 
         except Exception:
 
+            # Un bloque sin datos no invalida todo el historial.
             pass
 
-        cursor = (
+        block_start = (
             block_end
             + pd.Timedelta(
                 days=1
             )
         )
 
-    if not pieces:
+    if not frames:
 
         return pd.DataFrame(
             columns=[
@@ -1730,12 +2012,26 @@ def consultar_a5_en_bloques(
         )
 
     result = pd.concat(
-        pieces,
+        frames,
         ignore_index=True,
     )
 
-    result = (
+    result[
+        "datetime"
+    ] = _to_naive_datetime_series(
+        result[
+            "datetime"
+        ]
+    )
+
+    return (
         result
+        .dropna(
+            subset=[
+                "datetime",
+                "value",
+            ]
+        )
         .sort_values(
             "datetime"
         )
@@ -1750,14 +2046,154 @@ def consultar_a5_en_bloques(
         )
     )
 
-    return result
+
+# ============================================================
+# DESCARGAR HISTORIA DE SERIE
+# ============================================================
+
+def _download_selected_history(
+    selected,
+    requested_start,
+    requested_end,
+    force_full_history=False,
+):
+
+    series_id = _safe_int(
+        selected.get(
+            "series_id"
+        ),
+        0,
+    )
+
+    if series_id <= 0:
+
+        return pd.DataFrame()
+
+    requested_start = pd.to_datetime(
+        requested_start
+    ).normalize()
+
+    requested_end = pd.to_datetime(
+        requested_end
+    ).normalize()
+
+    catalog_start = _safe_timestamp_naive(
+        selected.get(
+            "timestart"
+        )
+    )
+
+    catalog_end = _safe_timestamp_naive(
+        selected.get(
+            "timeend"
+        )
+    )
+
+    # --------------------------------------------------------
+    # Inicio
+    # --------------------------------------------------------
+
+    if force_full_history:
+
+        if not pd.isna(
+            catalog_start
+        ):
+
+            start_dt = max(
+                pd.to_datetime(
+                    DEFAULT_HISTORY_FLOOR
+                ).normalize(),
+                pd.Timestamp(
+                    catalog_start
+                ).normalize(),
+            )
+
+        else:
+
+            start_dt = pd.to_datetime(
+                DEFAULT_HISTORY_FLOOR
+            ).normalize()
+
+    else:
+
+        start_dt = requested_start
+
+        if not pd.isna(
+            catalog_start
+        ):
+
+            start_dt = max(
+                start_dt,
+                pd.Timestamp(
+                    catalog_start
+                ).normalize(),
+            )
+
+    # --------------------------------------------------------
+    # Fin
+    # --------------------------------------------------------
+
+    end_dt = requested_end
+
+    if not pd.isna(
+        catalog_end
+    ):
+
+        end_dt = min(
+            end_dt,
+            pd.Timestamp(
+                catalog_end
+            ).normalize(),
+        )
+
+    if end_dt < start_dt:
+
+        return pd.DataFrame()
+
+    # --------------------------------------------------------
+    # Consulta corta.
+    # --------------------------------------------------------
+
+    total_days = (
+        end_dt
+        - start_dt
+    ).days
+
+    if (
+        total_days
+        <= 365 * HISTORY_BLOCK_YEARS
+        and not force_full_history
+    ):
+
+        try:
+
+            data = consultar_a5(
+                series_id,
+                start_dt,
+                end_dt,
+            )
+
+            if not data.empty:
+
+                return data
+
+        except Exception:
+
+            pass
+
+    # --------------------------------------------------------
+    # Historial largo.
+    # --------------------------------------------------------
+
+    return _consultar_historia_bloques(
+        series_id,
+        start_dt,
+        end_dt,
+    )
 
 
 # ============================================================
 # CONVERTIR A DIARIO
-#
-# CORRECCIÓN PRINCIPAL V11.9.1:
-# datetime queda SIN timezone.
 # ============================================================
 
 def convertir_diario(
@@ -1767,10 +2203,6 @@ def convertir_diario(
 
     if (
         df is None
-        or not isinstance(
-            df,
-            pd.DataFrame,
-        )
         or df.empty
     ):
 
@@ -1781,40 +2213,22 @@ def convertir_diario(
             ]
         )
 
-    if (
+    x = df.copy()
+
+    x[
         "datetime"
-        not in df.columns
-        or "value"
-        not in df.columns
-    ):
-
-        return pd.DataFrame(
-            columns=[
-                "datetime",
-                output_column,
-            ]
-        )
-
-    x = df[
-        [
-            "datetime",
-            "value",
+    ] = _to_naive_datetime_series(
+        x[
+            "datetime"
         ]
-    ].copy()
-
-    # ========================================================
-    # IMPORTANTE
-    # quitar timezone antes de entregar datos al modelo
-    # ========================================================
-
-    x["datetime"] = (
-        _to_naive_datetime_series(
-            x["datetime"]
-        )
     )
 
-    x["value"] = pd.to_numeric(
-        x["value"],
+    x[
+        "value"
+    ] = pd.to_numeric(
+        x[
+            "value"
+        ],
         errors="coerce",
     )
 
@@ -1825,6 +2239,22 @@ def convertir_diario(
         ]
     )
 
+    x = x[
+        (
+            x[
+                "value"
+            ]
+            >= LEVEL_MIN_VALID
+        )
+        &
+        (
+            x[
+                "value"
+            ]
+            <= LEVEL_MAX_VALID
+        )
+    ]
+
     if x.empty:
 
         return pd.DataFrame(
@@ -1834,20 +2264,25 @@ def convertir_diario(
             ]
         )
 
-    x["datetime"] = (
-        x["datetime"]
-        .dt.floor(
-            "D"
-        )
+    x[
+        "datetime"
+    ] = (
+        x[
+            "datetime"
+        ]
+        .dt
+        .normalize()
     )
 
-    daily = (
+    result = (
         x
         .groupby(
             "datetime",
             as_index=False,
-        )["value"]
-        .median()
+        )[
+            "value"
+        ]
+        .mean()
         .rename(
             columns={
                 "value":
@@ -1862,93 +2297,43 @@ def convertir_diario(
         )
     )
 
-    # --------------------------------------------------------
-    # SEGUNDA PROTECCIÓN
-    # --------------------------------------------------------
-
-    daily[
+    result[
         "datetime"
-    ] = pd.to_datetime(
-        daily[
+    ] = _to_naive_datetime_series(
+        result[
             "datetime"
-        ],
-        errors="coerce",
+        ]
     )
 
-    return daily
+    return result
 
 
 # ============================================================
-# OBTENER ESTACIÓN
+# DESCARGAR ESTACIÓN
 # ============================================================
 
-def obtener_estacion(
+def get_station_history(
     station,
-    catalog,
-    requested_start,
-    requested_end,
+    start,
+    end,
+    full_history=False,
 ):
 
-    config = STATIONS[
+    output_column = STATION_COLUMNS[
         station
     ]
 
-    output_column = config[
-        "column"
-    ]
-
-    selected_row, selection_meta = (
-        seleccionar_serie(
-            catalog=
-                catalog,
-            station=
-                station,
-            requested_start=
-                requested_start,
-            requested_end=
-                requested_end,
-        )
+    selected, metadata = seleccionar_serie(
+        station,
+        start,
+        end,
     )
 
-    if selected_row is None:
+    if selected is None:
 
-        metadata = {
-            "station":
-                station,
-
-            "column":
-                output_column,
-
-            "status":
-                selection_meta.get(
-                    "status",
-                    "sin_serie",
-                ),
-
-            "series_id":
-                None,
-
-            "series_name":
-                None,
-
-            "records":
-                0,
-
-            "first_date":
-                None,
-
-            "last_date":
-                None,
-
-            "catalog_candidates":
-                selection_meta.get(
-                    "candidates",
-                    0,
-                ),
-
-            "selection":
-                selection_meta,
-        }
+        metadata[
+            "records"
+        ] = 0
 
         return (
             pd.DataFrame(
@@ -1959,242 +2344,162 @@ def obtener_estacion(
             ),
             metadata,
         )
-
-    series_id = _safe_int(
-        selected_row.get(
-            "series_id"
-        )
-    )
-
-    catalog_start = (
-        _safe_datetime(
-            selected_row.get(
-                "timestart"
-            )
-        )
-    )
-
-    catalog_end = (
-        _safe_datetime(
-            selected_row.get(
-                "timeend"
-            )
-        )
-    )
-
-    requested_start_dt = (
-        pd.to_datetime(
-            requested_start,
-            errors="coerce",
-            utc=True,
-        )
-    )
-
-    requested_end_dt = (
-        pd.to_datetime(
-            requested_end,
-            errors="coerce",
-            utc=True,
-        )
-    )
-
-    # --------------------------------------------------------
-    # RANGO
-    # --------------------------------------------------------
-
-    if station == "Corrientes":
-
-        history_floor = pd.Timestamp(
-            DEFAULT_HISTORY_FLOOR,
-            tz="UTC",
-        )
-
-        if not pd.isna(
-            catalog_start
-        ):
-
-            query_start = max(
-                catalog_start,
-                history_floor,
-            )
-
-        else:
-
-            query_start = history_floor
-
-        if not pd.isna(
-            catalog_end
-        ):
-
-            query_end = min(
-                catalog_end,
-                requested_end_dt,
-            )
-
-        else:
-
-            query_end = (
-                requested_end_dt
-            )
-
-    else:
-
-        query_start = (
-            requested_start_dt
-        )
-
-        query_end = (
-            requested_end_dt
-        )
-
-        if not pd.isna(
-            catalog_start
-        ):
-
-            query_start = max(
-                query_start,
-                catalog_start,
-            )
-
-        if not pd.isna(
-            catalog_end
-        ):
-
-            query_end = min(
-                query_end,
-                catalog_end,
-            )
-
-    if (
-        pd.isna(
-            query_start
-        )
-        or pd.isna(
-            query_end
-        )
-        or query_start > query_end
-    ):
-
-        metadata = {
-            "station":
-                station,
-
-            "column":
-                output_column,
-
-            "status":
-                "fuera_de_periodo",
-
-            "series_id":
-                series_id,
-
-            "series_name":
-                selected_row.get(
-                    "nombre"
-                ),
-
-            "records":
-                0,
-
-            "first_date":
-                None,
-
-            "last_date":
-                None,
-
-            "catalog_start":
-                (
-                    catalog_start.isoformat()
-                    if not pd.isna(
-                        catalog_start
-                    )
-                    else None
-                ),
-
-            "catalog_end":
-                (
-                    catalog_end.isoformat()
-                    if not pd.isna(
-                        catalog_end
-                    )
-                    else None
-                ),
-        }
-
-        return (
-            pd.DataFrame(
-                columns=[
-                    "datetime",
-                    output_column,
-                ]
-            ),
-            metadata,
-        )
-
-    # --------------------------------------------------------
-    # DESCARGA
-    # --------------------------------------------------------
 
     try:
 
-        if station == "Corrientes":
+        raw = _download_selected_history(
 
-            raw = (
-                consultar_a5_en_bloques(
-                    series_id=
-                        series_id,
-                    start=
-                        query_start,
-                    end=
-                        query_end,
-                    block_years=
-                        HISTORY_BLOCK_YEARS,
+            selected,
+
+            start,
+
+            end,
+
+            force_full_history=
+                full_history,
+        )
+
+        daily = convertir_diario(
+            raw,
+            output_column,
+        )
+
+        # ----------------------------------------------------
+        # Segunda validación de la historia descargada.
+        # --------------------------------------------------------
+
+        if daily.empty:
+
+            metadata[
+                "status"
+            ] = "sin_observaciones"
+
+            metadata[
+                "records"
+            ] = 0
+
+            return (
+                daily,
+                metadata,
+            )
+
+        values = pd.to_numeric(
+            daily[
+                output_column
+            ],
+            errors="coerce",
+        )
+
+        valid_values = (
+            values
+            .dropna()
+        )
+
+        if (
+            len(
+                valid_values
+            )
+            < MIN_VALID_OBSERVATIONS
+        ):
+
+            metadata[
+                "status"
+            ] = "pocas_observaciones"
+
+            metadata[
+                "records"
+            ] = int(
+                len(
+                    valid_values
                 )
             )
 
-        else:
-
-            raw = consultar_a5(
-                series_id=
-                    series_id,
-                start=
-                    query_start,
-                end=
-                    query_end,
+            return (
+                pd.DataFrame(
+                    columns=[
+                        "datetime",
+                        output_column,
+                    ]
+                ),
+                metadata,
             )
+
+        metadata[
+            "status"
+        ] = "ok"
+
+        metadata[
+            "records"
+        ] = int(
+            len(
+                daily
+            )
+        )
+
+        metadata[
+            "first_date"
+        ] = daily[
+            "datetime"
+        ].min()
+
+        metadata[
+            "last_date"
+        ] = daily[
+            "datetime"
+        ].max()
+
+        metadata[
+            "last_level"
+        ] = float(
+            valid_values.iloc[
+                -1
+            ]
+        )
+
+        metadata[
+            "min_level"
+        ] = float(
+            valid_values.min()
+        )
+
+        metadata[
+            "max_level"
+        ] = float(
+            valid_values.max()
+        )
+
+        metadata[
+            "mean_level"
+        ] = float(
+            valid_values.mean()
+        )
+
+        metadata[
+            "full_history"
+        ] = bool(
+            full_history
+        )
+
+        return (
+            daily,
+            metadata,
+        )
 
     except Exception as exc:
 
-        metadata = {
-            "station":
-                station,
+        metadata[
+            "status"
+        ] = "error"
 
-            "column":
-                output_column,
+        metadata[
+            "error"
+        ] = str(
+            exc
+        )
 
-            "status":
-                "error_consulta",
-
-            "series_id":
-                series_id,
-
-            "series_name":
-                selected_row.get(
-                    "nombre"
-                ),
-
-            "records":
-                0,
-
-            "first_date":
-                None,
-
-            "last_date":
-                None,
-
-            "error":
-                str(exc),
-        }
+        metadata[
+            "records"
+        ] = 0
 
         return (
             pd.DataFrame(
@@ -2206,360 +2511,99 @@ def obtener_estacion(
             metadata,
         )
 
-    daily = convertir_diario(
-        raw,
-        output_column,
-    )
-
-    if not daily.empty:
-
-        first_date = (
-            daily[
-                "datetime"
-            ].min()
-        )
-
-        last_date = (
-            daily[
-                "datetime"
-            ].max()
-        )
-
-    else:
-
-        first_date = None
-        last_date = None
-
-    metadata = {
-        "station":
-            station,
-
-        "column":
-            output_column,
-
-        "status":
-            (
-                "ok"
-                if not daily.empty
-                else "sin_observaciones"
-            ),
-
-        "series_id":
-            series_id,
-
-        "series_name":
-            selected_row.get(
-                "nombre"
-            ),
-
-        "station_id":
-            _safe_int(
-                selected_row.get(
-                    "estacion_id"
-                )
-            ),
-
-        "var_id":
-            _safe_int(
-                selected_row.get(
-                    "var_id"
-                )
-            ),
-
-        "variable":
-            selected_row.get(
-                "var_nombre"
-            ),
-
-        "proc_id":
-            _safe_int(
-                selected_row.get(
-                    "proc_id"
-                )
-            ),
-
-        "unit_id":
-            _safe_int(
-                selected_row.get(
-                    "unit_id"
-                )
-            ),
-
-        "source":
-            selected_row.get(
-                "fuente"
-            ),
-
-        "availability":
-            selected_row.get(
-                "data_availability"
-            ),
-
-        "catalog_count":
-            _safe_int(
-                selected_row.get(
-                    "count"
-                ),
-                0,
-            ),
-
-        "records":
-            int(
-                len(
-                    daily
-                )
-            ),
-
-        "first_date":
-            (
-                pd.Timestamp(
-                    first_date
-                ).strftime(
-                    "%Y-%m-%d"
-                )
-                if first_date is not None
-                else None
-            ),
-
-        "last_date":
-            (
-                pd.Timestamp(
-                    last_date
-                ).strftime(
-                    "%Y-%m-%d"
-                )
-                if last_date is not None
-                else None
-            ),
-
-        "catalog_start":
-            (
-                catalog_start.strftime(
-                    "%Y-%m-%d"
-                )
-                if not pd.isna(
-                    catalog_start
-                )
-                else None
-            ),
-
-        "catalog_end":
-            (
-                catalog_end.strftime(
-                    "%Y-%m-%d"
-                )
-                if not pd.isna(
-                    catalog_end
-                )
-                else None
-            ),
-
-        "query_start":
-            pd.Timestamp(
-                query_start
-            ).strftime(
-                "%Y-%m-%d"
-            ),
-
-        "query_end":
-            pd.Timestamp(
-                query_end
-            ).strftime(
-                "%Y-%m-%d"
-            ),
-
-        "catalog_candidates":
-            selection_meta.get(
-                "candidates",
-                0,
-            ),
-
-        "selection":
-            selection_meta,
-    }
-
-    return (
-        daily,
-        metadata,
-    )
-
 
 # ============================================================
-# COMBINAR ESTACIONES
-#
-# SEGUNDA CORRECCIÓN PRINCIPAL V11.9.1:
-# blindaje completo de datetime antes de cada merge.
+# MERGE DEFENSIVO
 # ============================================================
 
 def _merge_station_frames(
     frames,
 ):
 
-    normalized_frames = []
+    valid_frames = []
 
     for frame in frames:
 
         if (
-            isinstance(
+            frame is None
+            or not isinstance(
                 frame,
                 pd.DataFrame,
             )
-            and not frame.empty
-            and "datetime"
-            in frame.columns
+            or frame.empty
+            or "datetime"
+            not in frame.columns
         ):
 
-            temp = frame.copy()
+            continue
 
-            temp[
-                "datetime"
-            ] = _to_naive_datetime_series(
-                temp[
-                    "datetime"
-                ]
-            )
-
-            temp = temp.dropna(
-                subset=[
-                    "datetime"
-                ]
-            )
-
-            normalized_frames.append(
-                temp
-            )
-
-        else:
-
-            normalized_frames.append(
-                frame
-            )
-
-    frames = normalized_frames
-
-    valid_frames = [
-        frame
-        for frame in frames
-        if (
-            isinstance(
-                frame,
-                pd.DataFrame,
-            )
-            and not frame.empty
-            and "datetime"
-            in frame.columns
-        )
-    ]
-
-    if not valid_frames:
-
-        result = pd.DataFrame(
-            columns=[
-                "datetime"
-            ]
-        )
-
-    else:
-
-        result = (
-            valid_frames[0]
-            .copy()
-        )
+        x = frame.copy()
 
         # ----------------------------------------------------
-        # BLINDAJE PRIMER FRAME
-        # ----------------------------------------------------
+        # CRÍTICO:
+        # Todas las fechas quedan timezone-naive ANTES
+        # del merge.
+        # --------------------------------------------------------
 
-        result[
+        x[
             "datetime"
         ] = _to_naive_datetime_series(
-            result[
+            x[
                 "datetime"
             ]
         )
 
-        for frame in valid_frames[1:]:
-
-            temp = frame.copy()
-
-            temp[
+        x = x.dropna(
+            subset=[
                 "datetime"
-            ] = _to_naive_datetime_series(
-                temp[
-                    "datetime"
-                ]
-            )
+            ]
+        )
 
-            result = pd.merge(
-                result,
-                temp,
-                on=
-                    "datetime",
-                how=
-                    "outer",
-            )
+        x[
+            "datetime"
+        ] = (
+            x[
+                "datetime"
+            ]
+            .dt
+            .normalize()
+        )
 
-        result = (
-            result
+        x = (
+            x
             .sort_values(
                 "datetime"
             )
             .drop_duplicates(
                 subset=[
                     "datetime"
-                ]
+                ],
+                keep="last",
             )
             .reset_index(
                 drop=True
             )
         )
 
-    # --------------------------------------------------------
-    # GARANTIZAR COLUMNAS
-    # --------------------------------------------------------
+        valid_frames.append(
+            x
+        )
 
-    for config in STATIONS.values():
+    if not valid_frames:
 
-        col = config[
-            "column"
-        ]
+        return pd.DataFrame(
+            columns=[
+                "datetime"
+            ]
+        )
 
-        if col not in result.columns:
+    result = valid_frames[0]
 
-            result[col] = np.nan
+    for frame in valid_frames[
+        1:
+    ]:
 
-    desired_columns = [
-        "datetime",
-        "nivel_corrientes",
-        "nivel_goya",
-        "nivel_la_paz",
-        "nivel_parana",
-        "nivel_diamante",
-        "nivel_rosario",
-        "nivel_villa_constitucion",
-    ]
-
-    for col in desired_columns:
-
-        if col not in result.columns:
-
-            result[col] = np.nan
-
-    result = result[
-        desired_columns
-    ]
-
-    # --------------------------------------------------------
-    # GARANTÍA FINAL
-    #
-    # Ningún timezone sale de upstream.py
-    # --------------------------------------------------------
-
-    if (
-        "datetime"
-        in result.columns
-    ):
-
+        # Segunda normalización defensiva.
         result[
             "datetime"
         ] = _to_naive_datetime_series(
@@ -2568,7 +2612,43 @@ def _merge_station_frames(
             ]
         )
 
-    return result
+        frame[
+            "datetime"
+        ] = _to_naive_datetime_series(
+            frame[
+                "datetime"
+            ]
+        )
+
+        result = result.merge(
+            frame,
+            on="datetime",
+            how="outer",
+        )
+
+    result[
+        "datetime"
+    ] = _to_naive_datetime_series(
+        result[
+            "datetime"
+        ]
+    )
+
+    return (
+        result
+        .sort_values(
+            "datetime"
+        )
+        .drop_duplicates(
+            subset=[
+                "datetime"
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
 
 
 # ============================================================
@@ -2580,120 +2660,238 @@ def get_upstream_history(
     end,
 ):
 
-    start = normalizar_fecha(
+    start = _normalize_date(
         start
     )
 
-    end = normalizar_fecha(
+    end = _normalize_date(
         end
-    )
-
-    if (
-        start is None
-        or end is None
-    ):
-
-        raise ValueError(
-            "Fechas inválidas para consulta "
-            "de estaciones aguas arriba."
-        )
-
-    if (
-        pd.Timestamp(
-            start
-        )
-        > pd.Timestamp(
-            end
-        )
-    ):
-
-        raise ValueError(
-            "La fecha inicial es posterior "
-            "a la fecha final."
-        )
-
-    catalog = (
-        descargar_catalogo_geojson()
     )
 
     frames = []
 
-    metadata = {}
+    station_metadata = {}
 
-    for station in STATIONS.keys():
+    for station in STATIONS:
+
+        # ----------------------------------------------------
+        # Corrientes:
+        # conservar TODO el historial disponible.
+        #
+        # Resto:
+        # rango solicitado para entrenamiento operativo.
+        # --------------------------------------------------------
+
+        full_history = (
+            station
+            == "Corrientes"
+        )
 
         try:
 
-            frame, meta = obtener_estacion(
-                station=
+            station_df, metadata = (
+                get_station_history(
+
                     station,
-                catalog=
-                    catalog,
-                requested_start=
+
                     start,
-                requested_end=
+
                     end,
+
+                    full_history=
+                        full_history,
+                )
             )
+
+            station_metadata[
+                station
+            ] = metadata
+
+            if (
+                station_df is not None
+                and not station_df.empty
+            ):
+
+                frames.append(
+                    station_df
+                )
 
         except Exception as exc:
 
-            config = STATIONS[
+            station_metadata[
                 station
-            ]
+            ] = {
 
-            frame = pd.DataFrame(
-                columns=[
-                    "datetime",
-                    config[
-                        "column"
-                    ],
-                ]
-            )
-
-            meta = {
                 "station":
                     station,
-
-                "column":
-                    config[
-                        "column"
-                    ],
 
                 "status":
                     "error",
 
-                "series_id":
-                    None,
-
-                "series_name":
-                    None,
-
                 "records":
                     0,
 
-                "first_date":
-                    None,
-
-                "last_date":
-                    None,
-
                 "error":
-                    str(exc),
+                    str(
+                        exc
+                    ),
             }
 
-        frames.append(
-            frame
-        )
-
-        metadata[
-            station
-        ] = meta
-
-    result = (
-        _merge_station_frames(
-            frames
-        )
+    result = _merge_station_frames(
+        frames
     )
+
+    # ========================================================
+    # GARANTIZAR COLUMNAS
+    # ========================================================
+
+    for station in STATIONS:
+
+        col = STATION_COLUMNS[
+            station
+        ]
+
+        if col not in result.columns:
+
+            result[
+                col
+            ] = np.nan
+
+    # ========================================================
+    # NORMALIZACIÓN FINAL
+    # ========================================================
+
+    if not result.empty:
+
+        result[
+            "datetime"
+        ] = _to_naive_datetime_series(
+            result[
+                "datetime"
+            ]
+        )
+
+        result = (
+            result
+            .sort_values(
+                "datetime"
+            )
+            .drop_duplicates(
+                subset=[
+                    "datetime"
+                ],
+                keep="last",
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+    # ========================================================
+    # COBERTURA
+    # ========================================================
+
+    coverage = {}
+
+    available_stations = []
+
+    for station in STATIONS:
+
+        col = STATION_COLUMNS[
+            station
+        ]
+
+        count = 0
+
+        if (
+            col in result.columns
+            and not result.empty
+        ):
+
+            count = int(
+                pd.to_numeric(
+                    result[
+                        col
+                    ],
+                    errors="coerce",
+                )
+                .notna()
+                .sum()
+            )
+
+        coverage[
+            col
+        ] = count
+
+        if count >= MIN_VALID_OBSERVATIONS:
+
+            available_stations.append(
+                station
+            )
+
+    metadata = {
+
+        "version":
+            VERSION,
+
+        "status":
+            (
+                "ok"
+                if available_stations
+                else "sin_datos"
+            ),
+
+        "source":
+            "INA A5",
+
+        "variable":
+            "Nivel",
+
+        "var_id":
+            VAR_ID_NIVEL,
+
+        "stations":
+            station_metadata,
+
+        "available_stations":
+            available_stations,
+
+        "station_count":
+            len(
+                available_stations
+            ),
+
+        "coverage":
+            coverage,
+
+        "records":
+            int(
+                len(
+                    result
+                )
+            ),
+
+        "start":
+            (
+                result[
+                    "datetime"
+                ].min()
+                if not result.empty
+                else None
+            ),
+
+        "end":
+            (
+                result[
+                    "datetime"
+                ].max()
+                if not result.empty
+                else None
+            ),
+
+        "corrientes_full_history":
+            True,
+    }
 
     return (
         result,
@@ -2702,192 +2900,331 @@ def get_upstream_history(
 
 
 # ============================================================
-# DIAGNÓSTICO
+# ESTADO ACTUAL DE UNA ESTACIÓN
 # ============================================================
 
-def diagnostic(
-    start,
-    end,
+def _station_current_state(
+    history,
+    station,
 ):
 
-    report = {
-        "version":
-            "V11.9.1",
+    col = STATION_COLUMNS[
+        station
+    ]
 
-        "catalog_url":
-            A5_SERIES_GEOJSON_URL,
+    if (
+        history is None
+        or history.empty
+        or col not in history.columns
+    ):
 
-        "observations_url":
-            A5_OBSERVATIONS_URL,
+        return None
 
-        "var_id_nivel":
-            VAR_ID_NIVEL,
+    data = history[
+        [
+            "datetime",
+            col,
+        ]
+    ].copy()
 
-        "start":
-            normalizar_fecha(
-                start
-            ),
+    data[
+        col
+    ] = pd.to_numeric(
+        data[
+            col
+        ],
+        errors="coerce",
+    )
 
-        "end":
-            normalizar_fecha(
-                end
-            ),
-
-        "catalog_records":
-            0,
-
-        "stations":
-            {},
-    }
-
-    try:
-
-        catalog = (
-            descargar_catalogo_geojson()
+    data = (
+        data
+        .dropna(
+            subset=[
+                "datetime",
+                col,
+            ]
         )
-
-        report[
-            "catalog_records"
-        ] = len(
-            catalog
+        .sort_values(
+            "datetime"
         )
-
-    except Exception as exc:
-
-        report[
-            "catalog_error"
-        ] = str(
-            exc
+        .reset_index(
+            drop=True
         )
+    )
 
-        return report
+    if data.empty:
 
-    for station in STATIONS:
+        return None
 
-        candidates = (
-            buscar_candidatos_estacion(
-                catalog,
-                station,
+    current = float(
+        data.iloc[
+            -1
+        ][
+            col
+        ]
+    )
+
+    current_date = data.iloc[
+        -1
+    ][
+        "datetime"
+    ]
+
+    delta_1 = np.nan
+    delta_3 = np.nan
+    delta_7 = np.nan
+
+    if len(
+        data
+    ) >= 2:
+
+        delta_1 = (
+            current
+            -
+            float(
+                data.iloc[
+                    -2
+                ][
+                    col
+                ]
             )
         )
 
-        candidate_list = []
+    if len(
+        data
+    ) >= 4:
 
-        if not candidates.empty:
+        delta_3 = (
+            current
+            -
+            float(
+                data.iloc[
+                    -4
+                ][
+                    col
+                ]
+            )
+        )
 
-            for _, row in (
-                candidates
-                .head(10)
-                .iterrows()
-            ):
+    if len(
+        data
+    ) >= 8:
 
-                start_value = (
-                    row.get(
-                        "timestart"
-                    )
+        delta_7 = (
+            current
+            -
+            float(
+                data.iloc[
+                    -8
+                ][
+                    col
+                ]
+            )
+        )
+
+    if np.isfinite(
+        delta_3
+    ):
+
+        if delta_3 > 0.03:
+
+            trend = "Creciendo"
+
+            arrow = "↑"
+
+        elif delta_3 < -0.03:
+
+            trend = "Bajando"
+
+            arrow = "↓"
+
+        else:
+
+            trend = "Estable"
+
+            arrow = "→"
+
+    elif np.isfinite(
+        delta_1
+    ):
+
+        if delta_1 > 0.02:
+
+            trend = "Creciendo"
+
+            arrow = "↑"
+
+        elif delta_1 < -0.02:
+
+            trend = "Bajando"
+
+            arrow = "↓"
+
+        else:
+
+            trend = "Estable"
+
+            arrow = "→"
+
+    else:
+
+        trend = "Sin tendencia"
+
+        arrow = "—"
+
+    return {
+
+        "station":
+            station,
+
+        "datetime":
+            current_date,
+
+        "level":
+            current,
+
+        "delta_1":
+            (
+                float(
+                    delta_1
                 )
-
-                end_value = (
-                    row.get(
-                        "timeend"
-                    )
+                if np.isfinite(
+                    delta_1
                 )
+                else np.nan
+            ),
 
-                candidate_list.append(
-                    {
-                        "series_id":
-                            _safe_int(
-                                row.get(
-                                    "series_id"
-                                )
-                            ),
-
-                        "name":
-                            row.get(
-                                "nombre"
-                            ),
-
-                        "var_id":
-                            _safe_int(
-                                row.get(
-                                    "var_id"
-                                )
-                            ),
-
-                        "proc_id":
-                            _safe_int(
-                                row.get(
-                                    "proc_id"
-                                )
-                            ),
-
-                        "records":
-                            _safe_int(
-                                row.get(
-                                    "count"
-                                ),
-                                0,
-                            ),
-
-                        "start":
-                            (
-                                pd.Timestamp(
-                                    start_value
-                                ).strftime(
-                                    "%Y-%m-%d"
-                                )
-                                if (
-                                    start_value is not None
-                                    and not pd.isna(
-                                        start_value
-                                    )
-                                )
-                                else None
-                            ),
-
-                        "end":
-                            (
-                                pd.Timestamp(
-                                    end_value
-                                ).strftime(
-                                    "%Y-%m-%d"
-                                )
-                                if (
-                                    end_value is not None
-                                    and not pd.isna(
-                                        end_value
-                                    )
-                                )
-                                else None
-                            ),
-
-                        "score":
-                            _safe_float(
-                                row.get(
-                                    "_total_score"
-                                ),
-                                0.0,
-                            ),
-                    }
+        "delta_3":
+            (
+                float(
+                    delta_3
                 )
+                if np.isfinite(
+                    delta_3
+                )
+                else np.nan
+            ),
 
-        report[
-            "stations"
-        ][station] = {
-            "candidate_count":
-                len(
-                    candidates
-                ),
+        "delta_7":
+            (
+                float(
+                    delta_7
+                )
+                if np.isfinite(
+                    delta_7
+                )
+                else np.nan
+            ),
 
-            "candidates":
-                candidate_list,
-        }
+        "trend":
+            trend,
 
-    return report
+        "arrow":
+            arrow,
+    }
 
 
 # ============================================================
-# TABLA DIAGNÓSTICA
+# RESUMEN ACTUAL DEL CORREDOR
+# ============================================================
+
+def current_state_table(
+    history,
+):
+
+    rows = []
+
+    for station in STATIONS:
+
+        state = _station_current_state(
+            history,
+            station,
+        )
+
+        if state is None:
+
+            rows.append(
+                {
+                    "Estación":
+                        station,
+
+                    "Nivel":
+                        np.nan,
+
+                    "Δ 1 día":
+                        np.nan,
+
+                    "Δ 3 días":
+                        np.nan,
+
+                    "Δ 7 días":
+                        np.nan,
+
+                    "Estado":
+                        "Sin datos",
+                }
+            )
+
+            continue
+
+        rows.append(
+            {
+                "Estación":
+                    station,
+
+                "Nivel":
+                    state[
+                        "level"
+                    ],
+
+                "Δ 1 día":
+                    state[
+                        "delta_1"
+                    ],
+
+                "Δ 3 días":
+                    state[
+                        "delta_3"
+                    ],
+
+                "Δ 7 días":
+                    state[
+                        "delta_7"
+                    ],
+
+                "Estado":
+                    (
+                        state[
+                            "arrow"
+                        ]
+                        + " "
+                        + state[
+                            "trend"
+                        ]
+                    ),
+            }
+        )
+
+    return pd.DataFrame(
+        rows
+    )
+
+
+# ============================================================
+# COMPATIBILIDAD CON APP / MODEL
+# ============================================================
+
+def resumen_niveles_estaciones(
+    history,
+):
+
+    return current_state_table(
+        history
+    )
+
+
+# ============================================================
+# TABLA DE DIAGNÓSTICO
 # ============================================================
 
 def diagnostic_table(
@@ -2895,72 +3232,21 @@ def diagnostic_table(
     end,
 ):
 
-    try:
-
-        history, metadata = (
-            get_upstream_history(
-                start,
-                end,
-            )
-        )
-
-    except Exception as exc:
-
-        return pd.DataFrame(
-            [
-                {
-                    "Estación":
-                        "GENERAL",
-
-                    "Estado":
-                        "ERROR",
-
-                    "Serie":
-                        "—",
-
-                    "Nombre INA":
-                        "—",
-
-                    "Registros":
-                        0,
-
-                    "Desde":
-                        "—",
-
-                    "Hasta":
-                        "—",
-
-                    "Tipo fecha":
-                        "—",
-
-                    "Error":
-                        str(exc),
-                }
-            ]
-        )
+    _, metadata = get_upstream_history(
+        start,
+        end,
+    )
 
     rows = []
 
-    datetime_type = (
-        str(
-            history[
-                "datetime"
-            ].dtype
-        )
-        if (
-            isinstance(
-                history,
-                pd.DataFrame,
-            )
-            and "datetime"
-            in history.columns
-        )
-        else "—"
+    station_meta = metadata.get(
+        "stations",
+        {}
     )
 
     for station in STATIONS:
 
-        meta = metadata.get(
+        info = station_meta.get(
             station,
             {}
         )
@@ -2971,76 +3257,421 @@ def diagnostic_table(
                     station,
 
                 "Estado":
-                    meta.get(
+                    info.get(
                         "status",
-                        "sin dato",
+                        "sin_datos",
+                    ),
+
+                "Serie ID":
+                    info.get(
+                        "series_id"
                     ),
 
                 "Serie":
-                    (
-                        meta.get(
-                            "series_id"
-                        )
-                        if meta.get(
-                            "series_id"
-                        )
-                        is not None
-                        else "—"
+                    info.get(
+                        "series_name"
                     ),
 
-                "Nombre INA":
-                    (
-                        meta.get(
-                            "series_name"
-                        )
-                        or "—"
-                    ),
-
-                "Variable":
-                    (
-                        meta.get(
-                            "variable"
-                        )
-                        or "—"
+                "Río":
+                    info.get(
+                        "river"
                     ),
 
                 "Registros":
-                    meta.get(
+                    info.get(
                         "records",
                         0,
                     ),
 
-                "Desde":
-                    (
-                        meta.get(
-                            "first_date"
-                        )
-                        or "—"
+                "Primer dato":
+                    info.get(
+                        "first_date"
                     ),
 
-                "Hasta":
-                    (
-                        meta.get(
-                            "last_date"
-                        )
-                        or "—"
+                "Último dato":
+                    info.get(
+                        "last_date"
                     ),
 
-                "Candidatos":
-                    meta.get(
-                        "catalog_candidates",
+                "Último nivel":
+                    info.get(
+                        "last_level"
+                    ),
+
+                "Nivel mínimo":
+                    info.get(
+                        "min_level"
+                    ),
+
+                "Nivel máximo":
+                    info.get(
+                        "max_level"
+                    ),
+
+                "Historial completo":
+                    info.get(
+                        "full_history",
+                        False,
+                    ),
+            }
+        )
+
+    return pd.DataFrame(
+        rows
+    )
+
+
+# ============================================================
+# DIAGNÓSTICO DETALLADO
+# ============================================================
+
+def diagnostic(
+    start,
+    end,
+):
+
+    result = {
+
+        "version":
+            VERSION,
+
+        "start":
+            _normalize_date(
+                start
+            ),
+
+        "end":
+            _normalize_date(
+                end
+            ),
+
+        "status":
+            "pendiente",
+    }
+
+    # ========================================================
+    # CATÁLOGO
+    # ========================================================
+
+    try:
+
+        catalog = descargar_catalogo_geojson()
+
+        level_catalog = catalog[
+            catalog[
+                "var_id"
+            ]
+            == VAR_ID_NIVEL
+        ]
+
+        result[
+            "catalog_records"
+        ] = int(
+            len(
+                catalog
+            )
+        )
+
+        result[
+            "level_series_records"
+        ] = int(
+            len(
+                level_catalog
+            )
+        )
+
+    except Exception as exc:
+
+        result[
+            "catalog_error"
+        ] = str(
+            exc
+        )
+
+    # ========================================================
+    # ESTACIONES
+    # ========================================================
+
+    station_results = {}
+
+    for station in STATIONS:
+
+        station_result = {}
+
+        try:
+
+            candidates = (
+                buscar_candidatos_estacion(
+                    station,
+                    start,
+                    end,
+                )
+            )
+
+            station_result[
+                "candidate_count"
+            ] = int(
+                len(
+                    candidates
+                )
+            )
+
+            if not candidates.empty:
+
+                preview_columns = [
+                    col
+                    for col in [
+                        "series_id",
+                        "nombre",
+                        "rio",
+                        "var_id",
+                        "proc_id",
+                        "timestart",
+                        "timeend",
+                        "count",
+                        "is_parana_candidate",
+                        "score",
+                    ]
+                    if col
+                    in candidates.columns
+                ]
+
+                station_result[
+                    "top_candidates"
+                ] = (
+                    candidates[
+                        preview_columns
+                    ]
+                    .head(
+                        5
+                    )
+                    .to_dict(
+                        orient="records"
+                    )
+                )
+
+            selected, selection_meta = (
+                seleccionar_serie(
+                    station,
+                    start,
+                    end,
+                )
+            )
+
+            station_result[
+                "selection"
+            ] = selection_meta
+
+            if selected is not None:
+
+                station_result[
+                    "selected_series_id"
+                ] = selected.get(
+                    "series_id"
+                )
+
+                station_result[
+                    "selected_name"
+                ] = selected.get(
+                    "nombre"
+                )
+
+                station_result[
+                    "selected_river"
+                ] = selected.get(
+                    "rio"
+                )
+
+        except Exception as exc:
+
+            station_result[
+                "error"
+            ] = str(
+                exc
+            )
+
+        station_results[
+            station
+        ] = station_result
+
+    result[
+        "stations"
+    ] = station_results
+
+    # ========================================================
+    # RESULTADO FINAL
+    # ========================================================
+
+    try:
+
+        history, metadata = (
+            get_upstream_history(
+                start,
+                end,
+            )
+        )
+
+        result[
+            "status"
+        ] = metadata.get(
+            "status",
+            "ok",
+        )
+
+        result[
+            "records"
+        ] = int(
+            len(
+                history
+            )
+        )
+
+        result[
+            "available_stations"
+        ] = metadata.get(
+            "available_stations",
+            []
+        )
+
+        result[
+            "station_count"
+        ] = metadata.get(
+            "station_count",
+            0,
+        )
+
+        result[
+            "coverage"
+        ] = metadata.get(
+            "coverage",
+            {}
+        )
+
+        result[
+            "history_start"
+        ] = metadata.get(
+            "start"
+        )
+
+        result[
+            "history_end"
+        ] = metadata.get(
+            "end"
+        )
+
+        result[
+            "corrientes_full_history"
+        ] = metadata.get(
+            "corrientes_full_history",
+            False,
+        )
+
+        result[
+            "diagnostic_table"
+        ] = diagnostic_table_from_metadata(
+            metadata
+        ).to_dict(
+            orient="records"
+        )
+
+    except Exception as exc:
+
+        result[
+            "status"
+        ] = "error"
+
+        result[
+            "error"
+        ] = str(
+            exc
+        )
+
+    return result
+
+
+# ============================================================
+# DIAGNÓSTICO DESDE METADATA
+# ============================================================
+
+def diagnostic_table_from_metadata(
+    metadata,
+):
+
+    rows = []
+
+    station_meta = metadata.get(
+        "stations",
+        {}
+    )
+
+    for station in STATIONS:
+
+        info = station_meta.get(
+            station,
+            {}
+        )
+
+        rows.append(
+            {
+                "Estación":
+                    station,
+
+                "Estado":
+                    info.get(
+                        "status",
+                        "sin_datos",
+                    ),
+
+                "Serie ID":
+                    info.get(
+                        "series_id"
+                    ),
+
+                "Serie":
+                    info.get(
+                        "series_name"
+                    ),
+
+                "Río":
+                    info.get(
+                        "river"
+                    ),
+
+                "Registros":
+                    info.get(
+                        "records",
                         0,
                     ),
 
-                "Tipo fecha":
-                    datetime_type,
+                "Primer dato":
+                    info.get(
+                        "first_date"
+                    ),
 
-                "Error":
-                    (
-                        meta.get(
-                            "error"
-                        )
-                        or ""
+                "Último dato":
+                    info.get(
+                        "last_date"
+                    ),
+
+                "Último nivel":
+                    info.get(
+                        "last_level"
+                    ),
+
+                "Mínimo":
+                    info.get(
+                        "min_level"
+                    ),
+
+                "Máximo":
+                    info.get(
+                        "max_level"
+                    ),
+
+                "Historial completo":
+                    info.get(
+                        "full_history",
+                        False,
                     ),
             }
         )
