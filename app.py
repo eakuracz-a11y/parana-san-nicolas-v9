@@ -1,7 +1,7 @@
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # app.py
-# V11.12 COMPLETO
+# V11.13 COMPLETO
 #
 # Dashboard Streamlit
 #
@@ -59,7 +59,7 @@ from src.model import (
 # VERSIÓN
 # ============================================================
 
-APP_VERSION = "V11.12"
+APP_VERSION = "V11.13"
 
 APP_SUBTITLE = (
     "Pronóstico hidrológico multivariable · "
@@ -1707,8 +1707,8 @@ if (
             mode="lines",
             name="Escenario adverso",
             line=dict(
-                color="#f59e0b",
-                width=2.4,
+                color="rgba(250,204,21,0.25)",
+                width=3.0,
                 dash="dash",
             ),
         )
@@ -2327,7 +2327,7 @@ st.caption(
 
 
 # ============================================================
-# GRÁFICO CAUDAL
+# GRÁFICO CAUDAL V11.13
 # ============================================================
 
 st.subheader(
@@ -2376,21 +2376,25 @@ if available_flow_stations:
         )
 
     selected_flow_station = st.selectbox(
-
         "Estación de caudal",
-
         available_flow_stations,
-
-        index=
-            default_flow_index,
-
-        key=
-            "selected_flow_station",
+        index=default_flow_index,
+        key="selected_flow_station",
     )
 
     selected_flow_col = FLOW_COLUMNS[
         selected_flow_station
     ]
+
+    selected_source_col = (
+        selected_flow_col
+        + "_source"
+    )
+
+    selected_quality_col = (
+        selected_flow_col
+        + "_quality"
+    )
 
     flow_hist = exog_history[
         exog_history[
@@ -2399,79 +2403,350 @@ if available_flow_stations:
         >= visible_start
     ].copy()
 
+    flow_hist[
+        selected_flow_col
+    ] = numeric(
+        flow_hist[
+            selected_flow_col
+        ]
+    )
+
+    # --------------------------------------------------------
+    # RESUMEN DEL CAUDAL SELECCIONADO
+    # --------------------------------------------------------
+
+    q_current = current_value(
+        exog_history,
+        selected_flow_col,
+    )
+
+    q_delta_7 = delta_days(
+        exog_history,
+        selected_flow_col,
+        7,
+    )
+
+    q_future = exog_future.copy()
+
+    if selected_flow_col in q_future.columns:
+        q_future[selected_flow_col] = numeric(
+            q_future[selected_flow_col]
+        )
+
+    q15 = np.nan
+    q30 = np.nan
+    q60 = np.nan
+    qmax15 = np.nan
+
+    if (
+        not q_future.empty
+        and selected_flow_col
+        in q_future.columns
+    ):
+
+        future_values = q_future[
+            selected_flow_col
+        ]
+
+        if len(future_values) >= 15:
+            q15 = safe_float(
+                future_values.iloc[14]
+            )
+            qmax15 = safe_float(
+                future_values.iloc[:15].max()
+            )
+
+        if len(future_values) >= 30:
+            q30 = safe_float(
+                future_values.iloc[29]
+            )
+
+        if len(future_values) >= 60:
+            q60 = safe_float(
+                future_values.iloc[59]
+            )
+
+    last_source = "Sin datos"
+    last_quality = np.nan
+
+    if (
+        selected_source_col
+        in exog_history.columns
+    ):
+
+        source_rows = exog_history[
+            [
+                selected_flow_col,
+                selected_source_col,
+            ]
+            + (
+                [selected_quality_col]
+                if selected_quality_col
+                in exog_history.columns
+                else []
+            )
+        ].copy()
+
+        source_rows[
+            selected_flow_col
+        ] = numeric(
+            source_rows[
+                selected_flow_col
+            ]
+        )
+
+        source_rows = source_rows.dropna(
+            subset=[selected_flow_col]
+        )
+
+        if not source_rows.empty:
+            last_row = source_rows.iloc[-1]
+            last_source = str(
+                last_row.get(
+                    selected_source_col,
+                    "desconocido",
+                )
+            )
+
+            if selected_quality_col in source_rows.columns:
+                last_quality = safe_float(
+                    last_row.get(
+                        selected_quality_col
+                    )
+                )
+
+    fm1, fm2, fm3, fm4, fm5 = st.columns(5)
+
+    with fm1:
+        st.metric(
+            "Caudal actual",
+            fmt_flow(q_current),
+            (
+                fmt_flow(q_delta_7)
+                if np.isfinite(q_delta_7)
+                else None
+            ),
+        )
+        st.caption(
+            f"Origen: {last_source}"
+            + (
+                f" · calidad {last_quality:.0%}"
+                if np.isfinite(last_quality)
+                else ""
+            )
+        )
+
+    with fm2:
+        st.metric(
+            "Máximo 15 días",
+            fmt_flow(qmax15),
+        )
+
+    with fm3:
+        st.metric(
+            "Día 15",
+            fmt_flow(q15),
+        )
+
+    with fm4:
+        st.metric(
+            "Día 30",
+            fmt_flow(q30),
+        )
+
+    with fm5:
+        st.metric(
+            "Día 60 · tendencia",
+            fmt_flow(q60),
+        )
+
     flow_fig = go.Figure()
 
-    flow_fig.add_trace(
-        go.Scatter(
+    # --------------------------------------------------------
+    # HISTÓRICO OBSERVADO VS RECONSTRUIDO
+    # --------------------------------------------------------
 
-            x=
-                flow_hist[
-                    "datetime"
-                ],
+    if selected_source_col in flow_hist.columns:
 
-            y=
-                flow_hist[
-                    selected_flow_col
-                ],
-
-            mode=
-                "lines",
-
-            name=
-                "Histórico",
+        source_text = (
+            flow_hist[
+                selected_source_col
+            ]
+            .fillna("")
+            .astype(str)
+            .str.lower()
         )
-    )
+
+        observed_mask = (
+            source_text == "observado"
+        )
+
+        reconstructed_mask = (
+            flow_hist[
+                selected_flow_col
+            ].notna()
+            & ~observed_mask
+        )
+
+        observed_y = flow_hist[
+            selected_flow_col
+        ].where(observed_mask)
+
+        reconstructed_y = flow_hist[
+            selected_flow_col
+        ].where(reconstructed_mask)
+
+        if observed_y.notna().any():
+            flow_fig.add_trace(
+                go.Scatter(
+                    x=flow_hist["datetime"],
+                    y=observed_y,
+                    mode="lines",
+                    name="Observado",
+                    line=dict(width=2.6),
+                    connectgaps=False,
+                )
+            )
+
+        if reconstructed_y.notna().any():
+            flow_fig.add_trace(
+                go.Scatter(
+                    x=flow_hist["datetime"],
+                    y=reconstructed_y,
+                    mode="lines",
+                    name="Reconstruido / interpolado",
+                    line=dict(
+                        width=2.0,
+                        dash="dot",
+                    ),
+                    connectgaps=False,
+                )
+            )
+
+    else:
+
+        flow_fig.add_trace(
+            go.Scatter(
+                x=flow_hist["datetime"],
+                y=flow_hist[selected_flow_col],
+                mode="lines",
+                name="Histórico",
+            )
+        )
+
+    # --------------------------------------------------------
+    # FUTURO POR HORIZONTE
+    # --------------------------------------------------------
 
     if (
         selected_flow_col
         in exog_future.columns
+        and not exog_future.empty
     ):
 
-        flow_fig.add_trace(
-            go.Scatter(
-
-                x=
-                    exog_future[
-                        "datetime"
-                    ],
-
-                y=
-                    exog_future[
-                        selected_flow_col
-                    ],
-
-                mode=
-                    "lines",
-
-                name=
-                    "Proyección",
-            )
+        future_plot = exog_future.copy()
+        future_plot[selected_flow_col] = numeric(
+            future_plot[selected_flow_col]
         )
 
+        if "flow_horizon_day" not in future_plot.columns:
+            future_plot["flow_horizon_day"] = np.arange(
+                1,
+                len(future_plot) + 1,
+            )
+
+        flow_segments = [
+            (
+                1,
+                15,
+                "Pronóstico 1–15 días",
+                "solid",
+                3.0,
+            ),
+            (
+                16,
+                30,
+                "Proyección 16–30 días",
+                "dash",
+                2.6,
+            ),
+            (
+                31,
+                60,
+                "Tendencia 31–60 días",
+                "dot",
+                2.3,
+            ),
+        ]
+
+        for (
+            start_day,
+            end_day,
+            label,
+            dash,
+            width,
+        ) in flow_segments:
+
+            segment = future_plot[
+                (
+                    future_plot[
+                        "flow_horizon_day"
+                    ] >= start_day
+                )
+                &
+                (
+                    future_plot[
+                        "flow_horizon_day"
+                    ] <= end_day
+                )
+            ].copy()
+
+            if segment.empty:
+                continue
+
+            flow_fig.add_trace(
+                go.Scatter(
+                    x=segment["datetime"],
+                    y=segment[selected_flow_col],
+                    mode="lines",
+                    name=label,
+                    line=dict(
+                        width=width,
+                        dash=dash,
+                    ),
+                )
+            )
+
     flow_fig.update_layout(
-
-        height=380,
-
-        hovermode=
-            "x unified",
-
+        height=430,
+        hovermode="x unified",
         margin=dict(
             l=20,
             r=20,
             t=20,
             b=20,
         ),
-
-        yaxis_title=
-            "Caudal [m³/s]",
-
-        xaxis_title=
-            "Fecha",
+        yaxis_title="Caudal [m³/s]",
+        xaxis_title="Fecha",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+        ),
     )
 
     st.plotly_chart(
         flow_fig,
         use_container_width=True,
+    )
+
+    st.caption(
+        "V11.13: 1–15 días = pronóstico hidrológico; "
+        "16–30 días = proyección; 31–60 días = tendencia. "
+        "El tramo extendido no debe interpretarse como un pronóstico "
+        "meteorológico determinístico."
     )
 
 else:
@@ -2552,21 +2827,36 @@ if available_rain_stations:
         in exog_future.columns
     ):
 
+        rain_future_plot = exog_future.copy()
+
+        if (
+            "rain_forecast_available"
+            in rain_future_plot.columns
+        ):
+            rain_future_plot = rain_future_plot[
+                rain_future_plot[
+                    "rain_forecast_available"
+                ].fillna(False)
+            ]
+
+        else:
+            rain_future_plot = rain_future_plot.head(16)
+
         rain_fig.add_trace(
             go.Bar(
 
                 x=
-                    exog_future[
+                    rain_future_plot[
                         "datetime"
                     ],
 
                 y=
-                    exog_future[
+                    rain_future_plot[
                         rain_col
                     ],
 
                 name=
-                    "Pronóstico",
+                    "Pronóstico meteorológico disponible",
         )
     )
 
