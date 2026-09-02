@@ -1,7 +1,7 @@
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # src/exogenous.py
-# V11.11.1 COMPLETO
+# V11.13 COMPLETO
 #
 # VARIABLES EXÓGENAS
 #
@@ -45,7 +45,7 @@ import requests
 # VERSIÓN
 # ============================================================
 
-VERSION = "V11.11.1"
+VERSION = "V11.13"
 
 
 # ============================================================
@@ -67,6 +67,15 @@ MIN_FLOW_OBSERVATIONS = 3
 MIN_RATIO_OVERLAP = 15
 
 SHORT_INTERPOLATION_LIMIT = 5
+
+# Horizonte y límites del nuevo motor de caudal V11.13
+FLOW_SHORT_HORIZON_DAYS = 15
+FLOW_MEDIUM_HORIZON_DAYS = 30
+FLOW_UPSTREAM_MAX_LAG_DAYS = 30
+FLOW_SEASONAL_WINDOW_DAYS = 5
+FLOW_MIN_LAG_CORRELATION = 0.15
+FLOW_MAX_RAIN_EFFECT = 0.04
+FLOW_MAX_UPSTREAM_EFFECT = 0.08
 
 
 # ============================================================
@@ -3833,13 +3842,431 @@ def elegir_caudal_principal(
 
 
 # ============================================================
-# PROYECCIÓN DE UNA SERIE DE CAUDAL
+# PROYECCIÓN HIDROLÓGICA DE CAUDAL V11.13
+#
+# La versión anterior extrapolaba una única pendiente reciente y
+# la amortiguaba exponencialmente. Eso generaba curvas demasiado
+# suaves y podía aparentar una certeza que los datos no sostienen.
+#
+# V11.13 combina cuatro señales independientes:
+#   1) tendencia reciente de la propia estación;
+#   2) comportamiento estacional histórico de esa estación;
+#   3) señal propagada desde la estación inmediatamente aguas arriba;
+#   4) lluvia pronosticada, sólo dentro del horizonte meteorológico real.
+#
+# Ninguna de estas señales convierte el horizonte 31–60 días en una
+# predicción meteorológica. Ese tramo debe leerse como tendencia.
 # ============================================================
+
+def _series_with_datetime(
+    history,
+    col,
+):
+
+    if (
+        history is None
+        or history.empty
+        or "datetime" not in history.columns
+        or col not in history.columns
+    ):
+        return pd.DataFrame(
+            columns=["datetime", "value"]
+        )
+
+    x = history[
+        ["datetime", col]
+    ].copy()
+
+    x["datetime"] = _datetime_naive(
+        x["datetime"]
+    )
+
+    x["value"] = _numeric(
+        x[col]
+    )
+
+    return (
+        x.dropna(
+            subset=["datetime", "value"]
+        )
+        .sort_values("datetime")
+        .drop_duplicates(
+            subset=["datetime"],
+            keep="last",
+        )
+        .reset_index(drop=True)
+        [["datetime", "value"]]
+    )
+
+
+def _linear_daily_slope(
+    values,
+    window,
+):
+
+    x = (
+        _numeric(values)
+        .dropna()
+        .tail(window)
+    )
+
+    if len(x) < 4:
+        return 0.0
+
+    try:
+        slope = np.polyfit(
+            np.arange(len(x), dtype=float),
+            x.to_numpy(dtype=float),
+            1,
+        )[0]
+    except Exception:
+        slope = 0.0
+
+    return float(slope)
+
+
+def _historical_seasonal_relative_change(
+    q_frame,
+    days,
+):
+    """
+    Mediana histórica del cambio relativo entre una fecha base
+    equivalente y cada horizonte futuro. Se calcula dentro de cada
+    año para no mezclar directamente niveles absolutos de regímenes
+    hidrológicos diferentes.
+    """
+
+    result = np.zeros(days, dtype=float)
+
+    if (
+        q_frame is None
+        or q_frame.empty
+        or len(q_frame) < 365
+    ):
+        return result
+
+    x = q_frame.copy()
+    x["year"] = x["datetime"].dt.year
+    x["doy"] = x["datetime"].dt.dayofyear
+
+    base_date = pd.Timestamp(
+        x["datetime"].iloc[-1]
+    )
+    base_doy = int(base_date.dayofyear)
+    current_year = int(base_date.year)
+
+    historical_years = sorted(
+        y for y in x["year"].dropna().unique()
+        if int(y) < current_year
+    )
+
+    if len(historical_years) < 2:
+        return result
+
+    def _cyclic_distance(a, b):
+        diff = abs(int(a) - int(b))
+        return min(diff, 366 - diff)
+
+    for horizon in range(1, days + 1):
+
+        target_date = base_date + pd.Timedelta(days=horizon)
+        target_doy = int(target_date.dayofyear)
+        changes = []
+
+        for year in historical_years:
+            year_df = x[x["year"] == year]
+            if year_df.empty:
+                continue
+
+            base_candidates = year_df[
+                year_df["doy"].apply(
+                    lambda d: _cyclic_distance(d, base_doy)
+                    <= FLOW_SEASONAL_WINDOW_DAYS
+                )
+            ]
+            target_candidates = year_df[
+                year_df["doy"].apply(
+                    lambda d: _cyclic_distance(d, target_doy)
+                    <= FLOW_SEASONAL_WINDOW_DAYS
+                )
+            ]
+
+            if base_candidates.empty or target_candidates.empty:
+                continue
+
+            q0 = float(base_candidates["value"].median())
+            q1 = float(target_candidates["value"].median())
+
+            if (
+                np.isfinite(q0)
+                and np.isfinite(q1)
+                and q0 > 0
+            ):
+                changes.append((q1 / q0) - 1.0)
+
+        if len(changes) >= 2:
+            result[horizon - 1] = float(
+                np.clip(
+                    np.nanmedian(changes),
+                    -0.35,
+                    0.35,
+                )
+            )
+        elif horizon > 1:
+            result[horizon - 1] = result[horizon - 2]
+
+    # Suavizado leve sólo para evitar saltos de calendario.
+    return (
+        pd.Series(result)
+        .rolling(5, center=True, min_periods=1)
+        .median()
+        .to_numpy(dtype=float)
+    )
+
+
+def _estimate_upstream_flow_signal(
+    history,
+    station,
+    days,
+):
+    """
+    Busca automáticamente el retardo de la estación inmediatamente
+    aguas arriba usando cambios diarios. Sólo utiliza correlaciones
+    positivas suficientemente claras.
+    """
+
+    signal = np.zeros(days, dtype=float)
+
+    if station not in STATIONS:
+        return signal, None, np.nan
+
+    idx = STATIONS.index(station)
+    if idx <= 0:
+        return signal, None, np.nan
+
+    upstream_station = STATIONS[idx - 1]
+    target_col = FLOW_COLUMNS[station]
+    upstream_col = FLOW_COLUMNS[upstream_station]
+
+    if (
+        target_col not in history.columns
+        or upstream_col not in history.columns
+        or "datetime" not in history.columns
+    ):
+        return signal, upstream_station, np.nan
+
+    x = history[
+        ["datetime", target_col, upstream_col]
+    ].copy()
+    x["datetime"] = _datetime_naive(x["datetime"])
+    x[target_col] = _numeric(x[target_col])
+    x[upstream_col] = _numeric(x[upstream_col])
+    x = x.dropna().sort_values("datetime")
+
+    if len(x) < 60:
+        return signal, upstream_station, np.nan
+
+    target_change = x[target_col].pct_change()
+    upstream_change = x[upstream_col].pct_change()
+
+    best_lag = None
+    best_corr = -np.inf
+
+    max_lag = min(
+        FLOW_UPSTREAM_MAX_LAG_DAYS,
+        max(1, len(x) // 6),
+    )
+
+    for lag in range(1, max_lag + 1):
+        pair = pd.concat(
+            [
+                target_change,
+                upstream_change.shift(lag),
+            ],
+            axis=1,
+        ).dropna()
+
+        if len(pair) < 40:
+            continue
+
+        corr = pair.iloc[:, 0].corr(
+            pair.iloc[:, 1]
+        )
+
+        if (
+            np.isfinite(corr)
+            and corr > best_corr
+        ):
+            best_corr = float(corr)
+            best_lag = int(lag)
+
+    if (
+        best_lag is None
+        or not np.isfinite(best_corr)
+        or best_corr < FLOW_MIN_LAG_CORRELATION
+    ):
+        return signal, upstream_station, best_corr
+
+    up = x[upstream_col].dropna()
+    if len(up) < 8:
+        return signal, upstream_station, best_corr
+
+    recent_change = (
+        float(up.iloc[-1]) / float(up.iloc[-8]) - 1.0
+        if float(up.iloc[-8]) > 0
+        else 0.0
+    )
+
+    amplitude = float(
+        np.clip(
+            recent_change * best_corr,
+            -FLOW_MAX_UPSTREAM_EFFECT,
+            FLOW_MAX_UPSTREAM_EFFECT,
+        )
+    )
+
+    # Pulso suave centrado en el retardo estimado.
+    spread = max(3.0, best_lag * 0.35)
+    horizons = np.arange(1, days + 1, dtype=float)
+    pulse = np.exp(
+        -0.5 * ((horizons - best_lag) / spread) ** 2
+    )
+
+    signal = amplitude * pulse
+
+    return signal, upstream_station, best_corr
+
+
+def _estimate_rain_flow_sensitivity(
+    history,
+    station,
+):
+    """
+    Sensibilidad empírica no negativa: lluvia acumulada de 7 días
+    frente al cambio porcentual de caudal durante los 7 días siguientes.
+    El coeficiente se limita deliberadamente porque la lluvia local no
+    explica por sí sola el caudal del cauce principal del Paraná.
+    """
+
+    if station not in STATIONS:
+        return 0.0
+
+    flow_col = FLOW_COLUMNS[station]
+    rain_col = RAIN_COLUMNS[station]
+
+    if (
+        flow_col not in history.columns
+        or rain_col not in history.columns
+    ):
+        return 0.0
+
+    q = _numeric(history[flow_col])
+    rain = _numeric(history[rain_col]).fillna(0.0).clip(lower=0.0)
+
+    rain7 = rain.rolling(7, min_periods=5).sum()
+    future_change = q.shift(-7) / q - 1.0
+
+    pair = pd.DataFrame(
+        {
+            "rain7": rain7,
+            "future_change": future_change,
+        }
+    ).replace([np.inf, -np.inf], np.nan).dropna()
+
+    pair = pair[
+        (pair["rain7"] >= 1.0)
+        & (pair["future_change"].abs() <= 0.40)
+    ]
+
+    if len(pair) < 60:
+        return 0.0
+
+    x = pair["rain7"].to_numpy(dtype=float)
+    y = pair["future_change"].to_numpy(dtype=float)
+
+    try:
+        slope = np.cov(x, y, ddof=1)[0, 1] / np.var(x, ddof=1)
+    except Exception:
+        slope = 0.0
+
+    if not np.isfinite(slope):
+        slope = 0.0
+
+    return float(
+        np.clip(
+            slope,
+            0.0,
+            0.0008,
+        )
+    )
+
+
+def _future_rain_relative_effect(
+    future_rain,
+    station,
+    days,
+    sensitivity,
+):
+
+    effect = np.zeros(days, dtype=float)
+
+    if (
+        future_rain is None
+        or future_rain.empty
+        or station not in STATIONS
+        or sensitivity <= 0
+    ):
+        return effect
+
+    rain_col = RAIN_COLUMNS[station]
+    if rain_col not in future_rain.columns:
+        return effect
+
+    rain = (
+        _numeric(future_rain[rain_col])
+        .fillna(0.0)
+        .clip(lower=0.0)
+        .head(days)
+        .to_numpy(dtype=float)
+    )
+
+    real_days = min(
+        len(rain),
+        OPEN_METEO_REAL_FORECAST_DAYS,
+        days,
+    )
+
+    if real_days <= 0:
+        return effect
+
+    rain = rain[:real_days]
+
+    # Cada lluvia influye gradualmente durante los siguientes 3–10 días.
+    for i, mm in enumerate(rain):
+        if mm <= 0:
+            continue
+
+        amplitude = float(mm * sensitivity)
+        for lag in range(3, 11):
+            j = i + lag
+            if j >= days:
+                break
+            weight = np.exp(-0.5 * ((lag - 6.0) / 2.2) ** 2)
+            effect[j] += amplitude * weight / 4.5
+
+    return np.clip(
+        effect,
+        0.0,
+        FLOW_MAX_RAIN_EFFECT,
+    )
+
 
 def proyectar_serie_caudal(
     history,
     col,
     days,
+    future_rain=None,
+    station=None,
 ):
 
     days = int(
@@ -3850,65 +4277,39 @@ def proyectar_serie_caudal(
         )
     )
 
-    q = (
-        _numeric(
-            history[
-                col
-            ]
-        )
-        .dropna()
+    q_frame = _series_with_datetime(
+        history,
+        col,
     )
 
-    if len(q) < 3:
-
-        return np.full(
-            days,
-            np.nan,
-        )
+    if len(q_frame) < 3:
+        return np.full(days, np.nan)
 
     current = float(
-        q.iloc[-1]
+        q_frame["value"].iloc[-1]
     )
 
-    recent = q.tail(
-        min(
-            21,
-            len(q),
-        )
+    if not np.isfinite(current) or current <= 0:
+        return np.full(days, np.nan)
+
+    # --------------------------------------------------------
+    # 1. MOMENTO RECIENTE
+    # --------------------------------------------------------
+    slope_7 = _linear_daily_slope(
+        q_frame["value"],
+        7,
+    )
+    slope_21 = _linear_daily_slope(
+        q_frame["value"],
+        21,
     )
 
-    if len(
-        recent
-    ) >= 4:
-
-        try:
-
-            slope = np.polyfit(
-                np.arange(
-                    len(recent)
-                ),
-                recent.to_numpy(
-                    dtype=float
-                ),
-                1,
-            )[0]
-
-        except Exception:
-
-            slope = 0.0
-
-    else:
-
-        slope = 0.0
+    slope = 0.65 * slope_7 + 0.35 * slope_21
 
     max_daily_change = max(
-        abs(
-            current
-        )
-        * 0.025,
-        50.0,
+        current * 0.02,
+        40.0,
     )
-
     slope = float(
         np.clip(
             slope,
@@ -3917,26 +4318,97 @@ def proyectar_serie_caudal(
         )
     )
 
+    horizons = np.arange(1, days + 1, dtype=float)
+
+    # La tendencia reciente pierde peso, pero no define por sí sola
+    # un asintótico artificial.
+    momentum_daily = slope * np.exp(-horizons / 18.0)
+    momentum_abs = np.cumsum(momentum_daily)
+    momentum_rel = momentum_abs / current
+
+    # --------------------------------------------------------
+    # 2. CLIMATOLOGÍA ESTACIONAL HISTÓRICA
+    # --------------------------------------------------------
+    seasonal_rel = _historical_seasonal_relative_change(
+        q_frame,
+        days,
+    )
+
+    # --------------------------------------------------------
+    # 3. PROPAGACIÓN DESDE AGUAS ARRIBA
+    # --------------------------------------------------------
+    upstream_rel, _, _ = _estimate_upstream_flow_signal(
+        history,
+        station,
+        days,
+    )
+
+    # --------------------------------------------------------
+    # 4. LLUVIA PRONOSTICADA REAL
+    # --------------------------------------------------------
+    rain_sensitivity = _estimate_rain_flow_sensitivity(
+        history,
+        station,
+    )
+    rain_rel = _future_rain_relative_effect(
+        future_rain,
+        station,
+        days,
+        rain_sensitivity,
+    )
+
+    # --------------------------------------------------------
+    # COMBINACIÓN SEGÚN HORIZONTE
+    # --------------------------------------------------------
     values = []
 
-    value = current
+    for i in range(days):
+        day = i + 1
 
-    for day in range(
-        1,
-        days + 1,
-    ):
+        if day <= FLOW_SHORT_HORIZON_DAYS:
+            momentum_w = 0.72
+            seasonal_w = 0.28
+            upstream_w = 1.00
+            rain_w = 1.00
 
-        damping = np.exp(
-            -day / 20.0
+        elif day <= FLOW_MEDIUM_HORIZON_DAYS:
+            frac = (
+                day - FLOW_SHORT_HORIZON_DAYS
+            ) / (
+                FLOW_MEDIUM_HORIZON_DAYS
+                - FLOW_SHORT_HORIZON_DAYS
+            )
+            momentum_w = 0.72 - 0.42 * frac
+            seasonal_w = 0.28 + 0.42 * frac
+            upstream_w = 0.85
+            rain_w = 0.65
+
+        else:
+            frac = min(
+                1.0,
+                (day - FLOW_MEDIUM_HORIZON_DAYS) / 30.0,
+            )
+            momentum_w = 0.30 - 0.20 * frac
+            seasonal_w = 0.70 + 0.20 * frac
+            upstream_w = 0.45 * (1.0 - 0.55 * frac)
+            rain_w = 0.20 * (1.0 - frac)
+
+        relative_change = (
+            momentum_w * momentum_rel[i]
+            + seasonal_w * seasonal_rel[i]
+            + upstream_w * upstream_rel[i]
+            + rain_w * rain_rel[i]
         )
 
-        daily_change = (
-            slope
-            * damping
+        relative_change = float(
+            np.clip(
+                relative_change,
+                -0.40,
+                0.40,
+            )
         )
 
-        value = value + daily_change
-
+        value = current * (1.0 + relative_change)
         value = float(
             np.clip(
                 value,
@@ -3944,15 +4416,18 @@ def proyectar_serie_caudal(
                 ESTIMATED_FLOW_MAX,
             )
         )
+        values.append(value)
 
-        values.append(
-            value
-        )
-
-    return np.asarray(
-        values,
-        dtype=float,
+    # Suavizado mínimo de tres puntos para eliminar dientes numéricos,
+    # conservando la dirección de las señales hidrológicas.
+    values = (
+        pd.Series(values, dtype=float)
+        .rolling(3, center=True, min_periods=1)
+        .mean()
+        .to_numpy(dtype=float)
     )
+
+    return values
 
 
 # ============================================================
@@ -4757,6 +5232,32 @@ def get_exogenous_data(
         axis=1
     )
 
+    future["flow_horizon_day"] = np.arange(
+        1,
+        forecast_days + 1,
+        dtype=int,
+    )
+
+    future["flow_horizon_class"] = np.select(
+        [
+            future["flow_horizon_day"] <= FLOW_SHORT_HORIZON_DAYS,
+            future["flow_horizon_day"] <= FLOW_MEDIUM_HORIZON_DAYS,
+        ],
+        [
+            "pronostico_1_15",
+            "proyeccion_16_30",
+        ],
+        default="tendencia_31_60",
+    )
+
+    future["rain_forecast_available"] = (
+        future["flow_horizon_day"]
+        <= min(
+            OPEN_METEO_REAL_FORECAST_DAYS,
+            forecast_days,
+        )
+    )
+
     # ========================================================
     # 9. PROYECTAR CAUDALES
     # ========================================================
@@ -4793,6 +5294,8 @@ def get_exogenous_data(
                     history,
                     col,
                     forecast_days,
+                    future_rain=future,
+                    station=station,
                 )
             )
 
@@ -4809,20 +5312,27 @@ def get_exogenous_data(
                 source_col
             ] = "proyectado"
 
+            horizon = np.arange(
+                1,
+                forecast_days + 1,
+                dtype=float,
+            )
+
             future[
                 quality_col
-            ] = (
-                0.65
-                * np.exp(
-                    -np.arange(
-                        forecast_days
-                    )
-                    / 90.0
-                )
-            ).clip(
-                0.35,
-                0.65,
-            )
+            ] = np.where(
+                horizon <= FLOW_SHORT_HORIZON_DAYS,
+                0.72 - 0.012 * (horizon - 1.0),
+                np.where(
+                    horizon <= FLOW_MEDIUM_HORIZON_DAYS,
+                    0.55 - 0.010 * (
+                        horizon - FLOW_SHORT_HORIZON_DAYS
+                    ),
+                    0.40 - 0.0035 * (
+                        horizon - FLOW_MEDIUM_HORIZON_DAYS
+                    ),
+                ),
+            ).clip(0.28, 0.72)
 
         else:
 
@@ -5122,8 +5632,9 @@ def get_exogenous_data(
         "warning":
             (
                 "Los caudales reconstruidos y proyectados "
-                "se mantienen diferenciados de las observaciones "
-                "reales mediante source y quality."
+                "se mantienen diferenciados de las observaciones reales. "
+                "El tramo 1–15 días se trata como pronóstico hidrológico, "
+                "16–30 como proyección y 31–60 como tendencia."
             ),
     }
 
