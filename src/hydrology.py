@@ -1,7 +1,7 @@
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # src/hydrology.py
-# V11.11 COMPLETO
+# V11.14 COMPLETO
 #
 # MOTOR HIDROLÓGICO
 #
@@ -42,7 +42,7 @@ import pandas as pd
 # VERSIÓN
 # ============================================================
 
-VERSION = "V11.11"
+VERSION = "V11.14"
 
 
 # ============================================================
@@ -53,13 +53,13 @@ MAX_SCENARIO_DAYS = 60
 
 MIN_OVERLAP = 30
 
-MIN_LAG_OVERLAP = 25
+MIN_LAG_OVERLAP = 15
 
 MIN_EVENT_OVERLAP = 5
 
 MIN_EVENTS_FOR_SCENARIO = 3
 
-MAX_LAG_DAYS = 45
+MAX_LAG_DAYS = 60
 
 DEFAULT_CORRIENTES_LAG = 20
 
@@ -541,75 +541,66 @@ def _lag_correlation(
     downstream,
     max_lag=MAX_LAG_DAYS,
     min_overlap=MIN_LAG_OVERLAP,
+    min_lag=1,
 ):
-    upstream = _numeric(
-        upstream
-    )
+    """
+    Busca el retardo con mayor relación entre las VARIACIONES
+    normalizadas de la estación aguas arriba y San Nicolás.
 
-    downstream = _numeric(
-        downstream
-    )
+    V11.12:
+    - evita lag=0 para Corrientes -> San Nicolás;
+    - permite explorar hasta 60 días;
+    - reduce la penalización artificial a retardos largos;
+    - conserva todos los candidatos para diagnóstico.
+    """
+    upstream = _numeric(upstream)
+    downstream = _numeric(downstream)
 
-    up_anomaly = _normalized_anomaly(
-        upstream
-    )
+    up_anomaly = _normalized_anomaly(upstream)
+    down_anomaly = _normalized_anomaly(downstream)
 
-    down_anomaly = _normalized_anomaly(
-        downstream
-    )
-
-    # Se priorizan variaciones, no valores absolutos.
     up_signal = up_anomaly.diff()
     down_signal = down_anomaly.diff()
 
     rows = []
 
-    for lag in range(
-        0,
-        max_lag + 1,
-    ):
-        shifted = up_signal.shift(
-            lag
-        )
+    for lag in range(int(min_lag), int(max_lag) + 1):
+        shifted = up_signal.shift(lag)
 
-        valid = (
-            shifted.notna()
-            &
-            down_signal.notna()
-        )
-
-        overlap = int(
-            valid.sum()
-        )
+        valid = shifted.notna() & down_signal.notna()
+        overlap = int(valid.sum())
 
         if overlap < min_overlap:
             continue
 
-        corr = shifted[
-            valid
-        ].corr(
-            down_signal[
-                valid
-            ]
-        )
+        corr = shifted[valid].corr(down_signal[valid])
+        corr = _safe_float(corr)
 
-        corr = _safe_float(
-            corr
-        )
-
-        if not np.isfinite(corr):
+        if not np.isfinite(corr) or corr <= 0:
             continue
 
-        # Sólo relaciones positivas tienen sentido para
-        # propagación de una señal de creciente/bajante.
-        if corr <= 0:
-            continue
+        # Respuesta física aproximada en m/m usando cambios diarios
+        # de nivel en las escalas originales.
+        up_delta = upstream.diff().shift(lag)
+        down_delta = downstream.diff()
+        valid_raw = up_delta.notna() & down_delta.notna()
+
+        response = np.nan
+        if int(valid_raw.sum()) >= min_overlap:
+            ux = up_delta[valid_raw].to_numpy(dtype=float)
+            dy = down_delta[valid_raw].to_numpy(dtype=float)
+            var_x = float(np.var(ux))
+            if np.isfinite(var_x) and var_x > 1e-10:
+                response = float(
+                    np.cov(ux, dy, ddof=0)[0, 1] / var_x
+                )
 
         rows.append(
             {
-                "lag_days": lag,
-                "correlation": corr,
+                "lag_days": int(lag),
+                "correlation": float(corr),
                 "overlap": overlap,
+                "response_m_per_m": response,
             }
         )
 
@@ -618,50 +609,225 @@ def _lag_correlation(
             "lag_days": None,
             "correlation": np.nan,
             "overlap": 0,
+            "response_m_per_m": np.nan,
             "table": pd.DataFrame(),
         }
 
-    table = pd.DataFrame(
-        rows
-    )
+    table = pd.DataFrame(rows)
 
-    # Preferimos correlación alta pero penalizamos
-    # retardos excesivamente largos.
+    # Se prioriza la correlación; sólo se aplica una penalización
+    # muy leve para evitar elegir retardos extremos casi empatados.
     table["score"] = (
         table["correlation"]
-        -
-        0.0025
-        * table["lag_days"]
+        - 0.0005 * table["lag_days"]
     )
 
     best = (
         table.sort_values(
-            [
-                "score",
-                "correlation",
-                "overlap",
-            ],
-            ascending=[
-                False,
-                False,
-                False,
-            ],
+            ["score", "correlation", "overlap"],
+            ascending=[False, False, False],
         )
         .iloc[0]
     )
 
     return {
-        "lag_days":
-            int(best["lag_days"]),
+        "lag_days": int(best["lag_days"]),
+        "correlation": float(best["correlation"]),
+        "overlap": int(best["overlap"]),
+        "response_m_per_m": _safe_float(
+            best.get("response_m_per_m")
+        ),
+        "table": table,
+    }
 
-        "correlation":
-            float(best["correlation"]),
 
-        "overlap":
-            int(best["overlap"]),
+# ============================================================
+# CORRIENTES -> SAN NICOLÁS AÑO POR AÑO
+# ============================================================
 
-        "table":
-            table,
+def estimate_corrientes_yearly(
+    dataset,
+    max_lag=MAX_LAG_DAYS,
+):
+    """
+    Calcula el mejor retardo Corrientes -> San Nicolás para cada año.
+
+    La comparación utiliza variaciones normalizadas para no mezclar
+    los distintos ceros hidrométricos de ambas estaciones.
+    """
+    required = {
+        "datetime",
+        LEVEL_COLUMNS["Corrientes"],
+        LEVEL_COLUMNS["San Nicolás"],
+    }
+
+    if (
+        dataset is None
+        or dataset.empty
+        or not required.issubset(dataset.columns)
+    ):
+        return pd.DataFrame()
+
+    x = dataset[
+        [
+            "datetime",
+            LEVEL_COLUMNS["Corrientes"],
+            LEVEL_COLUMNS["San Nicolás"],
+        ]
+    ].copy()
+
+    x["year"] = pd.to_datetime(
+        x["datetime"],
+        errors="coerce",
+    ).dt.year
+
+    rows = []
+
+    for year in sorted(
+        x["year"].dropna().astype(int).unique()
+    ):
+        annual = x[x["year"] == year].copy()
+
+        if len(annual) < max(40, MIN_LAG_OVERLAP + 10):
+            continue
+
+        result = _lag_correlation(
+            annual[LEVEL_COLUMNS["Corrientes"]],
+            annual[LEVEL_COLUMNS["San Nicolás"]],
+            max_lag=max_lag,
+            min_overlap=MIN_LAG_OVERLAP,
+            min_lag=1,
+        )
+
+        lag = result.get("lag_days")
+        corr = _safe_float(result.get("correlation"))
+        overlap = _safe_int(result.get("overlap"), 0)
+        response = _safe_float(
+            result.get("response_m_per_m")
+        )
+
+        if lag is None or not np.isfinite(corr):
+            continue
+
+        rows.append(
+            {
+                "year": int(year),
+                "lag_days": int(lag),
+                "correlation": float(corr),
+                "response_m_per_m": response,
+                "overlap": int(overlap),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def summarize_corrientes_yearly(
+    yearly,
+):
+    """
+    Resume la relación anual mediante estadísticas robustas.
+    """
+    empty = {
+        "delay_days": DEFAULT_CORRIENTES_LAG,
+        "delay_min": max(1, DEFAULT_CORRIENTES_LAG - 8),
+        "delay_max": min(MAX_LAG_DAYS, DEFAULT_CORRIENTES_LAG + 8),
+        "correlation": np.nan,
+        "response_m_per_m": np.nan,
+        "years": 0,
+        "quality_years": 0,
+    }
+
+    if (
+        yearly is None
+        or not isinstance(yearly, pd.DataFrame)
+        or yearly.empty
+    ):
+        return empty
+
+    x = yearly.copy()
+
+    for col in [
+        "lag_days",
+        "correlation",
+        "response_m_per_m",
+        "overlap",
+    ]:
+        if col in x.columns:
+            x[col] = _numeric(x[col])
+
+    x = x.dropna(
+        subset=["lag_days", "correlation"]
+    )
+
+    if x.empty:
+        return empty
+
+    # Años suficientemente informativos.
+    quality = x[
+        (x["overlap"] >= MIN_LAG_OVERLAP)
+        & (x["correlation"] >= 0.15)
+    ].copy()
+
+    if len(quality) < 2:
+        quality = x.copy()
+
+    weights = (
+        quality["correlation"].clip(lower=0.05)
+        * np.sqrt(quality["overlap"].clip(lower=1))
+    )
+
+    # Mediana ponderada para evitar que un único año domine.
+    order = np.argsort(
+        quality["lag_days"].to_numpy(dtype=float)
+    )
+    lag_sorted = quality["lag_days"].to_numpy(dtype=float)[order]
+    w_sorted = weights.to_numpy(dtype=float)[order]
+
+    csum = np.cumsum(w_sorted)
+    cutoff = 0.5 * csum[-1]
+    robust_lag = float(
+        lag_sorted[np.searchsorted(csum, cutoff)]
+    )
+
+    delay_min = int(
+        np.clip(
+            round(quality["lag_days"].quantile(0.20)),
+            1,
+            MAX_LAG_DAYS,
+        )
+    )
+    delay_max = int(
+        np.clip(
+            round(quality["lag_days"].quantile(0.80)),
+            1,
+            MAX_LAG_DAYS,
+        )
+    )
+
+    if delay_min > delay_max:
+        delay_min, delay_max = delay_max, delay_min
+
+    response_values = (
+        quality["response_m_per_m"]
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+    )
+
+    return {
+        "delay_days": int(round(robust_lag)),
+        "delay_min": delay_min,
+        "delay_max": delay_max,
+        "correlation": float(
+            quality["correlation"].median()
+        ),
+        "response_m_per_m": (
+            float(response_values.median())
+            if not response_values.empty
+            else np.nan
+        ),
+        "years": int(len(x)),
+        "quality_years": int(len(quality)),
     }
 
 
@@ -2495,81 +2661,77 @@ def build_historical_scenarios(
 def build_current_delay_estimate(
     lag_to_sn,
     similar_events,
+    yearly_relation=None,
+    dataset=None,
 ):
-    corrientes_lag = (
-        DEFAULT_CORRIENTES_LAG
+    """
+    V11.12 usa primero la relación robusta año por año.
+    Si no existe suficiente historia anual, conserva el cálculo
+    directo como respaldo.
+    """
+    robust = summarize_corrientes_yearly(
+        yearly_relation
     )
 
-    correlation = np.nan
+    corrientes_lag = robust.get(
+        "delay_days",
+        DEFAULT_CORRIENTES_LAG,
+    )
+    delay_min = robust.get("delay_min")
+    delay_max = robust.get("delay_max")
+    correlation = _safe_float(
+        robust.get("correlation")
+    )
+    response = _safe_float(
+        robust.get("response_m_per_m")
+    )
 
+    # Respaldo con la correlación directa si la anual no alcanza.
     if (
-        isinstance(
-            lag_to_sn,
-            pd.DataFrame,
-        )
+        robust.get("years", 0) == 0
+        and isinstance(lag_to_sn, pd.DataFrame)
         and not lag_to_sn.empty
     ):
         match = lag_to_sn[
-            lag_to_sn[
-                "station"
-            ]
-            == "Corrientes"
+            lag_to_sn["station"] == "Corrientes"
         ]
 
         if not match.empty:
-            corrientes_lag = (
-                _safe_int(
-                    match.iloc[0][
-                        "lag_days"
-                    ],
-                    DEFAULT_CORRIENTES_LAG,
-                )
+            row = match.iloc[0]
+            corrientes_lag = _safe_int(
+                row.get("lag_days"),
+                DEFAULT_CORRIENTES_LAG,
+            )
+            correlation = _safe_float(
+                row.get("correlation")
             )
 
-            correlation = (
-                _safe_float(
-                    match.iloc[0][
-                        "correlation"
-                    ]
-                )
-            )
-
-    # ========================================================
-    # El rango aumenta cuando la correlación es débil.
-    # ========================================================
-
-    if np.isfinite(
-        correlation
-    ):
-        spread = int(
-            np.clip(
-                round(
-                    4
-                    +
-                    10
-                    * (
-                        1.0
-                        - correlation
+            spread = (
+                int(
+                    np.clip(
+                        round(
+                            4
+                            + 10
+                            * (
+                                1.0 - correlation
+                            )
+                        ),
+                        4,
+                        14,
                     )
-                ),
-                4,
-                14,
+                )
+                if np.isfinite(correlation)
+                else 10
             )
-        )
-    else:
-        spread = 10
 
-    delay_min = max(
-        1,
-        corrientes_lag
-        - spread,
-    )
-
-    delay_max = min(
-        MAX_LAG_DAYS,
-        corrientes_lag
-        + spread,
-    )
+            delay_min = max(
+                1,
+                corrientes_lag - spread,
+            )
+            delay_max = min(
+                MAX_LAG_DAYS,
+                corrientes_lag + spread,
+            )
 
     similar_count = (
         len(similar_events)
@@ -2580,21 +2742,60 @@ def build_current_delay_estimate(
         else 0
     )
 
+    # Traducción de la variación reciente de Corrientes a una
+    # variación esperable en San Nicolás, sin comparar alturas
+    # absolutas entre escalas.
+    corrientes_change_7d = np.nan
+    expected_sn_change = np.nan
+
+    if (
+        isinstance(dataset, pd.DataFrame)
+        and not dataset.empty
+        and LEVEL_COLUMNS["Corrientes"] in dataset.columns
+    ):
+        c = (
+            _numeric(
+                dataset[
+                    LEVEL_COLUMNS["Corrientes"]
+                ]
+            )
+            .dropna()
+        )
+
+        if len(c) >= 8:
+            corrientes_change_7d = float(
+                c.iloc[-1] - c.iloc[-8]
+            )
+
+    if (
+        np.isfinite(corrientes_change_7d)
+        and np.isfinite(response)
+    ):
+        expected_sn_change = float(
+            corrientes_change_7d * response
+        )
+
     return {
-        "delay_days":
+        "delay_days": _safe_int(
             corrientes_lag,
-
-        "delay_min":
-            delay_min,
-
-        "delay_max":
+            DEFAULT_CORRIENTES_LAG,
+        ),
+        "delay_min": _safe_int(delay_min, 1),
+        "delay_max": _safe_int(
             delay_max,
-
-        "correlation":
-            correlation,
-
-        "similar_event_count":
-            similar_count,
+            MAX_LAG_DAYS,
+        ),
+        "correlation": correlation,
+        "response_m_per_m": response,
+        "corrientes_change_7d": corrientes_change_7d,
+        "expected_sn_change": expected_sn_change,
+        "annual_years": int(
+            robust.get("years", 0)
+        ),
+        "quality_years": int(
+            robust.get("quality_years", 0)
+        ),
+        "similar_event_count": similar_count,
     }
 
 
@@ -2755,7 +2956,7 @@ def analizar_corrientes_san_nicolas(
     """
     Motor hidrológico principal.
 
-    Compatible con app.py V11.11 y model.py V11.11.
+    Compatible con app.py V11.12 y model.py V11.11.
 
     Devuelve:
         dataset
@@ -2827,6 +3028,12 @@ def analizar_corrientes_san_nicolas(
             "current_estimate":
                 {},
 
+            "corrientes_yearly":
+                pd.DataFrame(),
+
+            "corrientes_robust":
+                {},
+
             "statistics":
                 {},
 
@@ -2855,6 +3062,20 @@ def analizar_corrientes_san_nicolas(
             dataset,
             corridor_lags=
                 corridor_lags,
+        )
+    )
+
+    corrientes_yearly = (
+        estimate_corrientes_yearly(
+            dataset,
+            max_lag=
+                MAX_LAG_DAYS,
+        )
+    )
+
+    corrientes_robust = (
+        summarize_corrientes_yearly(
+            corrientes_yearly
         )
     )
 
@@ -2956,6 +3177,10 @@ def analizar_corrientes_san_nicolas(
         build_current_delay_estimate(
             lag_to_sn,
             similar_events,
+            yearly_relation=
+                corrientes_yearly,
+            dataset=
+                dataset,
         )
     )
 
@@ -3040,6 +3265,12 @@ def analizar_corrientes_san_nicolas(
 
         "current_estimate":
             current_estimate,
+
+        "corrientes_yearly":
+            corrientes_yearly,
+
+        "corrientes_robust":
+            corrientes_robust,
 
         "statistics":
             statistics,
