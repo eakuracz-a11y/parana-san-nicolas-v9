@@ -1,7 +1,7 @@
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # src/exogenous.py
-# V11.13 COMPLETO
+# V11.14 COMPLETO
 #
 # VARIABLES EXÓGENAS
 #
@@ -45,7 +45,7 @@ import requests
 # VERSIÓN
 # ============================================================
 
-VERSION = "V11.13"
+VERSION = "V11.14"
 
 
 # ============================================================
@@ -2428,153 +2428,108 @@ def get_caudal_station(
     start,
     end,
 ):
+    """
+    V11.14: combina todas las series de caudal válidas de una estación.
 
-    candidate, metadata = (
-        seleccionar_serie_caudal(
-            station,
+    INA puede tener una serie histórica y otra actual para el mismo punto.
+    Las versiones anteriores elegían una sola serie; eso podía dejar grandes
+    períodos vacíos y luego impedir reconstruir otras estaciones.
+    """
+    col = FLOW_COLUMNS[station]
+    candidates = candidatos_caudal_estacion(station, start, end)
+
+    metadata = {
+        "station": station,
+        "status": "sin_serie",
+        "tested": [],
+        "series_used": [],
+    }
+
+    if candidates.empty:
+        metadata["reason"] = "No hay candidatos de caudal en el catálogo INA."
+        return pd.DataFrame(columns=["datetime", col]), metadata
+
+    frames = []
+
+    for rank, (_, candidate) in enumerate(candidates.head(40).iterrows()):
+        series_id = _safe_int(candidate.get("series_id"))
+        if series_id is None:
+            continue
+
+        validation_start, validation_end = _candidate_validation_window(
+            candidate,
             start,
             end,
         )
-    )
+        if validation_start is None or validation_end is None:
+            continue
 
-    col = FLOW_COLUMNS[
-        station
-    ]
-
-    if candidate is None:
-
-        return (
-            pd.DataFrame(
-                columns=[
-                    "datetime",
-                    col,
-                ]
-            ),
-            metadata,
-        )
-
-    series_id = _safe_int(
-        candidate.get(
-            "series_id"
-        )
-    )
-
-    try:
-
-        history = (
-            _query_history_blocks(
+        try:
+            observations = _query_history_blocks(
                 series_id,
-                start,
-                end,
+                validation_start,
+                validation_end,
             )
+            valid, reason, stats = _validate_trunk_flow_series(
+                station,
+                candidate,
+                observations,
+            )
+        except Exception as exc:
+            valid = False
+            reason = str(exc)
+            stats = {"records": 0}
+            observations = pd.DataFrame(columns=["datetime", "value"])
+
+        metadata["tested"].append(
+            {
+                "series_id": series_id,
+                "name": candidate.get("nombre"),
+                "river": candidate.get("rio"),
+                "valid": bool(valid),
+                "reason": reason,
+                **stats,
+            }
         )
 
-    except Exception as exc:
+        if not valid or observations.empty:
+            continue
 
-        metadata[
-            "status"
-        ] = "error"
-
-        metadata[
-            "error"
-        ] = str(exc)
-
-        return (
-            pd.DataFrame(
-                columns=[
-                    "datetime",
-                    col,
-                ]
-            ),
-            metadata,
-        )
-
-    if history.empty:
-
-        metadata[
-            "status"
-        ] = "sin_datos"
-
-        return (
-            pd.DataFrame(
-                columns=[
-                    "datetime",
-                    col,
-                ]
-            ),
-            metadata,
-        )
-
-    result = history.rename(
-        columns={
-            "value":
-                col
-        }
-    )
-
-    result[
-        col
-    ] = _numeric(
-        result[
-            col
+        part = observations[["datetime", "value"]].copy()
+        part["value"] = _numeric(part["value"])
+        part = part[
+            (part["value"] >= ESTIMATED_FLOW_MIN)
+            & (part["value"] <= ESTIMATED_FLOW_MAX)
         ]
+        if part.empty:
+            continue
+
+        part["_rank"] = rank
+        part["_series_id"] = series_id
+        frames.append(part)
+
+    if not frames:
+        metadata["reason"] = "Ninguna serie válida devolvió observaciones utilizables."
+        return pd.DataFrame(columns=["datetime", col]), metadata
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = (
+        combined.sort_values(["datetime", "_rank"])
+        .drop_duplicates(subset=["datetime"], keep="first")
+        .sort_values("datetime")
+        .reset_index(drop=True)
     )
 
-    result = result[
-        (
-            result[
-                col
-            ]
-            >= ESTIMATED_FLOW_MIN
-        )
-        &
-        (
-            result[
-                col
-            ]
-            <= ESTIMATED_FLOW_MAX
-        )
-    ]
-
-    metadata[
-        "records"
-    ] = int(
-        result[
-            col
-        ]
-        .notna()
-        .sum()
+    metadata["status"] = "ok"
+    metadata["records"] = int(combined["value"].notna().sum())
+    metadata["start"] = combined["datetime"].min()
+    metadata["end"] = combined["datetime"].max()
+    metadata["series_used"] = sorted(
+        set(combined["_series_id"].dropna().astype(int).tolist())
     )
 
-    metadata[
-        "start"
-    ] = (
-        result[
-            "datetime"
-        ].min()
-        if not result.empty
-        else None
-    )
-
-    metadata[
-        "end"
-    ] = (
-        result[
-            "datetime"
-        ].max()
-        if not result.empty
-        else None
-    )
-
-    return (
-        result[
-            [
-                "datetime",
-                col,
-            ]
-        ],
-        metadata,
-    )
+    result = combined[["datetime", "value"]].rename(columns={"value": col})
+    return result, metadata
 
 
 # ============================================================
@@ -3600,6 +3555,186 @@ def _fill_from_corridor_median(
     return result
 
 
+
+# ============================================================
+# RECONSTRUCCIÓN DE CAUDAL MEDIANTE NIVEL HIDROMÉTRICO
+# V11.14
+# ============================================================
+
+def _level_column_for_station(station):
+    key = _normalize_text(station).replace(" ", "_")
+    return "nivel_" + key
+
+
+def _fit_level_to_flow(level, flow, min_points=20):
+    pair = pd.DataFrame(
+        {
+            "level": _numeric(level),
+            "flow": _numeric(flow),
+        }
+    ).replace([np.inf, -np.inf], np.nan).dropna()
+
+    if len(pair) < min_points:
+        return None
+
+    ql, qh = pair["level"].quantile([0.02, 0.98])
+    fl, fh = pair["flow"].quantile([0.02, 0.98])
+    pair = pair[
+        pair["level"].between(ql, qh)
+        & pair["flow"].between(fl, fh)
+    ]
+    if len(pair) < min_points:
+        return None
+
+    corr = pair["level"].corr(pair["flow"])
+    if not np.isfinite(corr):
+        return None
+
+    # Para un proxy hidrológico se exige al menos relación moderada.
+    if abs(corr) < 0.20:
+        return None
+
+    x = pair["level"].to_numpy(dtype=float)
+    y = pair["flow"].to_numpy(dtype=float)
+    try:
+        slope, intercept = np.polyfit(x, y, 1)
+    except Exception:
+        return None
+
+    if not np.isfinite(slope) or not np.isfinite(intercept):
+        return None
+
+    return {
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "correlation": float(corr),
+        "records": int(len(pair)),
+    }
+
+
+def _fill_from_level_proxy(df, level_history=None):
+    """
+    Completa huecos de caudal usando nivel observado como proxy.
+
+    Prioridad:
+    1) curva empírica nivel -> caudal de la misma estación cuando existe
+       suficiente caudal observado;
+    2) relación nivel local -> caudal observado de una estación donante del
+       cauce principal (normalmente Paraná), marcada explícitamente como proxy.
+
+    Nunca se etiqueta como observado. La calidad queda limitada para que el
+    modelo le otorgue menos peso que a una medición real.
+    """
+    if (
+        level_history is None
+        or not isinstance(level_history, pd.DataFrame)
+        or level_history.empty
+        or "datetime" not in level_history.columns
+    ):
+        return df
+
+    result = df.copy()
+    levels = level_history.copy()
+    levels["datetime"] = _datetime_naive(levels["datetime"])
+    levels["datetime"] = levels["datetime"].dt.normalize()
+    levels = levels.dropna(subset=["datetime"])
+
+    keep = ["datetime"] + [c for c in levels.columns if c.startswith("nivel_")]
+    levels = levels[keep].drop_duplicates("datetime", keep="last")
+
+    work = result.merge(levels, on="datetime", how="left")
+
+    # Donante de caudal real con mayor cobertura/calidad.
+    donor_station = None
+    donor_col = None
+    donor_score = -1
+    for station in FLOW_PRIORITY:
+        col = FLOW_COLUMNS[station]
+        source_col = col + "_source"
+        if col not in work.columns:
+            continue
+        q = _numeric(work[col])
+        if source_col in work.columns:
+            src = work[source_col].fillna("").astype(str).str.lower()
+            obs = q.notna() & (src == "observado")
+        else:
+            obs = q.notna()
+        score = int(obs.sum())
+        if score > donor_score:
+            donor_score = score
+            donor_station = station
+            donor_col = col
+
+    if donor_col is None or donor_score < 20:
+        return result
+
+    donor_flow = _numeric(work[donor_col])
+
+    for station, col in FLOW_COLUMNS.items():
+        if col not in work.columns:
+            work[col] = np.nan
+        source_col = col + "_source"
+        quality_col = col + "_quality"
+        if source_col not in work.columns:
+            work[source_col] = None
+        if quality_col not in work.columns:
+            work[quality_col] = np.nan
+
+        missing = _numeric(work[col]).isna()
+        if not missing.any():
+            continue
+
+        level_col = _level_column_for_station(station)
+        if level_col not in work.columns:
+            continue
+
+        level = _numeric(work[level_col])
+
+        # 1) Curva local si existe suficiente caudal observado en esa estación.
+        local_q = _numeric(work[col])
+        local_source = work[source_col].fillna("").astype(str).str.lower()
+        local_obs = local_q.where(local_source == "observado")
+        fit = _fit_level_to_flow(level, local_obs, min_points=20)
+        label = "estimado_nivel_local"
+        quality_cap = 0.72
+
+        # 2) Si no existe curva local, usar el caudal donante como proxy de cauce.
+        if fit is None:
+            fit = _fit_level_to_flow(level, donor_flow, min_points=25)
+            label = "estimado_nivel_proxy_" + _normalize_text(donor_station).replace(" ", "_")
+            quality_cap = 0.55
+
+        if fit is None:
+            continue
+
+        predicted = fit["intercept"] + fit["slope"] * level
+        predicted = predicted.where(
+            (predicted >= ESTIMATED_FLOW_MIN)
+            & (predicted <= ESTIMATED_FLOW_MAX)
+        )
+        fill_mask = missing & predicted.notna()
+        if not fill_mask.any():
+            continue
+
+        corr = abs(float(fit["correlation"]))
+        records = int(fit["records"])
+        q_est = min(
+            quality_cap,
+            0.38 + 0.22 * min(corr, 1.0) + 0.06 * min(records / 180.0, 1.0),
+        )
+
+        work.loc[fill_mask, col] = predicted[fill_mask]
+        work.loc[fill_mask, source_col] = label
+        work.loc[fill_mask, quality_col] = float(q_est)
+
+    # devolver sólo las columnas originales de flujo/trazabilidad, sin duplicar niveles
+    for station, col in FLOW_COLUMNS.items():
+        result[col] = _numeric(work[col])
+        result[col + "_source"] = work[col + "_source"]
+        result[col + "_quality"] = _numeric(work[col + "_quality"])
+
+    return result
+
 # ============================================================
 # COMPLETAR CAUDALES FALTANTES
 # ============================================================
@@ -3608,6 +3743,7 @@ def complete_missing_flows(
     df,
     default_existing_source="observado",
     default_existing_quality=1.0,
+    level_history=None,
 ):
 
     if (
@@ -3653,7 +3789,16 @@ def complete_missing_flows(
     )
 
     # --------------------------------------------------------
-    # 3. último respaldo de corredor
+    # 3. reconstrucción mediante nivel hidrométrico
+    # --------------------------------------------------------
+
+    result = _fill_from_level_proxy(
+        result,
+        level_history=level_history,
+    )
+
+    # --------------------------------------------------------
+    # 4. último respaldo de corredor
     # --------------------------------------------------------
 
     result = (
@@ -4955,6 +5100,7 @@ def get_exogenous_data(
     start,
     end,
     forecast_days=15,
+    level_history=None,
 ):
 
     forecast_days = int(
@@ -5060,6 +5206,8 @@ def get_exogenous_data(
             "observado",
         default_existing_quality=
             1.0,
+        level_history=
+            level_history,
     )
 
     # ========================================================
