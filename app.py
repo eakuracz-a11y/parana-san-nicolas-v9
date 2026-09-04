@@ -59,7 +59,7 @@ from src.model import (
 # VERSIÓN
 # ============================================================
 
-APP_VERSION = "V11.15"
+APP_VERSION = "V11.16"
 
 APP_SUBTITLE = (
     "Pronóstico hidrológico multivariable · "
@@ -3771,14 +3771,17 @@ if (
         )
 
         # ====================================================
-        # ALTURAS ABSOLUTAS · CORRIENTES VS SAN NICOLÁS
+        # ALTURAS ABSOLUTAS · MISMA FECHA · AÑO A AÑO
         # ====================================================
 
         st.markdown(
-            "#### Alturas de río · Corrientes vs San Nicolás"
+            "#### Alturas de río · Corrientes vs San Nicolás · misma fecha"
         )
 
-        absolute = annual[
+        # Esta comparación NO aplica demora hidrológica.
+        # Cada punto de Corrientes se enfrenta con San Nicolás
+        # en la misma fecha calendario (lectura vs lectura).
+        comparison_source = hydro_dataset[
             [
                 "datetime",
                 "nivel_corrientes",
@@ -3786,141 +3789,191 @@ if (
             ]
         ].copy()
 
-        absolute["nivel_corrientes"] = pd.to_numeric(
-            absolute["nivel_corrientes"],
+        comparison_source["datetime"] = pd.to_datetime(
+            comparison_source["datetime"],
             errors="coerce",
         )
-        absolute["nivel_san_nicolas"] = pd.to_numeric(
-            absolute["nivel_san_nicolas"],
+        comparison_source["nivel_corrientes"] = pd.to_numeric(
+            comparison_source["nivel_corrientes"],
+            errors="coerce",
+        )
+        comparison_source["nivel_san_nicolas"] = pd.to_numeric(
+            comparison_source["nivel_san_nicolas"],
             errors="coerce",
         )
 
-        absolute["corrientes_propagation_date"] = (
-            absolute["datetime"]
-            + pd.to_timedelta(
-                selected_lag,
-                unit="D",
+        comparison_source = comparison_source.dropna(
+            subset=["datetime"]
+        )
+
+        years_same_day = sorted(
+            comparison_source.loc[
+                comparison_source["nivel_corrientes"].notna()
+                & comparison_source["nivel_san_nicolas"].notna(),
+                "datetime",
+            ].dt.year.dropna().astype(int).unique().tolist(),
+            reverse=True,
+        )
+
+        if years_same_day:
+            default_same_day_index = (
+                years_same_day.index(selected_corr_year)
+                if selected_corr_year in years_same_day
+                else 0
             )
-        )
 
-        absolute_fig = go.Figure()
+            selected_same_day_year = st.selectbox(
+                "Año para comparar alturas lectura contra lectura",
+                options=years_same_day,
+                index=default_same_day_index,
+                key="corrientes_sn_same_day_year",
+            )
 
-        absolute_fig.add_trace(
-            go.Scatter(
-                x=absolute["corrientes_propagation_date"],
-                y=absolute["nivel_corrientes"],
-                mode="lines",
-                name=(
-                    f"Corrientes · altura trasladada +{selected_lag} días"
+            absolute = comparison_source[
+                comparison_source["datetime"].dt.year
+                == selected_same_day_year
+            ].copy()
+
+            # Conservamos únicamente las fechas en las que existe
+            # lectura de ambas estaciones. No se desplaza ninguna serie.
+            paired_abs = absolute.dropna(
+                subset=[
+                    "nivel_corrientes",
+                    "nivel_san_nicolas",
+                ]
+            ).copy()
+
+            absolute_fig = go.Figure()
+
+            absolute_fig.add_trace(
+                go.Scatter(
+                    x=paired_abs["datetime"],
+                    y=paired_abs["nivel_corrientes"],
+                    mode="lines",
+                    name="Corrientes · altura misma fecha",
+                    yaxis="y",
+                    connectgaps=False,
+                    hovertemplate=(
+                        "%{x|%d/%m/%Y}"
+                        "<br>Corrientes: %{y:.2f} m"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+            absolute_fig.add_trace(
+                go.Scatter(
+                    x=paired_abs["datetime"],
+                    y=paired_abs["nivel_san_nicolas"],
+                    mode="lines",
+                    name="San Nicolás · altura misma fecha",
+                    yaxis="y2",
+                    connectgaps=False,
+                    hovertemplate=(
+                        "%{x|%d/%m/%Y}"
+                        "<br>San Nicolás: %{y:.2f} m"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+            absolute_fig.update_layout(
+                height=460,
+                hovermode="x unified",
+                margin=dict(
+                    l=20,
+                    r=20,
+                    t=40,
+                    b=20,
                 ),
-                yaxis="y",
-                connectgaps=False,
-                hovertemplate=(
-                    "%{x|%d/%m/%Y}"
-                    "<br>Corrientes: %{y:.2f} m"
-                    "<extra></extra>"
+                xaxis=dict(
+                    title="Fecha",
+                    tickformat="%d/%m",
+                ),
+                yaxis=dict(
+                    title="Altura Corrientes [m]",
+                    side="left",
+                    rangemode="tozero",
+                ),
+                yaxis2=dict(
+                    title="Altura San Nicolás [m]",
+                    side="right",
+                    overlaying="y",
+                    rangemode="tozero",
+                    showgrid=False,
+                ),
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.05,
+                    xanchor="left",
+                    x=0,
                 ),
             )
-        )
 
-        absolute_fig.add_trace(
-            go.Scatter(
-                x=absolute["datetime"],
-                y=absolute["nivel_san_nicolas"],
-                mode="lines",
-                name="San Nicolás · altura",
-                yaxis="y2",
-                connectgaps=False,
-                hovertemplate=(
-                    "%{x|%d/%m/%Y}"
-                    "<br>San Nicolás: %{y:.2f} m"
-                    "<extra></extra>"
-                ),
+            st.plotly_chart(
+                absolute_fig,
+                use_container_width=True,
             )
-        )
 
-        absolute_fig.update_layout(
-            height=460,
-            hovermode="x unified",
-            margin=dict(
-                l=20,
-                r=20,
-                t=40,
-                b=20,
-            ),
-            xaxis=dict(
-                title="Fecha",
-                tickformat="%d/%m",
-            ),
-            yaxis=dict(
-                title="Altura Corrientes [m]",
-                side="left",
-                rangemode="tozero",
-            ),
-            yaxis2=dict(
-                title="Altura San Nicolás [m]",
-                side="right",
-                overlaying="y",
-                rangemode="tozero",
-                showgrid=False,
-            ),
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.05,
-                xanchor="left",
-                x=0,
-            ),
-        )
+            if not paired_abs.empty:
+                h1, h2, h3, h4, h5 = st.columns(5)
 
-        st.plotly_chart(
-            absolute_fig,
-            use_container_width=True,
-        )
+                with h1:
+                    st.metric(
+                        f"Corrientes · inicio {selected_same_day_year}",
+                        f"{float(paired_abs['nivel_corrientes'].iloc[0]):.2f} m",
+                    )
 
-        valid_abs = absolute.dropna(
-            subset=[
-                "nivel_corrientes",
-                "nivel_san_nicolas",
-            ]
-        ).copy()
+                with h2:
+                    st.metric(
+                        f"San Nicolás · inicio {selected_same_day_year}",
+                        f"{float(paired_abs['nivel_san_nicolas'].iloc[0]):.2f} m",
+                    )
 
-        if not valid_abs.empty:
-            h1, h2, h3, h4 = st.columns(4)
+                with h3:
+                    st.metric(
+                        "Máximo Corrientes",
+                        f"{float(paired_abs['nivel_corrientes'].max()):.2f} m",
+                    )
 
-            with h1:
-                st.metric(
-                    f"Corrientes · inicio {selected_corr_year}",
-                    f"{float(valid_abs['nivel_corrientes'].iloc[0]):.2f} m",
+                with h4:
+                    st.metric(
+                        "Máximo San Nicolás",
+                        f"{float(paired_abs['nivel_san_nicolas'].max()):.2f} m",
+                    )
+
+                with h5:
+                    st.metric(
+                        "Lecturas coincidentes",
+                        f"{len(paired_abs):,}".replace(",", "."),
+                    )
+
+                same_day_corr = paired_abs[
+                    "nivel_corrientes"
+                ].corr(
+                    paired_abs["nivel_san_nicolas"]
                 )
 
-            with h2:
-                st.metric(
-                    f"San Nicolás · inicio {selected_corr_year}",
-                    f"{float(valid_abs['nivel_san_nicolas'].iloc[0]):.2f} m",
-                )
+                if pd.notna(same_day_corr):
+                    st.caption(
+                        f"Correlación de alturas en la misma fecha para "
+                        f"{selected_same_day_year}: {float(same_day_corr):.3f}. "
+                        "Este valor es descriptivo y no incorpora demora de propagación."
+                    )
 
-            with h3:
-                st.metric(
-                    "Máximo Corrientes",
-                    f"{float(valid_abs['nivel_corrientes'].max()):.2f} m",
-                )
-
-            with h4:
-                st.metric(
-                    "Máximo San Nicolás",
-                    f"{float(valid_abs['nivel_san_nicolas'].max()):.2f} m",
-                )
-
-        st.caption(
-            "Comparación de alturas reales para el mismo año seleccionado. "
-            "Corrientes se desplaza por la demora hidrológica calculada para "
-            "alinear su señal con la respuesta posterior en San Nicolás. "
-            "Se usan dos ejes verticales porque las estaciones tienen ceros "
-            "hidrométricos diferentes; por eso debe compararse principalmente "
-            "la evolución y el tiempo de respuesta, no la diferencia directa "
-            "entre los valores absolutos."
-        )
+            st.caption(
+                "Comparación lectura contra lectura: Corrientes y San Nicolás "
+                "se muestran exactamente en la misma fecha, sin trasladar Corrientes "
+                "7 días ni aplicar ningún otro retardo. El selector permite revisar "
+                "la relación año por año. Se mantienen dos ejes verticales porque "
+                "cada estación posee un cero hidrométrico diferente."
+            )
+        else:
+            st.info(
+                "No hay años con suficientes lecturas coincidentes de Corrientes "
+                "y San Nicolás para mostrar la comparación de alturas en la misma fecha."
+            )
 
     table_display = annual_display.rename(
         columns={
