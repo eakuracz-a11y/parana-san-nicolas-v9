@@ -1,7 +1,7 @@
 # ============================================================
 # PARANÁ · SAN NICOLÁS
 # app.py
-# V11.13 COMPLETO
+# V11.14 COMPLETO
 #
 # Dashboard Streamlit
 #
@@ -59,7 +59,7 @@ from src.model import (
 # VERSIÓN
 # ============================================================
 
-APP_VERSION = "V11.13"
+APP_VERSION = "V11.14"
 
 APP_SUBTITLE = (
     "Pronóstico hidrológico multivariable · "
@@ -80,6 +80,10 @@ DEFAULT_TRAINING_DAYS = 365 * 8
 MIN_TRAINING_DAYS = 365 * 3
 
 MAX_TRAINING_DAYS = 365 * 15
+
+# Histórico independiente para relaciones hidrológicas.
+# Se usa una ventana más extensa que la elegida para entrenamiento.
+HYDROLOGY_HISTORY_YEARS = 20
 
 
 # ============================================================
@@ -867,9 +871,9 @@ with st.sidebar:
     )
 
     st.caption(
-        "El historial completo puede utilizarse en el módulo "
-        "hidrológico; el entrenamiento se limita para mejorar "
-        "estabilidad y velocidad."
+        "El módulo hidrológico utiliza hasta 20 años para relaciones "
+        "Corrientes → San Nicolás; el entrenamiento conserva la ventana "
+        "seleccionada para estabilidad y velocidad."
     )
 
     update_clicked = st.button(
@@ -953,13 +957,20 @@ if (
                 )
             )
 
+            hydrology_start = (
+                base_ts
+                - pd.DateOffset(
+                    years=HYDROLOGY_HISTORY_YEARS
+                )
+            ).normalize()
+
             # =================================================
             # SAN NICOLÁS
             # =================================================
 
             sn_raw, sn_error = observed(
 
-                training_start.strftime(
+                hydrology_start.strftime(
                     "%Y-%m-%d"
                 ),
 
@@ -974,15 +985,22 @@ if (
                     sn_error
                 )
 
-            sn_history = prepare_sn_observed(
+            sn_hydrology_history = prepare_sn_observed(
                 sn_raw
             )
 
-            if sn_history.empty:
+            if sn_hydrology_history.empty:
 
                 raise RuntimeError(
                     "INA no devolvió niveles válidos para San Nicolás."
                 )
+
+            sn_history = sn_hydrology_history[
+                sn_hydrology_history["datetime"] >= training_start
+            ].copy().reset_index(drop=True)
+
+            if sn_history.empty:
+                sn_history = sn_hydrology_history.copy()
 
             # =================================================
             # UPSTREAM
@@ -993,7 +1011,7 @@ if (
                 upstream_meta,
             ) = get_upstream_history(
 
-                training_start.strftime(
+                hydrology_start.strftime(
                     "%Y-%m-%d"
                 ),
 
@@ -1002,15 +1020,37 @@ if (
                 ),
             )
 
-            upstream_history = (
+            upstream_hydrology_history = (
                 normalize_frame(
                     upstream_history
                 )
             )
 
+            upstream_history = upstream_hydrology_history[
+                upstream_hydrology_history["datetime"] >= training_start
+            ].copy().reset_index(drop=True)
+
             # =================================================
             # EXÓGENAS
             # =================================================
+
+            # Niveles diarios disponibles para reconstruir caudales
+            # cuando INA no publica una serie de caudal utilizable.
+            level_history_for_flow = upstream_history.copy()
+
+            sn_levels_for_flow = sn_history[["datetime", "nivel"]].copy()
+            sn_levels_for_flow = sn_levels_for_flow.rename(
+                columns={"nivel": "nivel_san_nicolas"}
+            )
+
+            if level_history_for_flow.empty:
+                level_history_for_flow = sn_levels_for_flow
+            else:
+                level_history_for_flow = level_history_for_flow.merge(
+                    sn_levels_for_flow,
+                    on="datetime",
+                    how="outer",
+                )
 
             (
                 exog_history,
@@ -1028,6 +1068,9 @@ if (
 
                 forecast_days=
                     FORECAST_DAYS,
+
+                level_history=
+                    level_history_for_flow,
             )
 
             exog_history = normalize_frame(
@@ -1045,9 +1088,9 @@ if (
             hydrology = (
                 analizar_corrientes_san_nicolas(
 
-                    sn_history,
+                    sn_hydrology_history,
 
-                    upstream_history,
+                    upstream_hydrology_history,
 
                     exog_history=
                         exog_history,
