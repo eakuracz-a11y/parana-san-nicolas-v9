@@ -59,7 +59,7 @@ from src.model import (
 # VERSIÓN
 # ============================================================
 
-APP_VERSION = "V11.17"
+APP_VERSION = "V11.18"
 
 APP_SUBTITLE = (
     "Pronóstico hidrológico multivariable · "
@@ -1159,19 +1159,11 @@ if (
 
             hydrology = (
                 cached_hydrology(
-
                     sn_hydrology_history,
-
                     upstream_hydrology_history,
-
-                    exog_history=
-                        exog_history,
-
-                    exog_future=
-                        exog_future,
-
-                    days=
-                        FORECAST_DAYS,
+                    exog_hist=exog_history,
+                    exog_fut=exog_future,
+                    days=FORECAST_DAYS,
                 )
             )
 
