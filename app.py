@@ -61,7 +61,7 @@ from src.model import (
 # VERSIÓN
 # ============================================================
 
-APP_VERSION = "V11.16"
+APP_VERSION = "V11.17"
 
 APP_SUBTITLE = (
     "Pronóstico hidrológico multivariable · "
@@ -86,6 +86,15 @@ MAX_TRAINING_DAYS = 365 * 15
 # Histórico independiente para relaciones hidrológicas.
 # Se usa una ventana más extensa que la elegida para entrenamiento.
 HYDROLOGY_HISTORY_YEARS = 20
+
+# ============================================================
+# VALIDACIÓN OPERATIVA DEL PRONÓSTICO
+# ============================================================
+# Guarda el pronóstico ORIGINAL de cada día y nunca lo sobrescribe.
+# Luego completa el valor real INA cuando esa fecha ya tiene medición.
+VALIDATION_DIR = Path(__file__).resolve().parent / "data"
+VALIDATION_FILE = VALIDATION_DIR / "forecast_validation.csv"
+
 
 
 # ============================================================
@@ -242,8 +251,9 @@ st.markdown(
     }
 
     [data-testid="stMetric"] {
-        background-color: rgba(127,127,127,0.06);
-        border: 1px solid rgba(127,127,127,0.14);
+        background-color: #FFFFFF;
+        border: 1px solid #D9E2E7;
+        box-shadow: 0 2px 8px rgba(15,23,42,0.05);
         padding: 12px 14px;
         border-radius: 12px;
     }
@@ -808,6 +818,382 @@ def dynamic_level_range(
     ]
 
 
+
+# ============================================================
+# VALIDACIÓN · PRONÓSTICO ORIGINAL VS REAL INA
+# ============================================================
+
+VALIDATION_COLUMNS = [
+    "issued_date",
+    "generated_at",
+    "target_date",
+    "horizon_day",
+    "prediction_m",
+    "level_at_issue_m",
+    "flow_at_issue_m3s",
+    "model_rmse_m",
+    "real_level_m",
+    "confirmed_at",
+    "error_m",
+    "abs_error_cm",
+]
+
+
+def load_validation_history():
+    """
+    Lee el histórico de validación.
+    El archivo se crea localmente en data/forecast_validation.csv.
+    """
+    try:
+        if not VALIDATION_FILE.exists():
+            return pd.DataFrame(columns=VALIDATION_COLUMNS)
+
+        df = pd.read_csv(VALIDATION_FILE)
+
+        for col in VALIDATION_COLUMNS:
+            if col not in df.columns:
+                df[col] = np.nan
+
+        df["issued_date"] = pd.to_datetime(
+            df["issued_date"],
+            errors="coerce",
+        ).dt.date
+
+        df["target_date"] = pd.to_datetime(
+            df["target_date"],
+            errors="coerce",
+        ).dt.date
+
+        for col in [
+            "horizon_day",
+            "prediction_m",
+            "level_at_issue_m",
+            "flow_at_issue_m3s",
+            "model_rmse_m",
+            "real_level_m",
+            "error_m",
+            "abs_error_cm",
+        ]:
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce",
+            )
+
+        return df[VALIDATION_COLUMNS].copy()
+
+    except Exception:
+        return pd.DataFrame(columns=VALIDATION_COLUMNS)
+
+
+def save_validation_history(df):
+    """
+    Guarda el histórico sin alterar las predicciones originales.
+    """
+    VALIDATION_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    out = df.copy()
+
+    if "issued_date" in out.columns:
+        out["issued_date"] = pd.to_datetime(
+            out["issued_date"],
+            errors="coerce",
+        ).dt.strftime("%Y-%m-%d")
+
+    if "target_date" in out.columns:
+        out["target_date"] = pd.to_datetime(
+            out["target_date"],
+            errors="coerce",
+        ).dt.strftime("%Y-%m-%d")
+
+    out.to_csv(
+        VALIDATION_FILE,
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+
+def register_original_forecast(
+    forecast,
+    base_ts,
+    sn_history,
+    exog_history,
+    metrics,
+):
+    """
+    Registra UNA SOLA VEZ el pronóstico emitido para la fecha base.
+
+    Si la fecha ya existe en el archivo, no recalcula ni reemplaza
+    ningún valor estimado. De esta forma queda congelado el dato
+    con el que después se comparará el valor real del INA.
+    """
+    if (
+        forecast is None
+        or forecast.empty
+    ):
+        return
+
+    issued_date = pd.Timestamp(
+        base_ts
+    ).date()
+
+    # Sólo registrar automáticamente corridas operativas del día actual.
+    # Las simulaciones con fechas pasadas no se mezclan con la validación real.
+    if issued_date != date.today():
+        return
+
+    history = load_validation_history()
+
+    if (
+        not history.empty
+        and "issued_date" in history.columns
+        and (
+            history["issued_date"]
+            == issued_date
+        ).any()
+    ):
+        return
+
+    current_level_issue = current_value(
+        sn_history,
+        "nivel",
+    )
+
+    current_flow_issue = current_value(
+        exog_history,
+        "caudal_m3s",
+    )
+
+    rmse_issue = safe_float(
+        metrics.get("rmse")
+        if isinstance(metrics, dict)
+        else np.nan
+    )
+
+    rows = []
+
+    for _, row in forecast.iterrows():
+
+        prediction = safe_float(
+            row.get("prediction")
+        )
+
+        target_dt = pd.to_datetime(
+            row.get("datetime"),
+            errors="coerce",
+        )
+
+        horizon = safe_float(
+            row.get("horizon_day")
+        )
+
+        if (
+            not np.isfinite(prediction)
+            or pd.isna(target_dt)
+            or not np.isfinite(horizon)
+        ):
+            continue
+
+        rows.append(
+            {
+                "issued_date": issued_date,
+                "generated_at": datetime.now().isoformat(),
+                "target_date": target_dt.date(),
+                "horizon_day": int(horizon),
+                "prediction_m": prediction,
+                "level_at_issue_m": current_level_issue,
+                "flow_at_issue_m3s": current_flow_issue,
+                "model_rmse_m": rmse_issue,
+                "real_level_m": np.nan,
+                "confirmed_at": "",
+                "error_m": np.nan,
+                "abs_error_cm": np.nan,
+            }
+        )
+
+    if not rows:
+        return
+
+    new_rows = pd.DataFrame(rows)
+
+    history = pd.concat(
+        [
+            history,
+            new_rows,
+        ],
+        ignore_index=True,
+    )
+
+    save_validation_history(
+        history
+    )
+
+
+def update_validation_with_real(
+    sn_history,
+):
+    """
+    Completa únicamente el valor REAL cuando INA ya dispone de una
+    lectura para la fecha pronosticada.
+
+    Nunca modifica prediction_m.
+    """
+    history = load_validation_history()
+
+    if history.empty:
+        return history
+
+    observed = sn_history[
+        [
+            "datetime",
+            "nivel",
+        ]
+    ].copy()
+
+    observed["datetime"] = pd.to_datetime(
+        observed["datetime"],
+        errors="coerce",
+    )
+
+    observed["nivel"] = pd.to_numeric(
+        observed["nivel"],
+        errors="coerce",
+    )
+
+    observed = observed.dropna(
+        subset=[
+            "datetime",
+            "nivel",
+        ]
+    )
+
+    if observed.empty:
+        return history
+
+    observed["target_date"] = (
+        observed["datetime"].dt.date
+    )
+
+    # Si hubiera más de una lectura por fecha,
+    # conservar la última disponible de ese día.
+    real_by_date = (
+        observed
+        .sort_values("datetime")
+        .groupby("target_date")["nivel"]
+        .last()
+        .to_dict()
+    )
+
+    changed = False
+
+    for idx, row in history.iterrows():
+
+        target_date = row.get(
+            "target_date"
+        )
+
+        if (
+            pd.isna(row.get("real_level_m"))
+            and target_date in real_by_date
+        ):
+            real_level = safe_float(
+                real_by_date[target_date]
+            )
+
+            prediction = safe_float(
+                row.get("prediction_m")
+            )
+
+            if (
+                np.isfinite(real_level)
+                and np.isfinite(prediction)
+            ):
+                error = (
+                    real_level
+                    - prediction
+                )
+
+                history.at[
+                    idx,
+                    "real_level_m",
+                ] = real_level
+
+                history.at[
+                    idx,
+                    "confirmed_at",
+                ] = datetime.now().isoformat()
+
+                history.at[
+                    idx,
+                    "error_m",
+                ] = error
+
+                history.at[
+                    idx,
+                    "abs_error_cm",
+                ] = abs(error) * 100.0
+
+                changed = True
+
+    if changed:
+        save_validation_history(
+            history
+        )
+
+    return history
+
+
+def validation_metrics(
+    df,
+):
+    confirmed = df.dropna(
+        subset=[
+            "prediction_m",
+            "real_level_m",
+        ]
+    ).copy()
+
+    if confirmed.empty:
+        return {
+            "count": 0,
+            "mae_cm": np.nan,
+            "max_error_cm": np.nan,
+            "bias_cm": np.nan,
+            "within_10cm": np.nan,
+        }
+
+    errors_cm = (
+        (
+            confirmed["real_level_m"]
+            - confirmed["prediction_m"]
+        )
+        * 100.0
+    )
+
+    abs_errors_cm = errors_cm.abs()
+
+    return {
+        "count": len(confirmed),
+        "mae_cm": float(
+            abs_errors_cm.mean()
+        ),
+        "max_error_cm": float(
+            abs_errors_cm.max()
+        ),
+        "bias_cm": float(
+            errors_cm.mean()
+        ),
+        "within_10cm": float(
+            (
+                abs_errors_cm <= 10.0
+            ).mean()
+            * 100.0
+        ),
+    }
+
+
 # ============================================================
 # SESIÓN
 # ============================================================
@@ -1163,6 +1549,30 @@ if (
                 raise RuntimeError(
                     "El modelo no generó pronóstico."
                 )
+
+            # =================================================
+            # VALIDACIÓN OPERATIVA
+            # =================================================
+            # Guardamos el pronóstico ORIGINAL una sola vez.
+            # Esta función NO modifica el DataFrame forecast.
+            register_original_forecast(
+                forecast=
+                    forecast,
+                base_ts=
+                    base_ts,
+                sn_history=
+                    sn_history,
+                exog_history=
+                    exog_history,
+                metrics=
+                    metrics,
+            )
+
+            # Si ya existen fechas pronosticadas que hoy cuentan
+            # con medición INA, se completa el valor real.
+            update_validation_with_real(
+                sn_history
+            )
 
             # =================================================
             # GUARDAR
@@ -1843,10 +2253,16 @@ fig.update_layout(
 )
 
 
-fig.update_yaxes(
-    range=[0, 7],
-    dtick=0.5,
-)
+# Escala dinámica según los valores visibles.
+# Ya no queda fija entre 0 y 7 m.
+if y_range is not None:
+    fig.update_yaxes(
+        range=y_range,
+    )
+else:
+    fig.update_yaxes(
+        autorange=True,
+    )
 
 
 st.plotly_chart(
@@ -1860,6 +2276,382 @@ st.caption(
     "históricos comparables y no una predicción meteorológica "
     "determinística a 60 días."
 )
+
+
+
+# ============================================================
+# VALIDACIÓN HISTÓRICA · ESTIMADO VS REAL
+# ============================================================
+
+st.subheader(
+    "Validación del modelo · estimado vs real"
+)
+
+validation_history = update_validation_with_real(
+    sn_history
+)
+
+if validation_history.empty:
+
+    st.info(
+        "La validación comienza con los pronósticos generados desde V11.17. "
+        "El primer pronóstico queda guardado y se completará con el nivel real "
+        "cuando INA publique la medición correspondiente."
+    )
+
+else:
+
+    issue_dates = sorted(
+        [
+            d
+            for d in validation_history[
+                "issued_date"
+            ].dropna().unique()
+        ],
+        reverse=True,
+    )
+
+    if issue_dates:
+
+        selected_issue_date = st.selectbox(
+            "Pronóstico original emitido el",
+            options=issue_dates,
+            format_func=
+                lambda d:
+                    pd.Timestamp(d).strftime(
+                        "%d/%m/%Y"
+                    ),
+            key="validation_issue_date",
+        )
+
+        validation_run = validation_history[
+            validation_history[
+                "issued_date"
+            ]
+            == selected_issue_date
+        ].copy()
+
+        validation_run = validation_run.sort_values(
+            "target_date"
+        )
+
+        metrics_validation = validation_metrics(
+            validation_run
+        )
+
+        v1, v2, v3, v4, v5 = st.columns(
+            5
+        )
+
+        with v1:
+            st.metric(
+                "Días confirmados",
+                str(
+                    metrics_validation[
+                        "count"
+                    ]
+                ),
+            )
+
+        with v2:
+            st.metric(
+                "Error medio absoluto",
+                (
+                    f"{metrics_validation['mae_cm']:.1f} cm"
+                    if np.isfinite(
+                        metrics_validation[
+                            "mae_cm"
+                        ]
+                    )
+                    else "—"
+                ),
+            )
+
+        with v3:
+            st.metric(
+                "Error máximo",
+                (
+                    f"{metrics_validation['max_error_cm']:.1f} cm"
+                    if np.isfinite(
+                        metrics_validation[
+                            "max_error_cm"
+                        ]
+                    )
+                    else "—"
+                ),
+            )
+
+        with v4:
+            st.metric(
+                "Sesgo",
+                (
+                    f"{metrics_validation['bias_cm']:+.1f} cm"
+                    if np.isfinite(
+                        metrics_validation[
+                            "bias_cm"
+                        ]
+                    )
+                    else "—"
+                ),
+            )
+
+        with v5:
+            st.metric(
+                "Dentro de ±10 cm",
+                (
+                    f"{metrics_validation['within_10cm']:.0f}%"
+                    if np.isfinite(
+                        metrics_validation[
+                            "within_10cm"
+                        ]
+                    )
+                    else "—"
+                ),
+            )
+
+        validation_fig = go.Figure()
+
+        validation_fig.add_trace(
+            go.Scatter(
+                x=pd.to_datetime(
+                    validation_run[
+                        "target_date"
+                    ]
+                ),
+                y=validation_run[
+                    "prediction_m"
+                ],
+                mode=
+                    "lines+markers",
+                name=
+                    "Estimado original",
+                line=dict(
+                    width=3,
+                    color="#2563eb",
+                ),
+                marker=dict(
+                    size=6,
+                ),
+                hovertemplate=(
+                    "%{x|%d/%m/%Y}"
+                    "<br>Estimado: %{y:.2f} m"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+        confirmed_run = validation_run.dropna(
+            subset=[
+                "real_level_m",
+            ]
+        ).copy()
+
+        if not confirmed_run.empty:
+
+            validation_fig.add_trace(
+                go.Scatter(
+                    x=pd.to_datetime(
+                        confirmed_run[
+                            "target_date"
+                        ]
+                    ),
+                    y=confirmed_run[
+                        "real_level_m"
+                    ],
+                    mode=
+                        "lines+markers",
+                    name=
+                        "Real INA",
+                    line=dict(
+                        width=3,
+                        color="#16a34a",
+                    ),
+                    marker=dict(
+                        size=7,
+                    ),
+                    hovertemplate=(
+                        "%{x|%d/%m/%Y}"
+                        "<br>Real INA: %{y:.2f} m"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+        validation_range = dynamic_level_range(
+            validation_run[
+                "prediction_m"
+            ],
+            validation_run[
+                "real_level_m"
+            ],
+        )
+
+        validation_fig.update_layout(
+            height=430,
+            hovermode=
+                "x unified",
+            margin=dict(
+                l=20,
+                r=20,
+                t=20,
+                b=20,
+            ),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0,
+            ),
+            xaxis_title=
+                "Fecha pronosticada",
+            yaxis_title=
+                "Nivel [m]",
+            paper_bgcolor=
+                "#FFFFFF",
+            plot_bgcolor=
+                "#FFFFFF",
+            font=dict(
+                color="#1f2937",
+            ),
+        )
+
+        validation_fig.update_xaxes(
+            gridcolor=
+                "#E5E7EB",
+        )
+
+        if validation_range is not None:
+            validation_fig.update_yaxes(
+                range=
+                    validation_range,
+                gridcolor=
+                    "#E5E7EB",
+            )
+        else:
+            validation_fig.update_yaxes(
+                autorange=True,
+                gridcolor=
+                    "#E5E7EB",
+            )
+
+        st.plotly_chart(
+            validation_fig,
+            use_container_width=True,
+        )
+
+        validation_table = validation_run[
+            [
+                "target_date",
+                "horizon_day",
+                "prediction_m",
+                "real_level_m",
+                "error_m",
+                "abs_error_cm",
+            ]
+        ].copy()
+
+        validation_table[
+            "Fecha"
+        ] = pd.to_datetime(
+            validation_table[
+                "target_date"
+            ]
+        ).dt.strftime(
+            "%d/%m/%Y"
+        )
+
+        validation_table[
+            "Error [cm]"
+        ] = (
+            validation_table[
+                "error_m"
+            ]
+            * 100.0
+        )
+
+        validation_table = (
+            validation_table.rename(
+                columns={
+                    "horizon_day":
+                        "Horizonte [días]",
+                    "prediction_m":
+                        "Estimado [m]",
+                    "real_level_m":
+                        "Real INA [m]",
+                    "abs_error_cm":
+                        "Error absoluto [cm]",
+                }
+            )
+            [
+                [
+                    "Fecha",
+                    "Horizonte [días]",
+                    "Estimado [m]",
+                    "Real INA [m]",
+                    "Error [cm]",
+                    "Error absoluto [cm]",
+                ]
+            ]
+        )
+
+        st.dataframe(
+            validation_table.style.format(
+                {
+                    "Estimado [m]":
+                        "{:.2f}",
+                    "Real INA [m]":
+                        "{:.2f}",
+                    "Error [cm]":
+                        "{:+.1f}",
+                    "Error absoluto [cm]":
+                        "{:.1f}",
+                },
+                na_rep=
+                    "Pendiente",
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.caption(
+            "La línea azul corresponde al pronóstico ORIGINAL guardado el día "
+            "de emisión. Ese valor no se modifica. La línea verde aparece sólo "
+            "cuando existe una medición real de San Nicolás para esa fecha."
+        )
+
+        # Respaldo manual del historial de validación.
+        validation_export = load_validation_history().copy()
+
+        if not validation_export.empty:
+            for col in [
+                "issued_date",
+                "target_date",
+            ]:
+                validation_export[col] = pd.to_datetime(
+                    validation_export[col],
+                    errors="coerce",
+                ).dt.strftime(
+                    "%d/%m/%Y"
+                )
+
+            st.download_button(
+                "⬇️ Descargar historial de validación",
+                data=
+                    validation_export.to_csv(
+                        index=False,
+                        sep=";",
+                        decimal=",",
+                    ).encode(
+                        "utf-8-sig"
+                    ),
+                file_name=
+                    "validacion_pronostico_rio_parana.csv",
+                mime=
+                    "text/csv",
+                use_container_width=
+                    False,
+            )
 
 
 # ============================================================
