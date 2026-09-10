@@ -24,6 +24,8 @@
 
 
 from datetime import date, datetime, timedelta
+from pathlib import Path
+from PIL import Image
 
 import numpy as np
 import pandas as pd
@@ -59,7 +61,7 @@ from src.model import (
 # VERSIÓN
 # ============================================================
 
-APP_VERSION = "V11.18"
+APP_VERSION = "V11.16"
 
 APP_SUBTITLE = (
     "Pronóstico hidrológico multivariable · "
@@ -190,12 +192,20 @@ RAIN_COLUMNS = {
 # CONFIGURACIÓN STREAMLIT
 # ============================================================
 
+BASE_DIR = Path(__file__).resolve().parent
+ICON_PATH = BASE_DIR / "icon_rio_parana.png"
+
+try:
+    PAGE_ICON = Image.open(ICON_PATH)
+except Exception:
+    PAGE_ICON = "🌊"
+
 st.set_page_config(
     page_title=
         "Paraná · San Nicolás",
 
     page_icon=
-        "🌊",
+        PAGE_ICON,
 
     layout=
         "wide",
@@ -665,11 +675,11 @@ def level_state(
 
     if delta_7 > 0.10:
 
-        return "🔴 ↑ Creciente"
+        return "🔵 ↑ Creciente"
 
     if delta_7 < -0.10:
 
-        return "🟢 ↓ Decreciente"
+        return "🔴 ↓ Decreciente"
 
     return "🟢 → Estable"
 
@@ -799,71 +809,6 @@ def dynamic_level_range(
 
 
 # ============================================================
-# CACHE DE RENDIMIENTO · V11.17
-# ============================================================
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def cached_observed(start_date, end_date):
-    return observed(start_date, end_date)
-
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def cached_upstream(start_date, end_date):
-    return get_upstream_history(start_date, end_date)
-
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def cached_exogenous(start_date, end_date, forecast_days, level_history):
-    return get_exogenous_data(
-        start_date, end_date,
-        forecast_days=forecast_days,
-        level_history=level_history,
-    )
-
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def cached_hydrology(sn_hist, upstream_hist, exog_hist, exog_fut, days):
-    return analizar_corrientes_san_nicolas(
-        sn_hist, upstream_hist,
-        exog_history=exog_hist,
-        exog_future=exog_fut,
-        days=days,
-    )
-
-
-@st.cache_resource(show_spinner=False)
-def cached_train(sn_hist_hash, exog_hist_hash, upstream_hist_hash, hydrology_hash,
-                 _sn_hist, _exog_hist, _upstream_hist, _hydrology):
-    return train(
-        _sn_hist,
-        exog_history=_exog_hist,
-        upstream_history=_upstream_hist,
-        hydrology=_hydrology,
-    )
-
-
-def frame_signature(df):
-    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        return "empty"
-    return str(pd.util.hash_pandas_object(df, index=True).sum())
-
-
-def object_signature(obj):
-    if isinstance(obj, pd.DataFrame):
-        return frame_signature(obj)
-    if isinstance(obj, dict):
-        parts = []
-        for key in sorted(obj.keys()):
-            value = obj[key]
-            if isinstance(value, pd.DataFrame):
-                parts.append(f"{key}:{frame_signature(value)}")
-            elif isinstance(value, (str, int, float, bool, type(None))):
-                parts.append(f"{key}:{value}")
-        return "|".join(parts)
-    return str(type(obj))
-
-
-# ============================================================
 # SESIÓN
 # ============================================================
 
@@ -981,13 +926,6 @@ if (
     ]
 ):
 
-    if update_clicked:
-        cached_observed.clear()
-        cached_upstream.clear()
-        cached_exogenous.clear()
-        cached_hydrology.clear()
-        cached_train.clear()
-
     with st.spinner(
         "Consultando INA, lluvia, caudales y entrenando modelo..."
     ):
@@ -1040,7 +978,7 @@ if (
             # SAN NICOLÁS
             # =================================================
 
-            sn_raw, sn_error = cached_observed(
+            sn_raw, sn_error = observed(
 
                 hydrology_start.strftime(
                     "%Y-%m-%d"
@@ -1081,7 +1019,7 @@ if (
             (
                 upstream_history,
                 upstream_meta,
-            ) = cached_upstream(
+            ) = get_upstream_history(
 
                 hydrology_start.strftime(
                     "%Y-%m-%d"
@@ -1128,7 +1066,7 @@ if (
                 exog_history,
                 exog_future,
                 exog_meta,
-            ) = cached_exogenous(
+            ) = get_exogenous_data(
 
                 training_start.strftime(
                     "%Y-%m-%d"
@@ -1158,12 +1096,20 @@ if (
             # =================================================
 
             hydrology = (
-                cached_hydrology(
+                analizar_corrientes_san_nicolas(
+
                     sn_hydrology_history,
+
                     upstream_hydrology_history,
-                    exog_hist=exog_history,
-                    exog_fut=exog_future,
-                    days=FORECAST_DAYS,
+
+                    exog_history=
+                        exog_history,
+
+                    exog_future=
+                        exog_future,
+
+                    days=
+                        FORECAST_DAYS,
                 )
             )
 
@@ -1171,12 +1117,18 @@ if (
             # MODELO
             # =================================================
 
-            models, metrics = cached_train(
-                frame_signature(sn_history),
-                frame_signature(exog_history),
-                frame_signature(upstream_history),
-                object_signature(hydrology),
-                sn_history, exog_history, upstream_history, hydrology,
+            models, metrics = train(
+
+                sn_history,
+
+                exog_history=
+                    exog_history,
+
+                upstream_history=
+                    upstream_history,
+
+                hydrology=
+                    hydrology,
             )
 
             # =================================================
@@ -1470,7 +1422,6 @@ with c1:
         fmt_delta_level(
             delta_1
         ),
-        delta_color="inverse",
     )
 
 
@@ -1487,7 +1438,6 @@ with c2:
         fmt_delta_level(
             delta_7
         ),
-        delta_color="inverse",
     )
 
 
@@ -1902,7 +1852,6 @@ fig.update_yaxes(
 st.plotly_chart(
     fig,
     use_container_width=True,
-    config={"displaylogo": False, "responsive": True, "scrollZoom": False},
 )
 
 
@@ -2844,7 +2793,6 @@ if available_flow_stations:
     st.plotly_chart(
         flow_fig,
         use_container_width=True,
-        config={"displaylogo": False, "responsive": True, "scrollZoom": False},
     )
 
     st.caption(
