@@ -1,0 +1,62 @@
+name: Actualizar Rio Parana
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # Horarios de Argentina:
+    # 06:20, 12:20 y 18:20.
+    - cron: '20 9,15,21 * * *'
+
+    # 23:20 de Argentina.
+    - cron: '20 2 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rio-datos-diarios
+  cancel-in-progress: false
+
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 90
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Calcular y completar lecturas
+        run: python update_daily.py
+
+      - name: Conservar resultados
+        if: always()
+        shell: bash
+        run: |
+          if [ -d data/monthly_v1 ]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+            for result_file in data/monthly_v1/*.json data/monthly_v1/*.json.gz; do
+              if [ -f "$result_file" ]; then
+                git add -f -- "$result_file"
+              fi
+            done
+
+            if ! git diff --cached --quiet; then
+              git commit -m 'Actualizar pronostico y validacion mensual INA'
+              git pull --rebase
+              git push
+            fi
+          fi
