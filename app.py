@@ -768,7 +768,7 @@ level_colors = [
     "#9467bd", "#8c564b", "#e377c2", "#17becf",
 ]
 level_fig = go.Figure()
-cutoff = pd.Timestamp.now(TZ).normalize() - pd.Timedelta(days=level_days - 1)
+cutoff = pd.Timestamp.now(TZ).tz_localize(None).normalize() - pd.Timedelta(days=level_days - 1)
 for idx, station in enumerate(STATIONS):
     if station == "San Nicolás":
         source_frame, level_col = display_history, "nivel"
