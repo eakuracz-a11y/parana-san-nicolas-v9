@@ -10,6 +10,7 @@ from PIL import Image
 
 from src.ina import observed
 from src.monthly import (
+    emission_learning_summary,
     load_latest,
     prepare_actual,
     render_monthly,
@@ -754,6 +755,58 @@ st.caption(
     "ni un pronóstico meteorológico exacto a 60 días."
 )
 
+st.subheader("Niveles observados en cada punto del corredor")
+level_days = st.selectbox(
+    "Período del gráfico",
+    [30, 90, 180, 365],
+    index=1,
+    format_func=lambda days: f"Últimos {days} días",
+    key="corridor_level_days",
+)
+level_colors = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+    "#9467bd", "#8c564b", "#e377c2", "#17becf",
+]
+level_fig = go.Figure()
+cutoff = pd.Timestamp.now(TZ).normalize() - pd.Timedelta(days=level_days - 1)
+for idx, station in enumerate(STATIONS):
+    if station == "San Nicolás":
+        source_frame, level_col = display_history, "nivel"
+    else:
+        source_frame, level_col = upstream_history, LEVEL_COLUMNS[station]
+    if source_frame.empty or level_col not in source_frame:
+        continue
+    series = source_frame[["datetime", level_col]].copy()
+    series["datetime"] = pd.to_datetime(series["datetime"], errors="coerce")
+    series[level_col] = pd.to_numeric(series[level_col], errors="coerce")
+    series = series.dropna(subset=["datetime", level_col])
+    series = series[series["datetime"] >= cutoff]
+    if series.empty:
+        continue
+    level_fig.add_trace(go.Scatter(
+        x=series["datetime"], y=series[level_col], name=station,
+        mode="lines", connectgaps=False,
+        line={"color": level_colors[idx], "width": 2},
+        hovertemplate=f"{station}<br>%{{x|%d/%m/%Y}}<br>Nivel: %{{y:.2f}} m<extra></extra>",
+    ))
+if level_fig.data:
+    level_fig.update_layout(
+        height=480,
+        xaxis_title="Fecha",
+        yaxis_title="Nivel informado [m]",
+        hovermode="x unified",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+        margin={"t": 70, "b": 30},
+    )
+    st.plotly_chart(level_fig, use_container_width=True)
+    st.caption(
+        "Se grafican lecturas observadas disponibles para cada estación; "
+        "los huecos no se interpolan. Los niveles se muestran en metros "
+        "según cada escala local y sirven para comparar su evolución temporal."
+    )
+else:
+    st.info("No hay niveles observados disponibles para los puntos seleccionados.")
+
 st.subheader("Horizontes del pronóstico")
 scenario_rows = []
 
@@ -1031,6 +1084,69 @@ if available:
     show_chart(fig, "Precipitación [mm]", height=380)
 else:
     st.info("No hay datos de lluvia disponibles.")
+
+if available:
+    st.caption(
+        "Acumulados calculados con lluvia diaria disponible para cada estación. "
+        "Representan el entorno del punto de control, no el total de toda su cuenca. "
+        "La lluvia medida y la prevista se mantienen separadas."
+    )
+    rain_totals = []
+    for station in STATIONS:
+        rc = RAIN_COLUMNS[station]
+        rows = valid_rows(exog_history, rc)
+        record = {"Punto de control": station}
+        if rows.empty:
+            for days in (1, 3, 7, 10):
+                record[f"Lluvia medida {days}d [mm]"] = np.nan
+            record["Último dato"] = "Sin datos"
+        else:
+            rows = rows.copy()
+            rows["datetime"] = pd.to_datetime(rows["datetime"]).dt.normalize()
+            end = rows["datetime"].max()
+            for days in (1, 3, 7, 10):
+                window = rows[rows["datetime"].between(end - pd.Timedelta(days=days - 1), end)]
+                record[f"Lluvia medida {days}d [mm]"] = window[rc].sum(min_count=1)
+            record["Último dato"] = end.strftime("%d/%m/%Y")
+
+        frows = valid_rows(exog_future, rc) if rc in exog_future else pd.DataFrame()
+        if not frows.empty:
+            frows = frows.copy()
+            frows["datetime"] = pd.to_datetime(frows["datetime"]).dt.normalize()
+            if "rain_forecast_available" in frows:
+                mask = frows["rain_forecast_available"].astype(str).str.lower().isin(["true", "1", "1.0"])
+                frows = frows[mask]
+        for days in (3, 7, 10):
+            forecast_window = frows[frows["datetime"].between(base_ts.normalize() + pd.Timedelta(days=1), base_ts.normalize() + pd.Timedelta(days=days))] if not frows.empty else frows
+            record[f"Lluvia prevista {days}d [mm]"] = forecast_window[rc].sum(min_count=1) if not forecast_window.empty else np.nan
+        rain_totals.append(record)
+    st.dataframe(pd.DataFrame(rain_totals), hide_index=True, use_container_width=True)
+
+st.subheader("Aprendizaje del pronóstico: emisión frente a INA")
+verification, emission_count = emission_learning_summary()
+st.caption(
+    "Cada emisión conserva su nivel base, pronóstico y una instantánea de niveles aguas arriba, "
+    "lluvia histórica y lluvia prevista disponibles al generarse. Al llegar observaciones INA, "
+    "se calcula el error para la misma fecha objetivo; las predicciones guardadas no se modifican."
+)
+if verification.empty:
+    st.info(f"Hay {emission_count} emisiones archivadas. La comparación aparecerá cuando INA publique niveles reales para las fechas pronosticadas.")
+else:
+    verification["Horizonte [d]"] = pd.to_numeric(verification["Horizonte [d]"], errors="coerce")
+    verification["Error [cm]"] = pd.to_numeric(verification["Error [cm]"], errors="coerce")
+    bins = [(1, 3, "1–3 días"), (4, 7, "4–7 días"), (8, 15, "8–15 días"), (16, 30, "16–30 días"), (31, 60, "31–60 días")]
+    score_rows = []
+    for lower, upper, label in bins:
+        sample = verification[verification["Horizonte [d]"].between(lower, upper)].dropna(subset=["Error [cm]"])
+        score_rows.append({
+            "Horizonte": label,
+            "Pares emisión–real": len(sample),
+            "MAE [cm]": sample["Error [cm]"].abs().mean(),
+            "Sesgo [cm]": sample["Error [cm]"].mean(),
+        })
+    st.dataframe(pd.DataFrame(score_rows), hide_index=True, use_container_width=True)
+    st.caption("Sesgo positivo: el nivel real superó el pronóstico. Sesgo negativo: el pronóstico quedó por encima del nivel real. Este registro mide el desempeño; no aplica correcciones automáticas al pronóstico central.")
+    st.dataframe(verification.sort_values(["Fecha objetivo", "Horizonte [d]"], ascending=[False, True]), hide_index=True, use_container_width=True)
 
 st.subheader("Propagación Corrientes → San Nicolás")
 a, b, c, d = st.columns(4)
