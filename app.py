@@ -17,7 +17,7 @@ from src.monthly import (
 )
 
 
-APP_VERSION = "V11.25"
+APP_VERSION = "V11.26"
 TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -654,6 +654,77 @@ st.caption(
     "La respuesta histórica se aplica sobre variaciones de nivel. "
     "Las estaciones tienen ceros hidrométricos diferentes."
 )
+
+st.markdown("#### Altura y tendencia por punto")
+station_cards = []
+for station in STATIONS:
+    if station == "San Nicolás":
+        source_frame, level_col = display_history, "nivel"
+    else:
+        source_frame, level_col = upstream_history, LEVEL_COLUMNS[station]
+    current_level = last_value(source_frame, level_col)
+    delta_7d = change(source_frame, level_col, 7)
+    direction = trend(delta_7d)
+    color = (
+        "#b42318" if direction.startswith("↑")
+        else "#16803c" if direction.startswith(("→", "↓"))
+        else "#667085"
+    )
+    station_cards.append((station, current_level, delta_7d, direction, color))
+
+for start in range(0, len(station_cards), 4):
+    cols = st.columns(4)
+    for col, (station, current_level, delta_7d, direction, color) in zip(
+        cols, station_cards[start:start + 4]
+    ):
+        value_text = level(current_level) if np.isfinite(current_level) else "—"
+        delta_text = signed(delta_7d) + " / 7 días" if np.isfinite(delta_7d) else "Sin variación disponible"
+        with col:
+            st.markdown(
+                f"""
+                <div style="border:1px solid #d9e2e7;border-radius:12px;padding:12px 14px;margin:4px 0 10px;background:#fff;min-height:102px">
+                  <div style="font-size:0.85rem;color:#475467">{station}</div>
+                  <div style="font-size:1.45rem;font-weight:650;color:#172b4d">{value_text}</div>
+                  <div style="font-size:0.9rem;font-weight:600;color:{color}">{direction} · {delta_text}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+# Referencias de riesgo local para la escala San Nicolás publicadas por INA.
+SN_ALERT_LEVEL = 4.20
+SN_EVACUATION_LEVEL = 5.00
+sn_level_for_alert = (
+    official_value if np.isfinite(official_value)
+    else last_value(display_history, "nivel")
+)
+if np.isfinite(sn_level_for_alert):
+    margin_alert = SN_ALERT_LEVEL - sn_level_for_alert
+    alert_caption = (
+        f"Nivel actual: {sn_level_for_alert:.2f} m · "
+        f"alerta {SN_ALERT_LEVEL:.2f} m · evacuación {SN_EVACUATION_LEVEL:.2f} m"
+    )
+    if sn_level_for_alert >= SN_EVACUATION_LEVEL:
+        st.error("🚨 **Nivel de evacuación alcanzado en San Nicolás.** " + alert_caption)
+    elif sn_level_for_alert >= SN_ALERT_LEVEL:
+        st.warning("⚠️ **Nivel de alerta alcanzado en San Nicolás.** " + alert_caption)
+    elif margin_alert <= 0.50:
+        st.warning(
+            f"⚠️ **San Nicolás se aproxima al nivel de alerta** "
+            f"(faltan {margin_alert:.2f} m). " + alert_caption
+        )
+    else:
+        st.success(
+            f"**San Nicolás por debajo del nivel de alerta** "
+            f"(margen {margin_alert:.2f} m). " + alert_caption
+        )
+    st.caption(
+        "Los niveles de referencia de alerta (4,20 m) y evacuación (5,00 m) "
+        "corresponden a San Nicolás según INA. La alerta es informativa y "
+        "no sustituye los avisos de Defensa Civil."
+    )
+else:
+    st.info("La alerta por altura de San Nicolás aparecerá cuando haya una lectura disponible.")
 
 if forecast.empty or not {"datetime", "prediction"}.issubset(
     forecast.columns
