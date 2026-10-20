@@ -17,7 +17,7 @@ from src.monthly import (
 )
 
 
-APP_VERSION = "V11.26"
+APP_VERSION = "V11.27"
 TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -874,7 +874,14 @@ if level_fig.data:
         height=480,
         xaxis_title="Fecha",
         yaxis_title="Nivel informado [m]",
-        xaxis={"tickformat": "%d/%m", "dtick": 86400000},
+        # Las observaciones siguen siendo diarias; rotulamos cada siete días
+        # para evitar que las fechas se superpongan en ventanas largas.
+        xaxis={
+            "tickformat": "%d/%m",
+            "dtick": 7 * 24 * 60 * 60 * 1000,
+            "tickangle": 0,
+            "automargin": True,
+        },
         hovermode="x unified",
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
         margin={"t": 70, "b": 30},
