@@ -16,7 +16,7 @@ from src.monthly import (
 )
 
 
-APP_VERSION = "V11.22"
+APP_VERSION = "V11.23"
 TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -902,7 +902,9 @@ table(
 )
 st.caption(
     "Los caudales reconstruidos e interpolados son estimaciones. "
-    "Se conserva el origen informado por el cálculo."
+    "Se conserva el origen informado por el cálculo. "
+    "El proxy derivado del nivel de Corrientes no reemplaza un aforo local; "
+    "se muestra como señal de apoyo de calidad limitada."
 )
 
 st.subheader("Caudal histórico y proyección")
