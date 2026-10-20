@@ -344,6 +344,25 @@ def archive_forecast(result):
     generated = datetime.now(TZ)
     stamp = generated.strftime("%Y%m%dT%H%M%S_%f")
 
+    def condition_window(value, days, direction):
+        if not isinstance(value, pd.DataFrame) or value.empty or "datetime" not in value:
+            return value
+        snapshot = value.copy()
+        snapshot["datetime"] = pd.to_datetime(snapshot["datetime"], errors="coerce")
+        origin = pd.Timestamp(result.get("observation_timestamp", generated))
+        if snapshot["datetime"].dt.tz is None and origin.tzinfo is not None:
+            origin = origin.tz_localize(None)
+        if direction == "history":
+            start = origin - pd.Timedelta(days=days - 1)
+            return snapshot[snapshot["datetime"].between(start, origin)].copy()
+        start = origin
+        end = origin + pd.Timedelta(days=days)
+        return snapshot[snapshot["datetime"].between(start, end)].copy()
+
+    upstream = condition_window(result.get("upstream_history"), 60, "history")
+    rain_history = condition_window(result.get("exog_history"), 60, "history")
+    rain_forecast = condition_window(result.get("exog_future"), 10, "future")
+
     write_json(
         DATA / "emissions" / (stamp + ".json.gz"),
         {
@@ -354,9 +373,82 @@ def archive_forecast(result):
             "base_level": result.get("observation_level"),
             "pipeline_version": result.get("pipeline_version"),
             "forecast": result["forecast"],
+            # Instantánea de las condiciones conocidas al emitir.
+            # Los DataFrames se serializan con encode() y quedan congelados
+            # junto a la emisión para evitar reconstruir el pasado con datos
+            # que llegaron después.
+            "conditions_at_issue": {
+                "upstream_history": upstream,
+                "rain_history": rain_history,
+                "rain_forecast": rain_forecast,
+                "hydrology": result.get("hydrology"),
+                "upstream_meta": result.get("upstream_meta"),
+                "exog_meta": result.get("exog_meta"),
+            },
+            "actual_validation": {},
         },
         compressed=True,
     )
+
+
+def refresh_emission_validation(raw, now):
+    """Une observaciones INA a cada emisión sin cambiar sus pronósticos."""
+    cutoff = (pd.Timestamp(now) + pd.Timedelta(days=1)).tz_localize(TZ)
+    values = prepare_actual(raw, cutoff=cutoff)
+    if values.empty:
+        return
+
+    actual_by_day = {
+        row["day"].isoformat(): {
+            "value": float(row["value"]),
+            "timestamp": pd.Timestamp(row["timestamp"]).isoformat(),
+        }
+        for _, row in values.iterrows()
+    }
+    emission_dir = DATA / "emissions"
+    if not emission_dir.exists():
+        return
+
+    for path in sorted(emission_dir.glob("*.json.gz")):
+        emission = read_json(path, compressed=True)
+        forecast = emission.get("forecast")
+        if not isinstance(forecast, pd.DataFrame) or forecast.empty:
+            continue
+        actuals = emission.setdefault("actual_validation", {})
+        for _, row in forecast.iterrows():
+            day = pd.Timestamp(row["datetime"]).date()
+            key = day.isoformat()
+            observed = actual_by_day.get(key)
+            if day <= now and observed:
+                actuals[key] = {
+                    **observed,
+                    "prediction": float(row["prediction"]),
+                    "error_cm": (observed["value"] - float(row["prediction"])) * 100,
+                    "lead_days": int(row.get("horizon_day", (day - pd.Timestamp(emission["base_observation"]).date()).days)),
+                }
+        write_json(path, emission, compressed=True)
+
+
+def emission_learning_summary():
+    """Resume errores por plazo usando solo emisiones con nivel real INA."""
+    emission_dir = DATA / "emissions"
+    records = []
+    if not emission_dir.exists():
+        return pd.DataFrame(), 0
+    count = 0
+    for path in sorted(emission_dir.glob("*.json.gz")):
+        emission = read_json(path, compressed=True)
+        count += 1
+        for day, item in emission.get("actual_validation", {}).items():
+            records.append({
+                "Fecha objetivo": day,
+                "Horizonte [d]": item.get("lead_days"),
+                "Pronóstico [m]": item.get("prediction"),
+                "Real INA [m]": item.get("value"),
+                "Error [cm]": item.get("error_cm"),
+                "Emisión": emission.get("generated_at"),
+            })
+    return pd.DataFrame(records), count
 
 
 def record_actual(raw, now):
@@ -478,6 +570,7 @@ def run_update(
         # Actualiza los meses existentes aunque posteriormente
         # falle el entrenamiento.
         record_actual(raw, today)
+        refresh_emission_validation(raw, today)
 
         if observations_only:
             return latest
