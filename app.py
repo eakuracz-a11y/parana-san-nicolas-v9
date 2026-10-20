@@ -17,7 +17,7 @@ from src.monthly import (
 )
 
 
-APP_VERSION = "V11.24"
+APP_VERSION = "V11.25"
 TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -755,11 +755,11 @@ st.caption(
     "ni un pronóstico meteorológico exacto a 60 días."
 )
 
-st.subheader("Niveles observados en cada punto del corredor")
+st.subheader("Nivel diario por punto de control")
 level_days = st.selectbox(
     "Período del gráfico",
     [30, 90, 180, 365],
-    index=1,
+    index=0,
     format_func=lambda days: f"Últimos {days} días",
     key="corridor_level_days",
 )
@@ -781,12 +781,21 @@ for idx, station in enumerate(STATIONS):
     series[level_col] = pd.to_numeric(series[level_col], errors="coerce")
     series = series.dropna(subset=["datetime", level_col])
     series = series[series["datetime"] >= cutoff]
+    # Una observación por día y estación; si hay varias, conserva la última.
+    series["día"] = series["datetime"].dt.normalize()
+    series = (
+        series.sort_values("datetime")
+        .groupby("día", as_index=False)[level_col]
+        .last()
+        .rename(columns={"día": "datetime"})
+    )
     if series.empty:
         continue
     level_fig.add_trace(go.Scatter(
         x=series["datetime"], y=series[level_col], name=station,
-        mode="lines", connectgaps=False,
+        mode="lines+markers", connectgaps=False,
         line={"color": level_colors[idx], "width": 2},
+        marker={"size": 4},
         hovertemplate=f"{station}<br>%{{x|%d/%m/%Y}}<br>Nivel: %{{y:.2f}} m<extra></extra>",
     ))
 if level_fig.data:
@@ -794,15 +803,16 @@ if level_fig.data:
         height=480,
         xaxis_title="Fecha",
         yaxis_title="Nivel informado [m]",
+        xaxis={"tickformat": "%d/%m", "dtick": 86400000},
         hovermode="x unified",
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
         margin={"t": 70, "b": 30},
     )
     st.plotly_chart(level_fig, use_container_width=True)
     st.caption(
-        "Se grafican lecturas observadas disponibles para cada estación; "
-        "los huecos no se interpolan. Los niveles se muestran en metros "
-        "según cada escala local y sirven para comparar su evolución temporal."
+        "El gráfico muestra una lectura observada por día para cada punto; "
+        "si hubo más de una, se conserva la última del día. Los días sin "
+        "lectura quedan vacíos, sin interpolación. El gráfico mensual de control se mantiene aparte."
     )
 else:
     st.info("No hay niveles observados disponibles para los puntos seleccionados.")
