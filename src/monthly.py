@@ -593,7 +593,6 @@ def month_table(month, today=None):
     )
 
     first = date.fromisoformat(month["issued_date"])
-    rows = []
 
     for day in dates:
         key = day.strftime("%Y-%m-%d")
@@ -628,6 +627,83 @@ def month_table(month, today=None):
         )
 
     return pd.DataFrame(rows)
+
+
+def evaluate_month_transfer(training_month, validation_month):
+    """Evalúa una corrección por horizonte sin alterar pronósticos guardados.
+
+    Usa el sesgo del mes de entrenamiento para estimar correcciones robustas
+    por plazo y mide su efecto, sin reentrenar, sobre un mes posterior.
+    """
+    bins = [(1, 7), (8, 15), (16, 30)]
+
+    def paired(month):
+        issue = pd.Timestamp(month["issued_date"]).date()
+        rows = []
+        for day, estimate in month.get("predictions", {}).items():
+            actual = month.get("actual", {}).get(day, {}).get("value")
+            target = date.fromisoformat(day)
+            if actual is None or target <= issue:
+                continue
+            try:
+                estimate, actual = float(estimate), float(actual)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(estimate) and math.isfinite(actual):
+                rows.append({
+                    "lead": (target - issue).days,
+                    "estimate": estimate,
+                    "actual": actual,
+                    "error_cm": (actual - estimate) * 100.0,
+                })
+        return pd.DataFrame(rows)
+
+    train = paired(training_month)
+    validate = paired(validation_month)
+    corrections = {}
+    rows = []
+
+    for lower, upper in bins:
+        train_bin = train[train["lead"].between(lower, upper)] if not train.empty else train
+        # Require enough daily comparisons and strongly shrink the median
+        # toward zero: one month is not a permanent calibration.
+        raw = float(train_bin["error_cm"].median()) if len(train_bin) >= 4 else 0.0
+        shrink = len(train_bin) / (len(train_bin) + 10.0)
+        correction = float(np.clip(raw * shrink, -5.0, 5.0))
+        corrections[(lower, upper)] = correction
+        test_bin = validate[validate["lead"].between(lower, upper)] if not validate.empty else validate
+    if validate.empty:
+        return {
+            "training_days": len(train),
+            "validation_days": 0,
+            "baseline_mae_cm": np.nan,
+            "adjusted_mae_cm": np.nan,
+            "correction_by_horizon_cm": corrections,
+            "improves": False,
+        }
+
+    adjusted_errors = []
+    for _, row in validate.iterrows():
+        correction = next(
+            (value for (lo, hi), value in corrections.items()
+             if lo <= row["lead"] <= hi),
+            0.0,
+        )
+        adjusted_errors.append(abs(row["actual"] - (row["estimate"] + correction / 100.0)) * 100.0)
+
+    baseline_mae = float(validate["error_cm"].abs().mean())
+    adjusted_mae = float(np.mean(adjusted_errors))
+    return {
+        "training_days": len(train),
+        "validation_days": len(validate),
+        "baseline_mae_cm": baseline_mae,
+        "adjusted_mae_cm": adjusted_mae,
+        "correction_by_horizon_cm": corrections,
+        "improves": (
+            len(validate) >= 20
+            and adjusted_mae <= baseline_mae * 0.95
+        ),
+    }
 
 
 def render_monthly():
@@ -666,11 +742,20 @@ def render_monthly():
     )
 
     try:
-        month = read_json(DATA / (selected + ".json"))
+        selected_path = DATA / (selected + ".json")
+        month = read_json(selected_path)
     except Exception as exc:
         st.error(
             "No se pudo leer el mes. "
             f"No se modificó el archivo: {exc}"
+        )
+        return
+
+    if month.get("month") != selected:
+        st.error(
+            "El mes seleccionado no coincide con el mes guardado en el archivo "
+            f"({selected} vs. {month.get('month', 'sin identificar')}). "
+            "Se detuvo la comparación para evitar mostrar datos del mes equivocado."
         )
         return
 
@@ -788,6 +873,52 @@ def render_monthly():
         "No debe confundirse su error con el de "
         "un pronóstico emitido ayer para hoy."
     )
+
+    # Calibración experimental: septiembre entrena; octubre valida.
+    # Se informa como diagnóstico y nunca cambia la curva de control.
+    train_path = DATA / "2026-09.json"
+    test_path = DATA / "2026-10.json"
+    if train_path.exists() and test_path.exists():
+        try:
+            train_month = read_json(train_path)
+            test_month = read_json(test_path)
+            if train_month.get("month") != "2026-09" or test_month.get("month") != "2026-10":
+                raise ValueError("Los meses dentro de los archivos no coinciden con sus nombres.")
+            learning = evaluate_month_transfer(train_month, test_month)
+            st.markdown("#### Aprendizaje experimental · septiembre → octubre")
+            st.caption(
+                "Septiembre estima una corrección robusta por horizonte; octubre la valida "
+                "como período independiente. Esta evaluación no modifica pronósticos ni la curva de control."
+            )
+            x, y, z = st.columns(3)
+            x.metric("Pares de entrenamiento · septiembre", learning["training_days"])
+            y.metric("Pares de validación · octubre", learning["validation_days"])
+            z.metric(
+                "MAE de octubre · base / ajustado",
+                (
+                    f"{learning['baseline_mae_cm']:.1f} / {learning['adjusted_mae_cm']:.1f} cm"
+                    if np.isfinite(learning["baseline_mae_cm"])
+                    else "Pendiente"
+                ),
+            )
+            correction_rows = [
+                {"Horizonte [días]": f"{lo}–{hi}", "Corrección sugerida [cm]": val}
+                for (lo, hi), val in learning["correction_by_horizon_cm"].items()
+            ]
+            if correction_rows:
+                st.dataframe(
+                    pd.DataFrame(correction_rows).style.format(
+                        {"Corrección sugerida [cm]": "+.1f"}
+                    ),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+            if learning["improves"]:
+                st.success("La corrección mejora el MAE de octubre; queda como candidata para una próxima emisión, sin alterar esta curva.")
+            else:
+                st.info("Con estos datos, la corrección no demuestra una mejora suficiente. Se conserva el pronóstico base.")
+        except Exception as exc:
+            st.warning(f"No se pudo evaluar el aprendizaje septiembre → octubre: {exc}")
 
     with st.expander("Ver valores y errores día a día"):
         display = view.copy()
