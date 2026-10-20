@@ -948,17 +948,17 @@ st.caption(
     "La lluvia acumulada disponible puede estar incompleta."
 )
 
-st.subheader("Caudales · observado / reconstruido")
-table(
-    pd.DataFrame(quality_rows),
-    {"Caudal [m³/s]": "{:,.0f}", "Calidad": "{:.0%}"},
-)
-st.caption(
-    "Los caudales reconstruidos e interpolados son estimaciones. "
-    "Se conserva el origen informado por el cálculo. "
-    "El proxy derivado del nivel de Corrientes no reemplaza un aforo local; "
-    "se muestra como señal de apoyo de calidad limitada."
-)
+with st.expander("Caudales observados y reconstruidos", expanded=False):
+    table(
+        pd.DataFrame(quality_rows),
+        {"Caudal [m³/s]": "{:,.0f}", "Calidad": "{:.0%}"},
+    )
+    st.caption(
+        "Los caudales reconstruidos e interpolados son estimaciones. "
+        "Se conserva el origen informado por el cálculo. "
+        "El proxy derivado del nivel de Corrientes no reemplaza un aforo local; "
+        "se muestra como señal de apoyo de calidad limitada."
+    )
 
 st.subheader("Caudal histórico y proyección")
 available = [
