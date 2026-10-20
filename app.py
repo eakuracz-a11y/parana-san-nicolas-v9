@@ -17,7 +17,7 @@ from src.monthly import (
 )
 
 
-APP_VERSION = "V11.23"
+APP_VERSION = "V11.24"
 TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 BASE_DIR = Path(__file__).resolve().parent
 
