@@ -593,6 +593,7 @@ def month_table(month, today=None):
     )
 
     first = date.fromisoformat(month["issued_date"])
+    rows = []
 
     for day in dates:
         key = day.strftime("%Y-%m-%d")
@@ -661,7 +662,6 @@ def evaluate_month_transfer(training_month, validation_month):
     train = paired(training_month)
     validate = paired(validation_month)
     corrections = {}
-    rows = []
 
     for lower, upper in bins:
         train_bin = train[train["lead"].between(lower, upper)] if not train.empty else train
