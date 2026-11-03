@@ -835,16 +835,16 @@ for threshold, installation, effect in REGATAS_IMPACT_LEVELS:
                 ]
                 if not crossing.empty:
                     estimate = crossing.iloc[0]["fecha"].strftime("%d/%m/%Y")
-                    st.markdown("**Fecha estimada**")
+                    st.markdown("**Fecha estimada de alcanzar ese nivel**")
                     st.write(estimate)
                     st.caption("Curva central")
                 else:
                     horizon_end = regatas_forecast["fecha"].iloc[-1].strftime("%d/%m/%Y")
-                    st.markdown("**Fecha estimada**")
+                    st.markdown("**Fecha estimada de alcanzar ese nivel**")
                     st.write(f"No llega al {horizon_end}")
                     st.caption("Dentro del horizonte")
             else:
-                st.markdown("**Fecha estimada**")
+                st.markdown("**Fecha estimada de alcanzar ese nivel**")
                 st.write("Sin proyección")
 
 st.caption(
