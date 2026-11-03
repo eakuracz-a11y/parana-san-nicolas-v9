@@ -967,6 +967,134 @@ def render_monthly():
         "un pronóstico emitido ayer para hoy."
     )
 
+    # Comparativa mensual y regresión estimado frente a INA real.
+    month_files = {path.stem: path for path in DATA.glob("????-??.json")}
+    comparison_years = sorted({
+        key[:4] for key in month_files
+        if key.endswith("-09") and key[:4] + "-10" in month_files
+    })
+    if comparison_years:
+        st.markdown("#### Comparativa septiembre vs. octubre")
+        year = st.selectbox(
+            "Año de comparación",
+            comparison_years,
+            index=len(comparison_years) - 1,
+            key="comparison_year",
+        )
+        comparison_months = []
+        for month_key, label in [
+            (year + "-09", "Septiembre"),
+            (year + "-10", "Octubre"),
+        ]:
+            saved = read_json(month_files[month_key])
+            if saved.get("month") != month_key:
+                st.warning(f"El archivo {month_key} no coincide con el mes registrado; se omitió.")
+                continue
+            paired = month_table(saved)
+            paired = paired.dropna(subset=["Estimado [m]", "Real INA [m]"]).copy()
+            paired["Mes"] = label
+            paired["Error [cm]"] = (
+                paired["Real INA [m]"] - paired["Estimado [m]"]
+            ) * 100.0
+            comparison_months.append(paired)
+
+        if comparison_months:
+            comparison = pd.concat(comparison_months, ignore_index=True)
+            left, right = st.columns(2)
+            for column, label in zip((left, right), ("Septiembre", "Octubre")):
+                subset = comparison[comparison["Mes"] == label]
+                errors = subset["Error [cm]"]
+                with column:
+                    st.markdown(f"**{label} {year}**")
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Pares INA", len(subset))
+                    m2.metric("MAE", f"{errors.abs().mean():.1f} cm" if len(errors) else "Pendiente")
+                    m3.metric("Sesgo", f"{errors.mean():+.1f} cm" if len(errors) else "Pendiente")
+
+            st.caption(
+                "Se comparan únicamente los días con pronóstico mensual guardado y lectura INA "
+                "disponible para la misma fecha; no se interpolan días faltantes."
+            )
+
+            monthly_fig = go.Figure()
+            month_colors = {"Septiembre": "#38bdf8", "Octubre": "#f59e0b"}
+            for label in ("Septiembre", "Octubre"):
+                subset = comparison[comparison["Mes"] == label]
+                if subset.empty:
+                    continue
+                color = month_colors[label]
+                monthly_fig.add_trace(go.Scatter(
+                    x=subset["Fecha"], y=subset["Estimado [m]"],
+                    name=f"{label} · estimado", mode="lines+markers",
+                    connectgaps=False, line={"color": color, "dash": "dash"},
+                    marker={"symbol": "circle-open"},
+                    hovertemplate="%{x|%d/%m/%Y}<br>Estimado: %{y:.2f} m<extra></extra>",
+                ))
+                monthly_fig.add_trace(go.Scatter(
+                    x=subset["Fecha"], y=subset["Real INA [m]"],
+                    name=f"{label} · real INA", mode="lines+markers",
+                    connectgaps=False, line={"color": color},
+                    hovertemplate="%{x|%d/%m/%Y}<br>Real INA: %{y:.2f} m<extra></extra>",
+                ))
+            monthly_fig.update_layout(
+                height=360, margin={"l": 10, "r": 10, "t": 15, "b": 10},
+                hovermode="x unified", legend={"orientation": "h", "y": 1.12},
+                yaxis_title="Nivel [m]", xaxis={"tickformat": "%d/%m"},
+            )
+            st.plotly_chart(monthly_fig, use_container_width=True)
+
+            st.markdown("##### Regresión lineal · estimado respecto a lo real")
+            regression_fig = go.Figure()
+            for label in ("Septiembre", "Octubre"):
+                subset = comparison[comparison["Mes"] == label]
+                if subset.empty:
+                    continue
+                regression_fig.add_trace(go.Scatter(
+                    x=subset["Real INA [m]"], y=subset["Estimado [m]"],
+                    name=label, mode="markers",
+                    marker={"color": month_colors[label], "size": 9, "opacity": 0.82},
+                    customdata=subset["Fecha"].dt.strftime("%d/%m/%Y"),
+                    hovertemplate="%{customdata}<br>Real: %{x:.2f} m<br>Estimado: %{y:.2f} m<extra>%{fullData.name}</extra>",
+                ))
+
+            actual = comparison["Real INA [m]"].to_numpy(dtype=float)
+            estimate = comparison["Estimado [m]"].to_numpy(dtype=float)
+            if len(comparison) >= 2 and np.ptp(actual) > 0:
+                slope, intercept = np.polyfit(actual, estimate, 1)
+                fitted = slope * actual + intercept
+                ss_total = float(np.sum((estimate - estimate.mean()) ** 2))
+                r_squared = (
+                    1.0 - float(np.sum((estimate - fitted) ** 2)) / ss_total
+                    if ss_total > 0 else np.nan
+                )
+                low, high = float(actual.min()), float(actual.max())
+                regression_fig.add_trace(go.Scatter(
+                    x=[low, high], y=[slope * low + intercept, slope * high + intercept],
+                    name="Regresión lineal", mode="lines",
+                    line={"color": "#f8fafc", "width": 3},
+                    hovertemplate="Estimado = %{y:.3f} m<extra>Regresión</extra>",
+                ))
+                regression_fig.add_trace(go.Scatter(
+                    x=[low, high], y=[low, high], name="Referencia ideal (estimado = real)",
+                    mode="lines", line={"color": "#94a3b8", "dash": "dot"},
+                    hoverinfo="skip",
+                ))
+                st.caption(
+                    f"Modelo conjunto: estimado = {intercept:+.3f} + {slope:.3f} × real; "
+                    f"R² = {r_squared:.3f}. Muestra: {len(comparison)} pares."
+                )
+            else:
+                st.info("Se necesitan al menos dos pares y variación en el nivel real para calcular la regresión.")
+
+            regression_fig.update_layout(
+                height=390, margin={"l": 10, "r": 10, "t": 15, "b": 10},
+                xaxis_title="Nivel real INA [m]", yaxis_title="Nivel estimado [m]",
+                legend={"orientation": "h", "y": 1.12},
+            )
+            st.plotly_chart(regression_fig, use_container_width=True)
+    else:
+        st.info("La comparación septiembre–octubre aparecerá cuando estén guardadas las emisiones mensuales de ambos meses para un mismo año.")
+
     # Calibración experimental: septiembre entrena; octubre valida.
     # Se informa como diagnóstico y nunca cambia la curva de control.
     train_path = DATA / "2026-09.json"
