@@ -17,7 +17,7 @@ from src.monthly import (
 )
 
 
-APP_VERSION = "V11.28"
+APP_VERSION = "V11.29"
 TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -741,54 +741,112 @@ REGATAS_IMPACT_LEVELS = [
 
 st.subheader("Afectación en el Club Regatas San Nicolás")
 st.caption(
-    "Relevamiento del Área de Capitanía CRSN del 03/11/2026: "
-    "2,81 m, con el río creciendo. La lectura INA consultada por la app "
-    "se compara con las cotas informadas para cada instalación."
+    "Cotas relevadas por el Área de Capitanía CRSN el 03/11/2026. "
+    "La lectura INA del tablero se compara con esos niveles."
 )
+
+# Se usa la curva central guardada, por día calendario. La fecha es el
+# primer día proyectado que iguala o supera cada cota; no se extrapola.
+regatas_forecast = pd.DataFrame(columns=["fecha", "prediction"])
+if (
+    isinstance(forecast, pd.DataFrame)
+    and {"datetime", "prediction"}.issubset(forecast.columns)
+):
+    regatas_forecast = valid_rows(forecast, "prediction")
+    if not regatas_forecast.empty:
+        regatas_forecast["fecha"] = regatas_forecast["datetime"].dt.normalize()
+        regatas_forecast = (
+            regatas_forecast[regatas_forecast["fecha"] >= pd.Timestamp(today)]
+            .groupby("fecha", as_index=False)["prediction"]
+            .last()
+            .sort_values("fecha")
+            .reset_index(drop=True)
+        )
 
 regatas_table = pd.DataFrame(
     REGATAS_IMPACT_LEVELS,
     columns=["Cota (m)", "Instalación", "Efecto informado"],
 )
+next_impact = None
 if np.isfinite(sn_level_for_alert):
-    regatas_table["Estado"] = np.where(
-        regatas_table["Cota (m)"] <= sn_level_for_alert,
-        "Cota alcanzada",
-        "Pendiente",
-    )
-    regatas_table["Distancia"] = regatas_table["Cota (m)"].map(
-        lambda threshold: (
-            "—"
-            if threshold <= sn_level_for_alert
-            else f"{threshold - sn_level_for_alert:.2f} m"
-        )
-    )
     upcoming = regatas_table[regatas_table["Cota (m)"] > sn_level_for_alert]
     if not upcoming.empty:
         next_impact = upcoming.iloc[0]
-        st.info(
-            f"Próxima cota: **{next_impact['Instalación']}** "
-            f"a **{next_impact['Cota (m)']:.2f} m** "
-            f"(faltan **{next_impact['Distancia']}** desde el nivel de referencia "
-            f"de {sn_level_for_alert:.2f} m)."
-        )
+
+    if next_impact is not None:
+        next_threshold = float(next_impact["Cota (m)"])
+        next_crossing = regatas_forecast[
+            regatas_forecast["prediction"] >= next_threshold
+        ]
+        if not next_crossing.empty:
+            next_date = next_crossing.iloc[0]["fecha"].strftime("%d/%m/%Y")
+            st.warning(
+                f"**Próxima cota: {next_impact['Instalación']} · "
+                f"{next_threshold:.2f} m.** La curva central la alcanzaría "
+                f"el **{next_date}**."
+            )
+        elif not regatas_forecast.empty:
+            horizon_end = regatas_forecast["fecha"].iloc[-1].strftime("%d/%m/%Y")
+            st.info(
+                f"**Próxima cota: {next_impact['Instalación']} · "
+                f"{next_threshold:.2f} m.** La proyección central no la alcanza "
+                f"hasta el **{horizon_end}**; no se estima una fecha fuera "
+                "del horizonte disponible."
+            )
+        else:
+            st.info(
+                f"**Próxima cota: {next_impact['Instalación']} · "
+                f"{next_threshold:.2f} m.** No hay una proyección diaria "
+                "disponible para estimar la fecha."
+            )
     else:
-        st.warning(
-            "La lectura de referencia alcanza o supera todas las cotas "
+        st.error(
+            "La lectura INA actual ya alcanza o supera todas las cotas "
             "informadas para las instalaciones del club."
         )
 else:
-    regatas_table["Estado"] = "Sin lectura para comparar"
-    regatas_table["Distancia"] = "—"
-    st.info("Las cotas se muestran sin estado porque no hay una lectura disponible.")
+    st.info("No hay lectura INA disponible para calcular la próxima afectación.")
 
-st.dataframe(
-    regatas_table[
-        ["Cota (m)", "Instalación", "Efecto informado", "Estado", "Distancia"]
-    ],
-    hide_index=True,
-    use_container_width=True,
+st.caption(
+    "Cada fecha corresponde al primer día de la curva central del pronóstico "
+    "en que se iguala o supera la cota. La estimación se limita al horizonte "
+    "publicado por la app; no se prolonga la tendencia matemáticamente."
 )
+
+for threshold, installation, effect in REGATAS_IMPACT_LEVELS:
+    with st.container(border=True):
+        cota_col, impact_col, estimate_col = st.columns([0.9, 3.1, 1.5])
+        with cota_col:
+            st.markdown(f"### {threshold:.2f} m")
+            if np.isfinite(sn_level_for_alert) and sn_level_for_alert >= threshold:
+                st.markdown("🔴 **Alcanzada**")
+            else:
+                st.markdown("🟢 **Pendiente**")
+        with impact_col:
+            st.markdown(f"**{installation}**")
+            st.write(effect)
+        with estimate_col:
+            if np.isfinite(sn_level_for_alert) and sn_level_for_alert >= threshold:
+                st.markdown("**Estado actual**")
+                st.write(f"INA: {sn_level_for_alert:.2f} m")
+            elif not regatas_forecast.empty:
+                crossing = regatas_forecast[
+                    regatas_forecast["prediction"] >= threshold
+                ]
+                if not crossing.empty:
+                    estimate = crossing.iloc[0]["fecha"].strftime("%d/%m/%Y")
+                    st.markdown("**Fecha estimada**")
+                    st.write(estimate)
+                    st.caption("Curva central")
+                else:
+                    horizon_end = regatas_forecast["fecha"].iloc[-1].strftime("%d/%m/%Y")
+                    st.markdown("**Fecha estimada**")
+                    st.write(f"No llega al {horizon_end}")
+                    st.caption("Dentro del horizonte")
+            else:
+                st.markdown("**Fecha estimada**")
+                st.write("Sin proyección")
+
 st.caption(
     "Fuente: Informe Área Capitanía CRSN, 03/11/2026. "
     "Las cotas describen el relevamiento del club y no sustituyen "
