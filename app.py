@@ -17,7 +17,7 @@ from src.monthly import (
 )
 
 
-APP_VERSION = "V11.27"
+APP_VERSION = "V11.28"
 TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -725,6 +725,75 @@ if np.isfinite(sn_level_for_alert):
     )
 else:
     st.info("La alerta por altura de San Nicolás aparecerá cuando haya una lectura disponible.")
+
+# Referencias de afectación informadas por el Área de Capitanía del CRSN.
+REGATAS_IMPACT_LEVELS = [
+    (3.30, "Isla chancha de fútbol", "El agua ingresa por el fondo."),
+    (3.80, "Isla de baños de fútbol y caleta", "El agua ingresa por la caleta."),
+    (4.00, "Canchas de rugby", "Comienza a haber agua en las canchas."),
+    (4.10, "Calle del continente", "El agua llega a la calle."),
+    (4.10, "Pileta", "La pileta queda tapada."),
+    (4.10, "Playón", "Cota informada para el playón."),
+    (4.20, "Estadio La Ribera", "Hay agua debajo de la cancha; se contiene con bombas y bolsas de arena en las puertas."),
+    (4.30, "Cantina", "El agua llega a la puerta; se contiene con una pared en el acceso."),
+    (4.50, "Secretaría, Tesorería y Deportes", "Se colocan contenciones."),
+]
+
+st.subheader("Afectación en el Club Regatas San Nicolás")
+st.caption(
+    "Relevamiento del Área de Capitanía CRSN del 03/11/2026: "
+    "2,81 m, con el río creciendo. La lectura INA consultada por la app "
+    "se compara con las cotas informadas para cada instalación."
+)
+
+regatas_table = pd.DataFrame(
+    REGATAS_IMPACT_LEVELS,
+    columns=["Cota (m)", "Instalación", "Efecto informado"],
+)
+if np.isfinite(sn_level_for_alert):
+    regatas_table["Estado"] = np.where(
+        regatas_table["Cota (m)"] <= sn_level_for_alert,
+        "Cota alcanzada",
+        "Pendiente",
+    )
+    regatas_table["Distancia"] = regatas_table["Cota (m)"].map(
+        lambda threshold: (
+            "—"
+            if threshold <= sn_level_for_alert
+            else f"{threshold - sn_level_for_alert:.2f} m"
+        )
+    )
+    upcoming = regatas_table[regatas_table["Cota (m)"] > sn_level_for_alert]
+    if not upcoming.empty:
+        next_impact = upcoming.iloc[0]
+        st.info(
+            f"Próxima cota: **{next_impact['Instalación']}** "
+            f"a **{next_impact['Cota (m)']:.2f} m** "
+            f"(faltan **{next_impact['Distancia']}** desde el nivel de referencia "
+            f"de {sn_level_for_alert:.2f} m)."
+        )
+    else:
+        st.warning(
+            "La lectura de referencia alcanza o supera todas las cotas "
+            "informadas para las instalaciones del club."
+        )
+else:
+    regatas_table["Estado"] = "Sin lectura para comparar"
+    regatas_table["Distancia"] = "—"
+    st.info("Las cotas se muestran sin estado porque no hay una lectura disponible.")
+
+st.dataframe(
+    regatas_table[
+        ["Cota (m)", "Instalación", "Efecto informado", "Estado", "Distancia"]
+    ],
+    hide_index=True,
+    use_container_width=True,
+)
+st.caption(
+    "Fuente: Informe Área Capitanía CRSN, 03/11/2026. "
+    "Las cotas describen el relevamiento del club y no sustituyen "
+    "las indicaciones operativas de Capitanía o Defensa Civil."
+)
 
 if forecast.empty or not {"datetime", "prediction"}.issubset(
     forecast.columns
